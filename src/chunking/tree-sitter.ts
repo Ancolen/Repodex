@@ -23,6 +23,11 @@ import rubyWasm from "tree-sitter-wasms/out/tree-sitter-ruby.wasm" with { type: 
 import kotlinWasm from "tree-sitter-wasms/out/tree-sitter-kotlin.wasm" with { type: "file" };
 import swiftWasm from "tree-sitter-wasms/out/tree-sitter-swift.wasm" with { type: "file" };
 import scalaWasm from "tree-sitter-wasms/out/tree-sitter-scala.wasm" with { type: "file" };
+// GDScript is vendored (not from tree-sitter-wasms, which has no gdscript and is
+// frozen at 0.1.13). Built from tree-sitter-gdscript@2.0.0 (parser.c LANGUAGE_VERSION 14,
+// external scanner included) by scripts/build-gdscript-wasm.sh — ABI must stay in
+// web-tree-sitter 0.22.6's 13-14 window.
+import gdWasm from "./wasm/tree-sitter-gdscript.wasm" with { type: "file" };
 
 /** Grammar name → embedded wasm file path. */
 const GRAMMAR_WASM: Record<string, string> = {
@@ -41,6 +46,7 @@ const GRAMMAR_WASM: Record<string, string> = {
   kotlin: kotlinWasm,
   swift: swiftWasm,
   scala: scalaWasm,
+  gdscript: gdWasm,
 };
 
 /**
@@ -58,7 +64,7 @@ export const EXT_TO_GRAMMAR: Record<string, string> = {
   ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".hpp": "cpp", ".hh": "cpp",
   ".c": "c", ".h": "c", ".cs": "c_sharp", ".php": "php", ".rb": "ruby",
   ".kt": "kotlin", ".kts": "kotlin", ".swift": "swift",
-  ".scala": "scala", ".sc": "scala",
+  ".scala": "scala", ".sc": "scala", ".gd": "gdscript",
 };
 
 let initPromise: Promise<void> | null = null;

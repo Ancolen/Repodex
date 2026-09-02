@@ -335,3 +335,114 @@ object Main { def run(): Unit = {} }
     expect(syms).toContain("class:Main"); // object → class
   });
 });
+
+describe("multi-language chunking — GDScript (Godot)", () => {
+  const player = `@tool
+class_name Player
+extends "res://scripts/character.gd"
+
+signal health_changed(new_health: int)
+
+enum State { IDLE, RUN, JUMP }
+
+const MAX_SPEED: float = 125.0
+const CharacterScene = preload("res://scripts/character.gd")
+
+@export var speed: float = 10.0
+@export_range(0, 100) var armor: int = 0
+@onready var sprite: Node = $Sprite
+
+var hits: int = 0
+var state: State = State.IDLE
+
+func _init(start_armor: int = 0) -> void:
+	armor = start_armor
+
+func _ready() -> void:
+	health_changed.connect(_on_health_changed)
+	state = State.RUN
+
+func _process(delta: float) -> void:
+	position.x += speed * delta
+
+func take_damage(amount: int) -> bool:
+	hits += amount
+	health_changed.emit(hits)
+	return hits >= armor
+
+func _on_health_changed(new_health: int) -> void:
+	print(new_health)
+
+func next_state() -> void:
+	match state:
+		IDLE:
+			state = State.RUN
+		RUN:
+			state = State.JUMP
+		_:
+			state = State.IDLE
+
+func double_all(items: Array) -> Array:
+	return items.map(func(item): return item * 2)
+
+class InnerCache extends Resource:
+	var entries: Dictionary = {}
+
+	func get_entry(key: String) -> Variant:
+		return entries.get(key)
+`;
+
+  test("class_name, extends-file, signals, enum, funcs, constructor, inner class are named", async () => {
+    const chunks = await chunkCode("player.gd", player);
+    expect(chunks.length).toBeGreaterThan(0);
+    expect(chunks.every((c) => c.language === "gdscript")).toBe(true);
+    const syms = symbolsOf(chunks);
+    expect(syms).toContain("class:Player");
+    expect(syms).toContain("signal:health_changed");
+    expect(syms).toContain("enum:State");
+    expect(syms).toContain("method:_init"); // constructor_definition, name special-cased
+    expect(syms).toContain("function:_ready");
+    expect(syms).toContain("function:_process");
+    expect(syms).toContain("function:take_damage");
+    expect(syms).toContain("function:_on_health_changed");
+    expect(syms).toContain("function:next_state");
+    expect(syms).toContain("function:double_all");
+    expect(syms).toContain("class:InnerCache");
+  });
+
+  test("annotations, extends, consts and vars land in symbol-less chunks", async () => {
+    const chunks = await chunkCode("player.gd", player);
+    const loose = chunks.filter((c) => !c.symbolName);
+    expect(loose.length).toBeGreaterThan(0);
+    // Loose chunks still carry the content (searchable) and the language tag.
+    expect(loose.every((c) => c.language === "gdscript")).toBe(true);
+    const joined = loose.map((c) => c.content).join("\n");
+    expect(joined).toContain("extends \"res://scripts/character.gd\"");
+    expect(joined).toContain("const MAX_SPEED");
+    expect(joined).toContain("@export var speed");
+    expect(joined).toContain("@onready var sprite");
+  });
+
+  test("scene/resource/shader files fall back to character chunking without a symbol", async () => {
+    const src = `[gd_scene format=3]\n\n[node name="Player" type="Node2D"]\nscript = ExtResource("1_abcde")\n`;
+    const chunks = await chunkCode("main.tscn", src);
+    expect(chunks.length).toBeGreaterThan(0);
+    expect(chunks.every((c) => c.symbolName === undefined)).toBe(true);
+  });
+
+  // [LIMITATION] — locked-down grammar behavior (tree-sitter-gdscript@2.0.0):
+  // `match` patterns with dotted attributes (State.IDLE:) produce ERROR nodes;
+  // they stay inside the enclosing function chunk and never surface as symbols.
+  // If the vendored grammar is ever upgraded, re-check this.
+  test("[LIMITATION] match with dotted enum patterns does not break function extraction", async () => {
+    const src = `func next_state() -> void:
+	match state:
+		State.IDLE:
+			state = State.RUN
+		_:
+			state = State.JUMP
+`;
+    const syms = symbolsOf(await chunkCode("sm.gd", src));
+    expect(syms).toContain("function:next_state");
+  });
+});

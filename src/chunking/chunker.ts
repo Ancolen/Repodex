@@ -5,6 +5,21 @@ import { EXT_TO_GRAMMAR, languageForExt, getParser } from "./tree-sitter";
 
 type Node = Parser.SyntaxNode;
 
+/**
+ * Language labels for allowed extensions that have no tree-sitter grammar
+ * (character-fallback chunking). Grammar extensions take their label from
+ * `EXT_TO_GRAMMAR`; these get one so the `language` column stays meaningful
+ * and `language` filters work for doc corpora (engine class reference dumps,
+ * .rst documentation trees). Extensions not listed here (e.g. Godot's
+ * .tscn/.tres/.gdshader) stay unlabeled like before.
+ */
+export const TEXT_LANG_BY_EXT: Record<string, string> = {
+  ".xml": "xml",
+  ".rst": "rst",
+  ".json": "json",
+  ".md": "markdown",
+};
+
 /** An AST-based code chunk. */
 export interface Chunk {
   content: string;
@@ -36,6 +51,8 @@ const CLASS_LIKE = new Set([
   "protocol_declaration",
   // Scala
   "object_definition", "trait_definition",
+  // GDScript (inner class, `class_name X` header, enum)
+  "class_name_statement", "enum_definition",
 ]);
 
 // Function-like (callable definitions).
@@ -46,6 +63,8 @@ const FUNCTION_LIKE = new Set([
   "function_signature", "fn_item",
   // Ruby
   "method", "singleton_method",
+  // GDScript (`func _init` constructor, `signal x(...)` declaration)
+  "constructor_definition", "signal_statement",
 ]);
 
 // Not symbols themselves, but containers that must be DESCENDED INTO (namespace/module).
@@ -64,8 +83,30 @@ const WRAPPERS = new Set([
   "template_declaration", // C++ `template<...> <decl>`
 ]);
 
-const MAX = CONFIG.MAX_CHUNK_SIZE;
-const STEP = Math.max(1, CONFIG.MAX_CHUNK_SIZE - CONFIG.OVERLAP_SIZE);
+/** Approximate chars-per-token for the chunk-size guard (no tokenizer bundled). */
+export const CHARS_PER_TOKEN = 4;
+
+/** Rough token count of `text` (chars / charsPerToken, rounded up). */
+export function estimateTokens(text: string, charsPerToken = CHARS_PER_TOKEN): number {
+  return Math.ceil(text.length / charsPerToken);
+}
+
+/**
+ * Effective per-chunk char limit: the smaller of the configured char limit and
+ * the approximate token cap (so a large maxChunkSize can't silently exceed the
+ * embedding model's token window). Char-limit-binding by default
+ * (512 tokens * 4 chars/token = 2048 > default maxChunkSize 1500).
+ */
+export function effectiveChunkChars(
+  maxChunkSize: number,
+  maxChunkTokens: number,
+  charsPerToken = CHARS_PER_TOKEN,
+): number {
+  return Math.min(maxChunkSize, Math.max(1, maxChunkTokens * charsPerToken));
+}
+
+const MAX = effectiveChunkChars(CONFIG.MAX_CHUNK_SIZE, CONFIG.MAX_CHUNK_TOKENS, CHARS_PER_TOKEN);
+const STEP = Math.max(1, MAX - CONFIG.OVERLAP_SIZE);
 
 function countLines(s: string): number {
   let n = 0;
@@ -84,6 +125,7 @@ function symbolTypeOf(nodeType: string): string {
     return "class"; // includes class/record/object
   }
   if (FUNCTION_LIKE.has(nodeType)) {
+    if (nodeType.includes("signal")) return "signal"; // GDScript signal declaration
     if (nodeType.includes("constructor") || nodeType.includes("destructor")) return "method";
     if (nodeType.includes("method")) return "method"; // method/singleton_method/method_declaration
     return "function";
@@ -112,6 +154,10 @@ function unwrap(node: Node): Node {
  * embedded in nested declarators), (3) the first identifier-like child.
  */
 function nameOf(node: Node): string | undefined {
+  // GDScript `func _init` is a literal token (the constructor node carries no
+  // name field and no name child).
+  if (node.type === "constructor_definition") return "_init";
+
   const byField = node.childForFieldName("name");
   if (byField?.text) return byField.text;
 
@@ -127,6 +173,12 @@ function nameOf(node: Node): string | undefined {
     if (!next || next === decl) break;
     decl = next;
   }
+
+  // GDScript `class_name X` / `signal x(...)` carry the name as a bare `name`-typed
+  // child (not a field). No other bundled grammar exposes such a child on a
+  // definition node without a `name` field, so this fallback is inert elsewhere.
+  const bareName = node.namedChildren.find((c) => c.type === "name");
+  if (bareName?.text) return bareName.text;
 
   const id = node.namedChildren.find((c) => /identifier/.test(c.type));
   return id?.text;
@@ -311,7 +363,7 @@ function fallbackChunks(content: string, language?: string): Chunk[] {
 export async function chunkCode(filePath: string, content: string): Promise<Chunk[]> {
   if (content.trim().length === 0) return [];
   const ext = path.extname(filePath).toLowerCase();
-  const language = EXT_TO_GRAMMAR[ext];
+  const language = EXT_TO_GRAMMAR[ext] ?? TEXT_LANG_BY_EXT[ext];
 
   let lang: Parser.Language | null = null;
   try {

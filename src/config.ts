@@ -23,6 +23,12 @@ export interface IndexerConfig {
   indexing: {
     maxChunkSize: number;
     overlapSize: number;
+    /**
+     * Approximate per-chunk token cap. The effective chunk size is
+     * min(maxChunkSize, maxChunkTokens * CHARS_PER_TOKEN), so a large
+     * maxChunkSize can't silently exceed the embedding model's token window.
+     */
+    maxChunkTokens: number;
     allowedExtensions: string[];
     ignoredDirs: string[];
     /** An ANN vector index is built when a table reaches this row count. */
@@ -35,26 +41,57 @@ export interface IndexerConfig {
     jobConcurrency: number;
   };
   watcher: { debounceMs: number };
+  search: {
+    rerank: {
+      /** If true, a second-stage reranker refines results by default (per-call override via the search API). */
+      enabled: boolean;
+      /** Ollama tag of the causal-LM reranker model (scored via yes/no logprobs). Empty string disables. */
+      model: string;
+      /** How many of the top candidates to rerank before slicing to the requested `limit`. */
+      topK: number;
+      /** Max concurrent reranker calls to Ollama. */
+      concurrency: number;
+    };
+    mmr: {
+      /** If true, MMR diversifies the top results by default (per-call override via the search API). */
+      enabled: boolean;
+      /** Relevance vs diversity tradeoff: 1 = pure relevance, 0 = pure diversity. */
+      lambda: number;
+      /** How many of the top candidates to diversify over before slicing to the requested `limit`. */
+      topK: number;
+    };
+  };
 }
 
 const DEFAULTS: IndexerConfig = {
   home: path.join(os.homedir(), ".mcp-indexer"),
-  server: { host: "127.0.0.1", mcpPort: 3001, controlPort: 3002 },
+  server: { host: "127.0.0.1", mcpPort: 9371, controlPort: 9372 },
   ollama: { url: "http://127.0.0.1:11434", model: "qwen3-embedding", batchSize: 8, concurrency: 4 },
   embedding: { cacheMax: 50000 },
   indexing: {
     maxChunkSize: 1500,
     overlapSize: 200,
+    maxChunkTokens: 512,
     allowedExtensions: [
       ".js", ".jsx", ".ts", ".tsx", ".py", ".go", ".rs",
       ".java", ".cpp", ".cc", ".c", ".h", ".hpp",
       ".cs", ".php", ".rb",
       ".kt", ".kts", ".swift", ".scala", ".sc",
+      ".gd",
+      // Godot text formats without a grammar — character-fallback chunking
+      // (like .json/.md): shaders, scenes, resources, project.godot.
+      ".gdshader", ".tscn", ".tres", ".godot",
       ".json", ".md",
+      // Doc formats without a grammar — character-fallback chunking with a
+      // language label (see TEXT_LANG_BY_EXT): engine class reference (.xml,
+      // e.g. `godot --doctool` dumps) and reStructuredText (.rst, e.g.
+      // godotengine/godot-docs).
+      ".xml", ".rst",
     ],
     ignoredDirs: [
       "node_modules", ".git", ".lancedb", "dist", "build",
       "out", ".cache", "target", ".claude", ".mcp-indexer",
+      ".godot",
     ],
     vectorIndexThreshold: 50000,
     respectGitignore: true,
@@ -62,6 +99,10 @@ const DEFAULTS: IndexerConfig = {
     jobConcurrency: 2,
   },
   watcher: { debounceMs: 300 },
+  search: {
+    rerank: { enabled: true, model: "qwen3-reranker-q8", topK: 20, concurrency: 4 },
+    mmr: { enabled: true, lambda: 0.5, topK: 20 },
+  },
 };
 
 /** Editable default YAML template (written if the file does not exist). */
@@ -88,6 +129,7 @@ embedding:
 indexing:
   maxChunkSize: ${DEFAULTS.indexing.maxChunkSize}
   overlapSize: ${DEFAULTS.indexing.overlapSize}
+  maxChunkTokens: ${DEFAULTS.indexing.maxChunkTokens}            # approximate per-chunk token cap (effective chunk size = min(maxChunkSize, maxChunkTokens*4)); raise/lower to tune, then reindex
   allowedExtensions:
 ${DEFAULTS.indexing.allowedExtensions.map((e) => `    - "${e}"`).join("\n")}
   ignoredDirs:
@@ -96,6 +138,17 @@ ${DEFAULTS.indexing.ignoredDirs.map((d) => `    - "${d}"`).join("\n")}
   respectGitignore: ${DEFAULTS.indexing.respectGitignore}           # also obey .gitignore rules
   gitTrackedOnly: ${DEFAULTS.indexing.gitTrackedOnly}            # index only git-tracked files (in git repos)
   jobConcurrency: ${DEFAULTS.indexing.jobConcurrency}              # number of indexing jobs running at the same time (worker pool)
+
+search:
+  rerank:
+    enabled: ${DEFAULTS.search.rerank.enabled}            # on by default; auto-disables if the reranker model is absent in Ollama
+    model: ${DEFAULTS.search.rerank.model}    # causal-LM reranker; scored via yes/no token logprobs
+    topK: ${DEFAULTS.search.rerank.topK}                  # how many candidates to rerank before slicing to limit
+    concurrency: ${DEFAULTS.search.rerank.concurrency}              # concurrent reranker calls to Ollama
+  mmr:
+    enabled: true              # diversify the top results (Maximal Marginal Relevance)
+    lambda: 0.5                # 1.0 = pure relevance, 0.0 = pure diversity
+    topK: 20                   # how many candidates to diversify over before slicing to limit
 
 watcher:
   debounceMs: ${DEFAULTS.watcher.debounceMs}        # reindexing delay after a file change
@@ -172,6 +225,8 @@ export const RESOLVED: IndexerConfig = {
   indexing: {
     maxChunkSize: y.indexing?.maxChunkSize ?? DEFAULTS.indexing.maxChunkSize,
     overlapSize: y.indexing?.overlapSize ?? DEFAULTS.indexing.overlapSize,
+    maxChunkTokens:
+      num(process.env.MAX_CHUNK_TOKENS) ?? y.indexing?.maxChunkTokens ?? DEFAULTS.indexing.maxChunkTokens,
     allowedExtensions: strArray(y.indexing?.allowedExtensions) ?? DEFAULTS.indexing.allowedExtensions,
     ignoredDirs: strArray(y.indexing?.ignoredDirs) ?? DEFAULTS.indexing.ignoredDirs,
     vectorIndexThreshold:
@@ -192,6 +247,28 @@ export const RESOLVED: IndexerConfig = {
       DEFAULTS.indexing.jobConcurrency,
   },
   watcher: { debounceMs: y.watcher?.debounceMs ?? DEFAULTS.watcher.debounceMs },
+  search: {
+    rerank: {
+      enabled:
+        typeof y.search?.rerank?.enabled === "boolean"
+          ? y.search.rerank.enabled
+          : DEFAULTS.search.rerank.enabled,
+      model: process.env.RERANK_MODEL ?? y.search?.rerank?.model ?? DEFAULTS.search.rerank.model,
+      topK: num(process.env.RERANK_TOP_K) ?? y.search?.rerank?.topK ?? DEFAULTS.search.rerank.topK,
+      concurrency:
+        num(process.env.RERANK_CONCURRENCY) ??
+        y.search?.rerank?.concurrency ??
+        DEFAULTS.search.rerank.concurrency,
+    },
+    mmr: {
+      enabled:
+        typeof y.search?.mmr?.enabled === "boolean"
+          ? y.search.mmr.enabled
+          : DEFAULTS.search.mmr.enabled,
+      lambda: num(process.env.MMR_LAMBDA) ?? y.search?.mmr?.lambda ?? DEFAULTS.search.mmr.lambda,
+      topK: num(process.env.MMR_TOP_K) ?? y.search?.mmr?.topK ?? DEFAULTS.search.mmr.topK,
+    },
+  },
 };
 
 /**
@@ -213,12 +290,22 @@ export const CONFIG = {
   GLOBAL_IGNORED_DIRS: RESOLVED.indexing.ignoredDirs,
   MAX_CHUNK_SIZE: RESOLVED.indexing.maxChunkSize,
   OVERLAP_SIZE: RESOLVED.indexing.overlapSize,
+  MAX_CHUNK_TOKENS: RESOLVED.indexing.maxChunkTokens,
   VECTOR_INDEX_THRESHOLD: RESOLVED.indexing.vectorIndexThreshold,
   RESPECT_GITIGNORE: RESOLVED.indexing.respectGitignore,
   GIT_TRACKED_ONLY: RESOLVED.indexing.gitTrackedOnly,
   JOB_CONCURRENCY: RESOLVED.indexing.jobConcurrency,
 
   WATCH_DEBOUNCE_MS: RESOLVED.watcher.debounceMs,
+
+  RERANK_ENABLED: RESOLVED.search.rerank.enabled,
+  RERANK_MODEL: RESOLVED.search.rerank.model,
+  RERANK_TOP_K: RESOLVED.search.rerank.topK,
+  RERANK_CONCURRENCY: RESOLVED.search.rerank.concurrency,
+
+  MMR_ENABLED: RESOLVED.search.mmr.enabled,
+  MMR_LAMBDA: RESOLVED.search.mmr.lambda,
+  MMR_TOP_K: RESOLVED.search.mmr.topK,
 
   HOST: RESOLVED.server.host,
   MCP_PORT: RESOLVED.server.mcpPort,

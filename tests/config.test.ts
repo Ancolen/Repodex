@@ -33,8 +33,9 @@ describe("config — defaults and environment variable overrides", () => {
     expect(CONFIG.EMBED_CONCURRENCY).toBe(4);
     expect(CONFIG.MAX_CHUNK_SIZE).toBe(1500);
     expect(CONFIG.OVERLAP_SIZE).toBe(200);
-    expect(CONFIG.MCP_PORT).toBe(3001);
-    expect(CONFIG.CONTROL_PORT).toBe(3002);
+    expect(CONFIG.MAX_CHUNK_TOKENS).toBe(512);
+    expect(CONFIG.MCP_PORT).toBe(9371);
+    expect(CONFIG.CONTROL_PORT).toBe(9372);
   });
 
   test("OLLAMA_MODEL / EMBED_* environment variables override defaults", async () => {
@@ -74,11 +75,20 @@ describe("config — defaults and environment variable overrides", () => {
     expect(CONFIG.META_DB_PATH).toBe(join(home, "mcp-test-home", "meta.db"));
   });
 
-  test("allowedExtensions default covers extensions of the 12 grammars", async () => {
+  test("allowedExtensions default covers all grammar extensions", async () => {
     const { CONFIG } = await runConfig({});
-    for (const e of [".ts", ".js", ".py", ".go", ".rs", ".cs", ".java", ".cpp", ".c", ".php", ".rb"]) {
+    for (const e of [".ts", ".js", ".py", ".go", ".rs", ".cs", ".java", ".cpp", ".c", ".php", ".rb", ".kt", ".swift", ".scala"]) {
       expect(CONFIG.ALLOWED_EXTENSIONS).toContain(e);
     }
+    // Godot: .gd (AST grammar) + text-fallback formats; .godot cache dir is ignored.
+    for (const e of [".gd", ".gdshader", ".tscn", ".tres", ".godot"]) {
+      expect(CONFIG.ALLOWED_EXTENSIONS).toContain(e);
+    }
+    // Doc formats without a grammar (character fallback + language label).
+    for (const e of [".xml", ".rst"]) {
+      expect(CONFIG.ALLOWED_EXTENSIONS).toContain(e);
+    }
+    expect(CONFIG.GLOBAL_IGNORED_DIRS).toContain(".godot");
   });
 
   test("jobConcurrency defaults to 2; overridden with JOB_CONCURRENCY", async () => {
@@ -86,5 +96,12 @@ describe("config — defaults and environment variable overrides", () => {
     expect(def.CONFIG.JOB_CONCURRENCY).toBe(2);
     const ovr = await runConfig({ JOB_CONCURRENCY: "5" });
     expect(ovr.CONFIG.JOB_CONCURRENCY).toBe(5);
+  });
+
+  test("maxChunkTokens defaults to 512; overridden with MAX_CHUNK_TOKENS", async () => {
+    const def = await runConfig({});
+    expect(def.CONFIG.MAX_CHUNK_TOKENS).toBe(512);
+    const ovr = await runConfig({ MAX_CHUNK_TOKENS: "128" });
+    expect(ovr.CONFIG.MAX_CHUNK_TOKENS).toBe(128);
   });
 });
