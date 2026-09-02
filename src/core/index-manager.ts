@@ -1122,7 +1122,7 @@ export class IndexManager {
       if (!name || !st || !DEAD_CANDIDATE_TYPES.has(st)) continue;
       if (typeof r.startLine !== "number" || typeof r.endLine !== "number") continue;
       const content = typeof r.content === "string" ? r.content : "";
-      const key = `${name} ${r.filePath}`;
+      const key = `${name}\0${r.filePath}`;
       const ex = byKey.get(key);
       if (!ex) {
         byKey.set(key, {
@@ -1155,7 +1155,7 @@ export class IndexManager {
     }
 
     const countSymbols: CountSymbol[] = candidates.map((c) => ({
-      key: `${c.symbolName} ${c.filePath} ${c.declLine}`,
+      key: `${c.symbolName}\0${c.filePath}\0${c.declLine}`,
       matchNames: matchNamesFor(c.symbolName),
       filePath: c.filePath,
       declarationLine: c.declLine,
@@ -1175,7 +1175,7 @@ export class IndexManager {
     for (let i = 0; i < candidates.length; i++) {
       const c = candidates[i]!;
       const cnt = refCounts.get(countSymbols[i]!.key) ?? 0;
-      const k = `${c.filePath} ${c.symbolName}`;
+      const k = `${c.filePath}\0${c.symbolName}`;
       refsByNameFile.set(k, (refsByNameFile.get(k) ?? 0) + cnt);
     }
 
@@ -1188,7 +1188,7 @@ export class IndexManager {
       const bare = c.symbolName.split(".").pop() ?? c.symbolName;
       const isCommon = (nameCount.get(bare) ?? 0) > 3;
       const ownerRef = c.symbolName.includes(".")
-        ? (refsByNameFile.get(`${c.filePath} ${c.symbolName.split(".")[0]}`) ?? 0) > 0
+        ? (refsByNameFile.get(`${c.filePath}\0${c.symbolName.split(".")[0]}`) ?? 0) > 0
         : false;
 
       const scored = scoreDeadCode({
