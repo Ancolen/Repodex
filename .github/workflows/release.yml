@@ -25,8 +25,9 @@ jobs:
             asset: cidx-linux-x64
           - os: ubuntu-24.04-arm
             asset: cidx-linux-arm64
-          - os: macos-13 # Intel
-            asset: cidx-darwin-x64
+          # No darwin-x64 (Intel mac) leg: macos-13 runners are retired and
+          # cross-compiling is not an option — native modules like lancedb are
+          # arch-specific, so an Intel build needs a real Intel runner.
           - os: macos-14 # Apple Silicon
             asset: cidx-darwin-arm64
     steps:
