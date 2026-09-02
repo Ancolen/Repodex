@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
+import { COMMIT_FORMAT, parseCommitLog, type CommitHit, type CommitQueryOpts } from "../core/commits";
 
 const execFileAsync = promisify(execFile);
 
@@ -50,4 +51,43 @@ export async function gitTrackedFiles(baseDir: string): Promise<Set<string> | nu
 export function gitHeadPath(baseDir: string): string | null {
   const head = path.join(baseDir, ".git", "HEAD");
   return existsSync(head) ? head : null;
+}
+
+/**
+ * Runs `git log` in `baseDir` and returns matching commits — the engine for
+ * git-history / commit-message search. Live (no indexing), NUL-safe (`-z`),
+ * case-insensitive message/author matching (`-i`). The path filter is
+ * relativized to the repo root and passed as a LITERAL argv element after `--`
+ * (`execFile` uses no shell → no injection). Returns `[]` if git is missing, the
+ * directory isn't a repo, or the query matches nothing (the engine reports the
+ * not-a-repo case via `isGitRepo` separately).
+ */
+export async function searchGitLog(
+  baseDir: string,
+  opts: CommitQueryOpts,
+): Promise<CommitHit[]> {
+  const limit = opts.limit ?? 50;
+  const args: string[] = [
+    "-C", baseDir, "log", "-z", "-i", "-n", String(limit),
+    `--format=${COMMIT_FORMAT}`,
+  ];
+  if (opts.withFiles) args.push("--name-only");
+  if (opts.query) args.push(`--grep=${opts.query}`);
+  if (opts.author) args.push(`--author=${opts.author}`);
+  if (opts.since) args.push(`--since=${opts.since}`);
+  if (opts.until) args.push(`--until=${opts.until}`);
+  if (opts.path) {
+    // git pathspecs are relative to the repo root; relativize absolute paths.
+    const rel = path.isAbsolute(opts.path) ? path.relative(baseDir, opts.path) : opts.path;
+    args.push("--", rel);
+  }
+  try {
+    const { stdout } = await execFileAsync("git", args, {
+      timeout: 15000,
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    return parseCommitLog(stdout, !!opts.withFiles);
+  } catch {
+    return [];
+  }
 }
