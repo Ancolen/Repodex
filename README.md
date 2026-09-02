@@ -12,12 +12,13 @@ A single long-lived daemon manages **multiple projects**. By sending commands to
 
 - 🚀 **Asynchronous daemon** — the server opens instantly, indexing runs in the background on a job queue; while one project is being indexed, search continues uninterrupted in the others. Thanks to a configurable **worker pool** (`jobConcurrency`, default 2), multiple projects can be indexed in parallel; a long/large job does not block other projects.
 - 🗂️ **Multi-project** — each project lives in its own isolated LanceDB table (`idx_<name>`); search a single project or all projects.
-- 🔎 **Hybrid search** — semantic **vector** + **BM25** exact-term, merged with **RRF**. `hybrid` / `vector` / `text` modes; `language` / `symbolType` / `pathGlob` filters.
+- 🔎 **Hybrid search** — semantic **vector** + **BM25** exact-term, merged with **RRF**. `hybrid` / `vector` / `text` modes; `language` / `symbolType` / `pathGlob` filters; **reranker on by default** for precision and **MMR** to drop near-duplicate results; `--max-chars` caps returned text.
 - 🎯 **`find_symbol`** — finds a symbol directly by its name (exact + prefix); requires no vector, fully precise.
 - 🔗 **`find_references`** — finds where a symbol is **used** (call sites + definition) as `file:line` occurrences; complements `find_symbol` for impact/refactor analysis.
 - 🧭 **`get_repo_overview`** — a structural onboarding summary of a project (language distribution, symbol-type breakdown, top-level directories, likely entry points, largest files); aggregated from the index with no LLM.
 - 🪟 **Rich results** — each search result carries a derived `signature`, the `indexedAt` freshness stamp, and an optional `--context N` window of surrounding lines read live from the file.
-- 🌳 **Smart chunking** — splitting at function/class/method boundaries with `web-tree-sitter` (AST); grammars for 15 languages (JS/TS/TSX, Python, Go, Rust, Java, C, C++, C#, PHP, Ruby, Kotlin, Swift, Scala) embedded in the binary. By **descending into namespace/module/mod**, symbols (function/class/struct/interface/enum/record/trait) are extracted correctly in each language. Character-based fallback for languages without a grammar. Results are returned with a `file:line` range.
+- 🌳 **Smart chunking** — splitting at function/class/method boundaries with `web-tree-sitter` (AST); grammars for 16 languages (JS/TS/TSX, Python, Go, Rust, Java, C, C++, C#, PHP, Ruby, Kotlin, Swift, Scala, GDScript) embedded in the binary. By **descending into namespace/module/mod**, symbols (function/class/struct/interface/enum/record/trait) are extracted correctly in each language. Character-based fallback for languages without a grammar. Results are returned with a `file:line` range.
+- 🎮 **Godot support** — GDScript (`.gd`) gets full AST chunking (`class_name`, inner classes, `signal`, `enum`, `func`/`_init`), `extends "res://…"` + `preload`/`load` dependency resolution against the project root, and dead-code scoring that understands engine virtuals (`_ready`, `_process`, …) and editor-connected `_on_*` handlers. Godot text formats — `.gdshader`, `.tscn`, `.tres`, `project.godot` — are indexed with character-based chunking (searchable text, no symbols); the `.godot/` cache directory is ignored.
 - ⚡ **Efficient indexing** — batch + bounded parallel embedding, content-hash embedding cache (does not re-embed an unchanged symbol), mtime cache (skips an unchanged file), an ANN vector index + BM25/FTS index on large tables.
 - 🔁 **Incremental sync** — `sync` indexes only changed/new files and cleans up deleted ones; catches up at startup on changes made while the daemon was down.
 - 👀 **Live watching** — `chokidar` + debounce; supports atomic save/rename; obeys `.gitignore`/`.mcpignore` rules.
@@ -63,7 +64,7 @@ Optional environment variables:
 
 ```bash
 # install a specific version (default: latest release)
-curl -fsSL https://raw.githubusercontent.com/Ancolen/repodex/main/web-install.sh | REPODEX_VERSION=v2.0.0 bash
+curl -fsSL https://raw.githubusercontent.com/Ancolen/repodex/main/web-install.sh | REPODEX_VERSION=v2.2.0 bash
 NO_SERVICE=1 ... | bash    # don't install the systemd service (manual only: cidx start)
 ASSUME_YES=1 ... | bash    # auto-confirm prompts (headless install)
 BIN_DIR=~/bin ... | bash   # choose the directory where cidx/repodex go
@@ -154,6 +155,7 @@ PURGE_DATA=1 ./uninstall.sh   # also deletes the ~/.mcp-indexer data
 | `sync <name>` | Incremental sync: updates changed/new + deleted files |
 | `remove <name>` (`rm`) | Removes the project and its data |
 | `search "<query>" [flags]` | Hybrid search (semantic + BM25), filterable; `--context N` for surrounding lines |
+| `batch "<q1>" "<q2>" ... [flags]` | Hybrid search for several queries in one round-trip; results grouped per query |
 | `find <symbolName> [flags]` | Finds a symbol directly by name (exact + prefix) |
 | `refs <symbolName> [flags]` | Finds where a symbol is used (call sites + definition) |
 | `overview <name>` | Structural onboarding summary of a project |
@@ -207,7 +209,16 @@ cidx search "config" --path "src/*"                      # file path pattern
 
 - **`--mode hybrid`** (default): vector + BM25, merged with RRF.
 - **`--mode vector`**: semantic only. **`--mode text`**: BM25 only (requires no embedding model; works on old/incompatible indexes too).
+- **`--rerank [true|false]`**: a second-stage reranker (a small Qwen3-Reranker model in Ollama) re-scores the top results for higher precision. On by default; auto-disables if no reranker model is configured, and `--rerank false` skips it for a faster lookup.
+- **`--mmr [true|false]`**: MMR diversification re-orders the top results so they aren't near-duplicates (e.g. copies of the same function). On by default (`search.mmr.lambda`, default 0.5); `--mmr false` keeps a pure relevance order.
+- **`--max-chars <n>`**: cap the returned text to ~n characters — results are kept whole in ranked order while they fit (top-1 always returned), so you can raise `--limit` for recall without bloating output.
 - The **`--language`**, **`--type`**, **`--path`** filters work with `search`; `--language`/`--type` can also be used with `find`.
+
+Several queries in one round-trip (`batch` — results grouped per query; same flags as `search`):
+
+```bash
+cidx batch "user login" "password reset" "session expiry" --project backend --limit 3
+```
 
 Finding a symbol directly by name (most precise when you know the exact name):
 
@@ -248,9 +259,9 @@ The daemon offers two HTTP transports (on `127.0.0.1` only):
 
 | Transport | Address | Note |
 |-----------|---------|------|
-| **Streamable HTTP** | `http://127.0.0.1:3001/mcp` | Current, recommended (stateless) |
-| **SSE** (legacy) | `http://127.0.0.1:3001/sse` | Backward compatibility |
-| Health + progress | `http://127.0.0.1:3001/health` | Status and job metrics |
+| **Streamable HTTP** | `http://127.0.0.1:9371/mcp` | Current, recommended (stateless) |
+| **SSE** (legacy) | `http://127.0.0.1:9371/sse` | Backward compatibility |
+| Health + progress | `http://127.0.0.1:9371/health` | Status and job metrics |
 
 For clients that support Streamable HTTP:
 
@@ -258,7 +269,7 @@ For clients that support Streamable HTTP:
 {
   "mcpServers": {
     "localCodeIndexer": {
-      "url": "http://127.0.0.1:3001/mcp"
+      "url": "http://127.0.0.1:9371/mcp"
     }
   }
 }
@@ -281,7 +292,8 @@ For clients that support Streamable HTTP:
 
 ### MCP tools exposed to the agent
 
-- `search_codebase(query, project?, limit?, mode?, language?, symbolType?, pathGlob?, contextLines?)` — hybrid search; if `project` is not given, in all projects. `mode` = `hybrid`/`vector`/`text`. Each result carries a derived `signature` + `indexedAt`; `contextLines > 0` adds ±N surrounding lines read live from the file.
+- `search_codebase(query, project?, limit?, mode?, language?, symbolType?, pathGlob?, contextLines?, rerank?, mmr?, maxChars?)` — hybrid search; if `project` is not given, in all projects. `mode` = `hybrid`/`vector`/`text`. Each result carries a derived `signature` + `indexedAt`; `contextLines > 0` adds ±N surrounding lines read live from the file; reranking and MMR diversification are on by default (pass `rerank: false` / `mmr: false` to skip); `maxChars` caps returned text (results kept whole while they fit).
+- `search_codebase_batch(queries, project?, limit?, mode?, language?, symbolType?, pathGlob?, contextLines?, rerank?, mmr?, maxChars?)` — run several queries in one round-trip; results grouped per query (`## Query: "…"` sections). Same options/behavior as `search_codebase`, applied per query.
 - `find_symbol(name, project?, limit?, language?, symbolType?)` — finds a symbol by name (exact + prefix).
 - `find_references(name, project?, limit?, language?, symbolType?)` — finds where a symbol is used (call sites + definition) as `file:line` occurrences.
 - `get_repo_overview(project)` — structural onboarding summary (languages, symbol types, top directories, entry points, largest files).
@@ -322,8 +334,8 @@ home: ~/.mcp-indexer          # data root (db + meta.db + log)
 
 server:
   host: 127.0.0.1             # localhost only is recommended
-  mcpPort: 3001               # AI agent (MCP/SSE/Streamable HTTP)
-  controlPort: 3002           # CLI control API
+  mcpPort: 9371               # AI agent (MCP/SSE/Streamable HTTP)
+  controlPort: 9372           # CLI control API
 
 ollama:
   url: http://127.0.0.1:11434
@@ -334,21 +346,38 @@ ollama:
 embedding:
   cacheMax: 50000             # max records in the content-hash embedding cache
 
+search:
+  rerank:
+    enabled: true             # on by default; auto-disables if the reranker model is absent in Ollama
+    model: qwen3-reranker-q8  # causal-LM reranker; scored via yes/no token logprobs
+    topK: 20                  # how many candidates to rerank before slicing to limit
+    concurrency: 4            # concurrent reranker calls to Ollama
+  mmr:
+    enabled: true             # diversify the top results (Maximal Marginal Relevance)
+    lambda: 0.5               # 1.0 = pure relevance, 0.0 = pure diversity (0.5 dedupes near-duplicates)
+    topK: 20                  # how many candidates to diversify over before slicing to limit
+
 indexing:
   maxChunkSize: 1500
   overlapSize: 200
-  allowedExtensions: [".ts", ".js", ".py", ".go", ".rs", ".java", ".cpp", ".c", ".cs", ".php", ".rb", "..."]
-  ignoredDirs: ["node_modules", ".git", "dist", "..."]
+  maxChunkTokens: 512         # approximate per-chunk token cap (effective size = min(maxChunkSize, maxChunkTokens*4)); lower to split big chunks, then reindex
+  allowedExtensions: [".ts", ".js", ".py", ".go", ".rs", ".java", ".cpp", ".c", ".cs", ".php", ".rb", ".gd", ".gdshader", ".tscn", ".tres", ".godot", "..."]
+  ignoredDirs: ["node_modules", ".git", "dist", ".godot", "..."]
   vectorIndexThreshold: 50000 # an ANN vector index is built when a table exceeds this chunk count
   respectGitignore: true      # also obey .gitignore rules
   gitTrackedOnly: false       # if true, index only git-tracked files
   jobConcurrency: 2           # number of projects (jobs) indexed in parallel at the same time
 
+# NOTE: the YAML list REPLACES the in-code default wholesale — an existing
+# config.yml written before Godot support does not pick up the new extensions
+# automatically. Add "- .gd", "- .gdshader", "- .tscn", "- .tres", "- .godot"
+# (and ".godot" to ignoredDirs) by hand, then reindex.
+
 watcher:
   debounceMs: 300
 ```
 
-**Priority:** in-code defaults < YAML < environment variables. Environment variables can also be used for a quick temporary override: `MCP_INDEXER_HOME`, `OLLAMA_URL`, `OLLAMA_MODEL`, `MCP_PORT`, `CONTROL_PORT`, `EMBED_BATCH_SIZE`, `EMBED_CONCURRENCY`, `EMBED_CACHE_MAX`, `VECTOR_INDEX_THRESHOLD`, `JOB_CONCURRENCY`. You can define additional ignore rules by placing a `.mcpignore` at a project root (`.gitignore` is also obeyed).
+**Priority:** in-code defaults < YAML < environment variables. Environment variables can also be used for a quick temporary override: `MCP_INDEXER_HOME`, `OLLAMA_URL`, `OLLAMA_MODEL`, `MCP_PORT`, `CONTROL_PORT`, `EMBED_BATCH_SIZE`, `EMBED_CONCURRENCY`, `EMBED_CACHE_MAX`, `MAX_CHUNK_TOKENS`, `VECTOR_INDEX_THRESHOLD`, `JOB_CONCURRENCY`, `RERANK_MODEL`, `RERANK_TOP_K`, `RERANK_CONCURRENCY`, `MMR_LAMBDA`, `MMR_TOP_K`. You can define additional ignore rules by placing a `.mcpignore` at a project root (`.gitignore` is also obeyed).
 
 > 💡 **Exclude large data folders.** Since `allowedExtensions` includes `.json`, generated/very large JSON data files (e.g. HuggingFace `tokenizer.json`, fixture/static data) get split into thousands of chunks and embedded — this slows down indexing and pollutes search results. Exclude such folders by placing a `.mcpignore` at the project root:
 > ```gitignore
@@ -369,12 +398,17 @@ To reset, just stop the daemon and delete the `~/.mcp-indexer/` folder.
 
 ## Architecture
 
-For detailed architecture, decisions and roadmap, see [`DESIGN.md`](./DESIGN.md) (for the v3 robustness & security fixes see §15; for multi-language symbol extraction + worker pool + mid-file cancellation see §16; for result enrichment + `find_references` + `get_repo_overview` + more languages see §18).
+For detailed architecture, decisions, features, and roadmap, see the [`docs/`](./docs/) folder:
+
+- [`docs/architecture.md`](./docs/architecture.md) — design, runtime, core decisions, security model
+- [`docs/features.md`](./docs/features.md) — capability catalog (what the tool does)
+- [`docs/status.md`](./docs/status.md) — ✅ done / 💡 proposed / ⏸️ deferred roadmap
+- [`docs/changelog.md`](./docs/changelog.md) — version history (v1 → v4)
 
 ```
-CLI client ──HTTP──▶ Control API (127.0.0.1:3002) ─┐
+CLI client ──HTTP──▶ Control API (127.0.0.1:9372) ─┐
                                                     ├─▶ IndexManager ──▶ JobQueue ──▶ Worker
-AI agent ──/mcp · /sse──▶ MCP Server (127.0.0.1:3001) ─┘       │                       │
+AI agent ──/mcp · /sse──▶ MCP Server (127.0.0.1:9371) ─┘       │                       │
 stdio client ──▶ cidx mcp (bridge) ──▶ Control API    Registry (bun:sqlite)    LanceDB (idx_*)
 ```
 
