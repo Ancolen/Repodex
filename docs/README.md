@@ -6,7 +6,7 @@ This folder is the **canonical, living documentation** for the project. The root
 
 ## At a glance
 
-- **Current version:** `2.2.0` (Godot / GDScript wave)
+- **Current version:** `2.3.0` (per-project config + cidx open)
 - **Status:** core architecture, hybrid search, multi-language chunking (incl. Godot), and all robustness/security fixes are **complete and stable**. See [`status.md`](./status.md) for the full done / not-done breakdown.
 - **Test suite:** `bun test` — 265/265 passing (713 expectations).
 

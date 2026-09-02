@@ -2,7 +2,7 @@
 
 > The living tracker. **When you finish, start, or decide on something, edit this file.** Pair each change with an entry in [`changelog.md`](./changelog.md) and (for behavior) [`features.md`](./features.md).
 >
-> Current release: **2.2.0** (Godot wave + doc-format indexing). Test suite: **265/265** passing (713 expectations).
+> Current release: **2.3.0** (cidx identity + per-project config + `cidx open`). Test suite: **287/287** passing (763 expectations).
 
 ## Legend
 

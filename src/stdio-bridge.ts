@@ -135,7 +135,7 @@ async function main(): Promise<void> {
   await ensureDaemon();
 
   const server = new Server(
-    { name: "cidx (stdio bridge)", version: "2.2.0" },
+    { name: "cidx (stdio bridge)", version: "2.3.0" },
     { capabilities: { tools: {} } },
   );
 

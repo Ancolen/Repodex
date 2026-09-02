@@ -1,6 +1,6 @@
 # Features — Capability Catalog
 
-What the tool **does today** (version 2.2.0). For what's planned, see [`status.md`](./status.md); for how it's built, [`architecture.md`](./architecture.md). For user-facing install & usage, the root [`README.md`](../README.md).
+What the tool **does today** (version 2.3.0). For what's planned, see [`status.md`](./status.md); for how it's built, [`architecture.md`](./architecture.md). For user-facing install & usage, the root [`README.md`](../README.md).
 
 ## Daemon & multi-project
 

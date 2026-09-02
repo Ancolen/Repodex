@@ -67,7 +67,7 @@ Optional environment variables:
 
 ```bash
 # install a specific version (default: latest release)
-curl -fsSL https://raw.githubusercontent.com/Ancolen/repodex/main/web-install.sh | REPODEX_VERSION=v2.2.0 bash
+curl -fsSL https://raw.githubusercontent.com/Ancolen/repodex/main/web-install.sh | REPODEX_VERSION=v2.3.0 bash
 NO_SERVICE=1 ... | bash    # don't install the systemd service (manual only: cidx start)
 ASSUME_YES=1 ... | bash    # auto-confirm prompts (headless install)
 BIN_DIR=~/bin ... | bash   # choose the directory where cidx/repodex go
