@@ -14,7 +14,7 @@ A single long-lived daemon manages **multiple projects**. By sending commands to
 
 - 🚀 **Asynchronous daemon** — the server opens instantly, indexing runs in the background on a job queue; while one project is being indexed, search continues uninterrupted in the others. Thanks to a configurable **worker pool** (`jobConcurrency`, default 2), multiple projects can be indexed in parallel; a long/large job does not block other projects.
 - 🗂️ **Multi-project** — each project lives in its own isolated LanceDB table (`idx_<name>`); search a single project or all projects.
-- 🔎 **Hybrid search** — semantic **vector** + **BM25** exact-term, merged with **RRF**. `hybrid` / `vector` / `text` modes; `language` / `symbolType` / `pathGlob` filters; **reranker on by default** for precision and **MMR** to drop near-duplicate results; `--max-chars` caps returned text.
+- 🔎 **Hybrid search** — semantic **vector** + **BM25** exact-term, merged with **RRF**. `hybrid` / `vector` / `text` modes; `language` / `symbolType` / `pathGlob` filters; **reranker on by default** for precision and **MMR** to drop near-duplicate results; `--max-chars` caps returned text; **docstring search legs** match intent queries against each symbol's docstring/doc-comment (`[doc hit]` markers).
 - 🎯 **`find_symbol`** — finds a symbol directly by its name (exact + prefix); requires no vector, fully precise.
 - 🔗 **`find_references`** — finds where a symbol is **used** (call sites + definition) as `file:line` occurrences; complements `find_symbol` for impact/refactor analysis.
 - 🧭 **`get_repo_overview`** — a structural onboarding summary of a project (language distribution, symbol-type breakdown, top-level directories, likely entry points, largest files); aggregated from the index with no LLM.
@@ -219,6 +219,7 @@ cidx search "config" --path "src/*"                      # file path pattern
 - **`--rerank [true|false]`**: a second-stage reranker (a small Qwen3-Reranker model in Ollama) re-scores the top results for higher precision. On by default; auto-disables if no reranker model is configured, and `--rerank false` skips it for a faster lookup.
 - **`--mmr [true|false]`**: MMR diversification re-orders the top results so they aren't near-duplicates (e.g. copies of the same function). On by default (`search.mmr.lambda`, default 0.5); `--mmr false` keeps a pure relevance order.
 - **`--max-chars <n>`**: cap the returned text to ~n characters — results are kept whole in ranked order while they fit (top-1 always returned), so you can raise `--limit` for recall without bloating output.
+- **`--doc [true|false]`** (default true): each symbol's docstring / doc-comment is embedded into a separate `doc_vector` column, and hybrid search merges doc-vector + doc-BM25 legs alongside the code legs — so intent queries ("how to do X") can hit the *documentation* even when the code body doesn't match. Results found via a doc leg carry a `[doc hit]` marker. `--doc false` skips the doc legs for a faster pure-code lookup. Only affects tables indexed with 2.4.0+ (reindex older projects).
 - The **`--language`**, **`--type`**, **`--path`** filters work with `search`; `--language`/`--type` can also be used with `find`.
 
 Open a result directly in your editor (`open` — searches, prints the result list, then launches `$VISUAL`/`$EDITOR` at the matching line; `--pick n` selects the n-th result, default 1):
@@ -321,8 +322,8 @@ For clients that support Streamable HTTP:
 
 ### MCP tools exposed to the agent
 
-- `search_codebase(query, project?, limit?, mode?, language?, symbolType?, pathGlob?, contextLines?, rerank?, mmr?, maxChars?)` — hybrid search; if `project` is not given, in all projects. `mode` = `hybrid`/`vector`/`text`. Each result carries a derived `signature` + `indexedAt`; `contextLines > 0` adds ±N surrounding lines read live from the file; reranking and MMR diversification are on by default (pass `rerank: false` / `mmr: false` to skip); `maxChars` caps returned text (results kept whole while they fit).
-- `search_codebase_batch(queries, project?, limit?, mode?, language?, symbolType?, pathGlob?, contextLines?, rerank?, mmr?, maxChars?)` — run several queries in one round-trip; results grouped per query (`## Query: "…"` sections). Same options/behavior as `search_codebase`, applied per query.
+- `search_codebase(query, project?, limit?, mode?, language?, symbolType?, pathGlob?, contextLines?, rerank?, mmr?, maxChars?, doc?)` — hybrid search; if `project` is not given, in all projects. `mode` = `hybrid`/`vector`/`text`. Each result carries a derived `signature` + `indexedAt`; `contextLines > 0` adds ±N surrounding lines read live from the file; reranking and MMR diversification are on by default (pass `rerank: false` / `mmr: false` to skip); `maxChars` caps returned text (results kept whole while they fit); docstring/doc-comment search legs are on by default (`doc: false` skips them; doc-hit results carry a `[doc hit]` marker).
+- `search_codebase_batch(queries, project?, limit?, mode?, language?, symbolType?, pathGlob?, contextLines?, rerank?, mmr?, maxChars?, doc?)` — run several queries in one round-trip; results grouped per query (`## Query: "…"` sections). Same options/behavior as `search_codebase`, applied per query.
 - `find_symbol(name, project?, limit?, language?, symbolType?)` — finds a symbol by name (exact + prefix).
 - `find_references(name, project?, limit?, language?, symbolType?)` — finds where a symbol is used (call sites + definition) as `file:line` occurrences.
 - `get_repo_overview(project)` — structural onboarding summary (languages, symbol types, top directories, entry points, largest files).
@@ -398,6 +399,7 @@ indexing:
   maxChunkSize: 1500
   overlapSize: 200
   maxChunkTokens: 512         # approximate per-chunk token cap (effective size = min(maxChunkSize, maxChunkTokens*4)); lower to split big chunks, then reindex
+  docstrings: true            # extract each symbol's docstring/comment and embed it into a separate doc_vector (doc search legs); false = no extra embed calls
   allowedExtensions: [".ts", ".js", ".py", ".go", ".rs", ".java", ".cpp", ".c", ".cs", ".php", ".rb", ".gd", ".gdshader", ".tscn", ".tres", ".godot", "..."]
   ignoredDirs: ["node_modules", ".git", "dist", ".godot", "..."]
   vectorIndexThreshold: 50000 # an ANN vector index is built when a table exceeds this chunk count

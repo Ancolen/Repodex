@@ -56,10 +56,12 @@ stdio client ──▶ cidx mcp (bridge) ──▶ Control API    Registry (bun:
 
 **Hub: `IndexManager` (`src/core/index-manager.ts`)** owns per-project chokidar watchers + a `.git/HEAD` branch watcher (auto-syncs on checkout). All mutations go through it: `createIndex` / `reindex` / `syncIndex` **enqueue an async job and return immediately** — search keeps serving while indexing runs. It also implements `searchIndex` / `searchAll` / `findSymbol` / `findReferences` / `repoOverview` and result enrichment. New job types are added via `JobQueue.registerHandler(type, fn)` (see `core/types.ts`); `index` is the only registered type today.
 
+**Docstring legs (2.4.0).** `src/chunking/docstring.ts → extractDoc(top, inner, language)` attaches an optional `doc` to each chunk: the Python docstring (falling back to preceding comments), or for the other AST languages the contiguous run of comment nodes directly preceding the symbol (JSDoc, Rust `///`, Go `//`, …; capped at 1200 chars, first chunk only for split symbols). The indexer embeds docs through the same `embedTexts` path (cache + batching + bounded concurrency) into the row's `doc_vector`; `searchOnTable` then merges up to **four RRF legs** (code-vector, doc-vector ANN, content BM25, doc BM25), all gated on `tableColumns(table)` so pre-2.4.0 legacy tables run the exact legacy code paths (`insertChunks` strips the unknown columns). A doc-contribution result carries `_docHit: true` → `[doc hit]` in CLI/MCP output. Controlled by `indexing.docstrings` (default true) and the per-call `doc` option (`false` skips the doc legs).
+
 ## Persistence split
 
 - **`Registry`** (`src/core/registry.ts`, **`bun:sqlite`**) — `indexes`, `file_cache` (mtime skip), `jobs` (survives restart), `embedding_cache` (content-hash → Float32 BLOB).
-- **LanceDB** (`src/services/db.ts`, `~/.cidx/db/`) — one table per project, `idx_<name>`. Fixed schema: every row carries `id, filePath, content, vector, language, symbolName, symbolType, startLine, endLine`.
+- **LanceDB** (`src/services/db.ts`, `~/.cidx/db/`) — one table per project, `idx_<name>`. Fixed schema: every row carries `id, filePath, content, vector, language, symbolName, symbolType, startLine, endLine`, and since 2.4.0 the nullable `doc` + `doc_vector` (the symbol's docstring/doc-comment and its embedding — see "Docstring legs" below). **Legacy tables** (pre-2.4.0) lack those two columns: `insertChunks` runs records through `stripUnknownColumns` so writes never fail, and every doc-leg query is gated on `tableColumns(table)` — legacy tables take the exact legacy code paths until reindexed.
 
 ## Directory layout
 
@@ -90,6 +92,7 @@ src/
   chunking/
     tree-sitter.ts      # web-tree-sitter loader (init + grammar cache + ext→grammar)
     chunker.ts          # AST-based smart chunker + character fallback
+    docstring.ts        # docstring / doc-comment extraction per symbol (2.4.0)
     wasm/               # vendored gdscript grammar (built by scripts/build-gdscript-wasm.sh)
   utils/
     hash.ts             # content hash cache

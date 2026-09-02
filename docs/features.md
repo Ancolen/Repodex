@@ -1,6 +1,6 @@
 # Features — Capability Catalog
 
-What the tool **does today** (version 2.3.0). For what's planned, see [`status.md`](./status.md); for how it's built, [`architecture.md`](./architecture.md). For user-facing install & usage, the root [`README.md`](../README.md).
+What the tool **does today** (version 2.4.0). For what's planned, see [`status.md`](./status.md); for how it's built, [`architecture.md`](./architecture.md). For user-facing install & usage, the root [`README.md`](../README.md).
 
 ## Daemon & multi-project
 
@@ -27,6 +27,7 @@ What the tool **does today** (version 2.3.0). For what's planned, see [`status.m
 - **`maxChars` budget** — per-call `maxChars` caps the returned text: results are kept whole in ranked order while they fit (never truncated mid-chunk), so a higher `limit` gives recall without context bloat. Top result always returned. `maxChars` on `search_codebase` / `--max-chars` on the CLI.
 - **Batch search** (`search_codebase_batch` / `cidx batch`) — run several queries in one round-trip; results grouped per query. Each query gets the full rerank/MMR/maxChars pipeline and the shared query cache.
 - **Search → editor handoff** (`cidx open`) — searches, prints the result list, then launches `$VISUAL`/`$EDITOR` (fallback `vi`) on the picked result (`--pick n`, default 1) at its start line. Line-position conventions per editor: `+<line>` (vim/nano/emacs, the default), `--goto <file>:<line>` (VS Code family), `<file>:<line>` (Helix); `VISUAL='code -w'` makes a GUI editor block. Exits with the editor's exit code.
+- **Docstring search legs** (on by default; 2.4.0) — each symbol's docstring / doc-comment is embedded into a separate `doc_vector` column on the same row, and hybrid search merges up to **four RRF legs**: code-vector, doc-vector, content BM25, doc BM25. So intent queries ("how to do X") can hit the *documentation* even when the *code body* doesn't match. Results that arrived via a doc leg carry a `[doc hit]` marker. Global switch `indexing.docstrings` (default true); per-call `doc: false` / `--doc false` skips the doc legs. Pre-2.4.0 tables take the legacy code paths until reindexed.
 
 ## Code intelligence
 
@@ -59,6 +60,7 @@ What the tool **does today** (version 2.3.0). For what's planned, see [`status.m
 - **Character-based fallback** for languages without a grammar (and for Lua — see [`status.md`](./status.md)); also used for Godot's text formats (`.gdshader`, `.tscn`, `.tres`, `project.godot`) — searchable text, no symbols.
 - **Doc formats with language labels** — `.xml` and `.rst` are indexed via the character fallback but carry a `language` label (`xml` / `rst`; `.json` → `json`, `.md` → `markdown`), so the `language` filter works on documentation corpora — e.g. a Godot engine class-reference dump (`godot --doctool`) or a godot-docs tree indexed alongside a game project for version-matched API search.
 - **Token-aware cap** — the chunk window also respects an approximate token budget (`min(maxChunkSize, maxChunkTokens·4)`), so a large `maxChunkSize` can't silently overflow the model's token window. Char-limit-binding by default (`maxChunkTokens` 512 · 4 = 2048 > `maxChunkSize` 1500); tune via `indexing.maxChunkTokens` / `MAX_CHUNK_TOKENS` and reindex.
+- **Docstring / doc-comment extraction** (2.4.0) — each emitted chunk carries an optional `doc`: the Python docstring (or, failing that, preceding comments), or for every other AST language the **contiguous run of comment nodes directly preceding the symbol** (JSDoc, Rust `///`, Go `//`, JavaDoc, …), capped at 1200 chars and attached only to the first chunk of a split symbol. Controlled by `indexing.docstrings` (default true).
 
 ## Efficiency
 
@@ -112,8 +114,8 @@ What the tool **does today** (version 2.3.0). For what's planned, see [`status.m
 
 | Tool | Purpose |
 |------|---------|
-| `search_codebase(query, project?, limit?, mode?, language?, symbolType?, pathGlob?, contextLines?, rerank?, mmr?, maxChars?)` | Hybrid search; all projects if `project` omitted. Each result carries `signature` + `indexedAt`; `contextLines > 0` adds ±N surrounding lines; reranking and MMR diversification are on by default (`rerank: false` / `mmr: false` skip them); `maxChars` caps returned text (results kept whole). |
-| `search_codebase_batch(queries, project?, limit?, mode?, language?, symbolType?, pathGlob?, contextLines?, rerank?, mmr?, maxChars?)` | Run several queries in one round-trip; results grouped per query. Same options/behavior as `search_codebase`, applied per query. |
+| `search_codebase(query, project?, limit?, mode?, language?, symbolType?, pathGlob?, contextLines?, rerank?, mmr?, maxChars?, doc?)` | Hybrid search; all projects if `project` omitted. Each result carries `signature` + `indexedAt`; `contextLines > 0` adds ±N surrounding lines; reranking and MMR diversification are on by default (`rerank: false` / `mmr: false` skip them); `maxChars` caps returned text (results kept whole); doc legs add a docstring/doc-comment search (`doc: false` skips; doc-hit results carry `[doc hit]`). |
+| `search_codebase_batch(queries, project?, limit?, mode?, language?, symbolType?, pathGlob?, contextLines?, rerank?, mmr?, maxChars?, doc?)` | Run several queries in one round-trip; results grouped per query. Same options/behavior as `search_codebase`, applied per query. |
 | `find_symbol(name, project?, limit?, language?, symbolType?)` | Find a symbol by name (exact + prefix). |
 | `find_references(name, project?, limit?, language?, symbolType?)` | Where a symbol is used (call sites + definition). |
 | `get_repo_overview(project)` | Structural onboarding summary. |

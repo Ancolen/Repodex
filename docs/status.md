@@ -2,7 +2,7 @@
 
 > The living tracker. **When you finish, start, or decide on something, edit this file.** Pair each change with an entry in [`changelog.md`](./changelog.md) and (for behavior) [`features.md`](./features.md).
 >
-> Current release: **2.3.0** (cidx identity + per-project config + `cidx open`). Test suite: **287/287** passing (763 expectations).
+> Current release: **2.4.0** (docstring / comment embedding + doc search legs). Test suite: **296/296** passing (790 expectations).
 
 ## Legend
 
@@ -36,6 +36,7 @@
 - ✅ **`maxChars` token budget** — per-call `maxChars` caps the returned text: results are kept whole in ranked order while they fit (never truncated mid-chunk), so a high `limit` can be used for recall without bloating the agent's context. Applied server-side (`applyCharBudget`, after enrichment) so it's consistent across HTTP/MCP/stdio/CLI; the top result is always returned.
 - ✅ **Multi-query batch search** (`search_codebase_batch` / `cidx batch`) — runs several queries concurrently in one round-trip, results grouped per query; each query reuses `searchIndex`/`searchAll` (so rerank/MMR/maxChars + the shared query cache apply per query). Duplicate/blank queries are de-duped.
 - ✅ **Git-history / commit-message search** (`search_commits` / `cidx commits`) — the "when / why was feature X added" and "who changed this file" questions that code search can't answer: a separate search space over the project's git history. Runs `git log` **live** in the indexed project's directory (`src/services/git.ts → searchGitLog`: `-z` NUL-safe, `-i` case-insensitive, `execFile` no-shell → no injection; path filter relativized + passed after `--`); **no embedding, no LanceDB, no schema change, no reindex** (additive, like the other code-intelligence tools). Pure parser in `src/core/commits.ts` (`parseCommitLog`) — fields are `\x1f`-separated, and a commit header is anchored on a 40-hex SHA + `\x1f` so a changed-file name can't be mistaken for a new commit (lets `--name-only` files be split out in one pass, surviving multi-line bodies). Filters: message `query`, file/path history, `author`, `since`/`until` (git date syntax), `limit` (default 50), `withFiles` (changed files per commit); no filters → most recent commits. `notARepo` is reported when the project isn't a git working tree.
+- ✅ **Docstring / doc-comment embedding + doc search legs** (2.4.0) — a symbol's docstring (Python) or contiguous preceding doc-comment run (JSDoc, Rust `///`, Go `//`, …) is extracted at chunk time (`src/chunking/docstring.ts → extractDoc`, capped 1200 chars, attached to the first chunk of split symbols) and stored in new **`doc` / `doc_vector` columns on the same row** — the doc is embedded with the same model as the code. Hybrid search merges up to **four RRF legs**: code-vector, doc-vector ANN, content BM25, doc BM25 — all gated on actual table columns (`tableColumns`), so **pre-2.4.0 legacy tables take the exact legacy paths** until reindexed (`insertChunks` strips the unknown columns via `stripUnknownColumns`). Doc-contribution results carry `_docHit: true` → rendered as `[doc hit]` in CLI/MCP output. Gated globally by `indexing.docstrings` (default true) and per-call by `doc:false` (search_codebase, /search, stdio bridge, CLI `--doc false`). ANN + BM25 indexes built over `doc`/`doc_vector` at full-index time; apply to existing projects with a full reindex.
 
 ### Chunking & languages
 - ✅ AST-based smart chunking (web-tree-sitter); namespace / module / mod descent.
@@ -95,24 +96,23 @@
 
 ## 🚧 In progress
 
-_(Nothing actively in flight — per-project config (`.cidx.json`) and `cidx open` are implemented, pending release.)_
+_(Nothing actively in flight — the docstring / comment embedding proposal is implemented, pending release.)_
 
 ---
 
 ## 💡 Proposed (not yet built)
 
-> Impact / effort are rough, relative estimates. The "dead-code detection" and "call graph" proposals have since shipped (see Code intelligence in [`features.md`](./features.md)).
+> Impact / effort are rough, relative estimates. The "dead-code detection" and "call graph" proposals have since shipped (see Code intelligence in [`features.md`](./features.md)); the "Embed docstring / comment separately" proposal shipped in 2.4.0.
 
 ### New capabilities
 | Proposal | Description | Impact | Effort |
 |----------|-------------|--------|--------|
-| **Embed docstring / comment separately** | Separate vector for a function's docstring; better on "how to do X" intent queries. | Medium-High | Medium |
 | **Recency signal** | Slight boost for recently changed code (git mtime). | Medium | Low-Medium |
 | **`maxFileSizeBytes` guard** | Skip oversized data files without relying solely on `.cidxignore`. | Low-Medium | Low |
 | **Combined `search + outline`** | Return a hit's file outline in the same call; saves a turn. | Low-Medium | Low |
 
 ### Suggested order
-1. Docstring embedding, recency (depth).
+1. Recency (depth).
 
 ---
 

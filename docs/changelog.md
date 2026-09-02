@@ -2,7 +2,54 @@
 
 Version-by-version implementation history, **newest first**. For the current done / proposed picture, see [`status.md`](./status.md); for what the tools do, [`features.md`](./features.md).
 
-> **How this repo versions:** the design uses informal "waves" (v1 → v4); the **release version** in `package.json` is bumped per wave (currently `2.3.0`). The version string lives in **five** places that must be bumped together on release: `package.json`, `src/server/mcp.ts` (`Server` info), `src/server/control-api.ts` (`/ping`), `src/stdio-bridge.ts`, and `src/cli.ts` (`CLI_VERSION`). The `web-install.sh` / Release workflow fires on a pushed `v*` git tag.
+> **How this repo versions:** the design uses informal "waves" (v1 → v4); the **release version** in `package.json` is bumped per wave (currently `2.4.0`). The version string lives in **five** places that must be bumped together on release: `package.json`, `src/server/mcp.ts` (`Server` info), `src/server/control-api.ts` (`/ping`), `src/stdio-bridge.ts`, and `src/cli.ts` (`CLI_VERSION`). The `web-install.sh` / Release workflow fires on a pushed `v*` git tag.
+
+---
+
+## 2.4.0 — docstring / comment embedding + doc search legs
+
+Version bumped 2.3.0 → **2.4.0**; `bun run typecheck` clean, `bun test` **296/296** (790 expect). Ships the "Embed docstring / comment separately" proposal from [`status.md`](./status.md) — a symbol's docstring / doc-comment is extracted at chunk time, embedded into a **separate `doc_vector` column on the same row**, and searched as its own retrieval legs, so intent queries ("how to do X") hit the *documentation* even when the *code body* doesn't semantically match.
+
+### Extraction (`src/chunking/docstring.ts`, new)
+
+`extractDoc(top, inner, language)` runs inside `chunkCode` and attaches a `doc?: string` to the chunk (capped at 1200 chars):
+
+- **Python** — the module/class/function docstring (first `string` statement of the body, via the `string_content` child). Falls back to preceding comments when there is no docstring.
+- **All other AST languages** — the **contiguous run of comment nodes directly preceding the symbol** (`precedingComments`: comment-typed named siblings, identity-checked by `node.id`, so a detached comment two lines up doesn't leak in). This covers JSDoc, Rust `///`, Go `//`, JavaDoc, C#/Kotlin/Swift/Scala/GDScript comments uniformly.
+- The doc is attached **only to the first chunk** of a split symbol (a large function split into `#1..#n` carries the doc once, on `#1`).
+
+### Schema (`src/services/db.ts`)
+
+Two new **nullable** columns on the fixed row schema: `doc` (string|null, the extracted text) and `doc_vector` (number[]|null, its embedding, from the same model as the code vectors).
+
+- **Legacy tables are not broken.** Tables created before 2.4.0 lack the columns; `insertChunks` runs the records through `stripUnknownColumns(table, records)` which drops `doc`/`doc_vector` for those tables (LanceDB rejects unknown fields on `add`). Existing indexes keep working — they just have no doc leg until **reindexed**.
+- Column presence is checked per-table via the new `tableColumns(table)` (schema columns, empty set when the table is absent); all doc-leg queries are gated on it, so pre-2.4.0 tables take the exact legacy code paths (including the native single-leg metrics — no `_score` when only one leg produced results).
+- `searchTable` gains an explicit `column` (default `"vector"`); `searchTableText` gains a `columns` list (default `["content"]`) — the doc legs query the same helpers against `doc_vector` / `doc`. `ensureVectorIndex` builds the ANN index over `doc_vector` at the end of a full index (schema-guarded, skipped when absent); `ensureFtsIndex` builds BM25 over `doc` alongside `content` (its own try/catch — a doc-FTS failure warns and doesn't fail the index).
+
+### Indexing (`src/services/indexer.ts`)
+
+New `embedTexts(texts, model, …)` — the shared batched/bounded-concurrent embed (cache read → Ollama for misses → cache write) factored out of the content path; the content leg and the doc leg both go through it. When `indexing.docstrings` is on (see below) and a chunk carries a doc, the doc texts are embedded in a second pass and written to `doc_vector`. Nullability invariants: `doc` is always written (null when absent), `doc_vector` only when the embed succeeded.
+
+### Config
+
+`indexing.docstrings` (default **true**) — turns doc extraction + doc-vector embedding off entirely for deployments that don't want the extra embed calls. Priority unchanged (defaults < YAML < env); the generated `DEFAULT_CONFIG_YAML` documents it. Live `~/.cidx/config.yml` files don't need edits (boolean default applies); apply to existing projects with a **full reindex**.
+
+### Search (`src/core/index-manager.ts`)
+
+`searchOnTable` can now merge up to **four RRF legs**: code-vector ANN, `doc_vector` ANN, `content` BM25, `doc` BM25.
+
+- **Gating.** The doc legs run only when (a) the caller didn't pass `doc:false`, (b) the table actually has the columns (`tableColumns` — legacy tables never pay the extra queries), and (c) the leg has a vector/query to run (`doc_vector` ANN needs a query embedding; `text` mode skips the vector leg entirely).
+- **Merging.** New `combine(lists)` / `mergeWithDocLegs(...)` keep the legacy behavior byte-for-byte when no doc leg yields results: a single non-empty list is returned sliced **with its native metric intact** (`_distance` for vector legs, no `_score`), and multiple lists RRF-merge into `_score`. Only when a doc leg actually contributes rows do the results carry `_score` (RRF) and a `_docHit: true` marker — surfaced as `[doc hit]` in CLI/MCP output (`formatResults`).
+- **Per-call opt-out.** `doc` option on `search_codebase` (MCP), POST `/search` + `/search/batch` (control API), the **stdio bridge** (field-by-field forwarding), and CLI `cidx search|open|batch --doc false`; `doc:false` skips the doc legs even on fresh tables (useful for a fast pure-code lookup).
+- **Filters apply to doc legs too** (`buildWhere` `where` is shared by all four legs), and `searchAll`/`searchBatch` inherit everything since they fan out over `searchIndex`.
+
+### Surfaces
+
+MCP tool schemas (`tool-defs.ts`) gained the `doc` boolean on both search tools; `formatResults` renders the `[doc hit]` marker; CLI help/usage updated. No new tools — this is a search-quality upgrade inside the existing `search_codebase` / `search_codebase_batch` / `cidx search`.
+
+### Tests
+
+New suite `tests/docstring.test.ts` (9 tests): Python docstring + fallback to preceding comments, contiguous-comment-run extraction per language shape, the 1200-char cap, doc-on-first-chunk-only for split symbols, class + method doc attachment, and Go type-decl docs.
 
 ---
 
