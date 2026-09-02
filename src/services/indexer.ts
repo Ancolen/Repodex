@@ -2,6 +2,7 @@ import { stat, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import ignore, { type Ignore } from "ignore";
 import { CONFIG } from "../config";
+import { readProjectConfig, extToLanguage, languageAllowSet } from "../core/project-config";
 import { chunkCode } from "../chunking/chunker";
 import { getEmbeddings } from "./ollama";
 import { insertChunks, deleteFileRecords, ensureVectorIndex, ensureFtsIndex, type CodeRecord } from "./db";
@@ -52,8 +53,8 @@ export function isPathIgnored(ig: Ignore, baseDir: string, fullPath: string): bo
   return ig.ignores(rel);
 }
 
-/** Builds an ignore matcher from .gitignore + .cidxignore + global ignores. */
-export async function buildIgnore(baseDir: string): Promise<Ignore> {
+/** Builds an ignore matcher from .gitignore + .cidxignore + global ignores (+ optional extra patterns from `.cidx.json`). */
+export async function buildIgnore(baseDir: string, extra?: string[] | undefined): Promise<Ignore> {
   const ig = ignore().add(CONFIG.GLOBAL_IGNORED_DIRS);
   // .gitignore (optional, controlled by CONFIG.RESPECT_GITIGNORE)
   if (CONFIG.RESPECT_GITIGNORE) {
@@ -71,14 +72,23 @@ export async function buildIgnore(baseDir: string): Promise<Ignore> {
   } catch {
     // continue with defaults if there is no .cidxignore
   }
+  // .cidx.json `ignore` patterns (per-project extra rules)
+  if (extra && extra.length > 0) ig.add(extra);
   return ig;
 }
 
-/** Recursively scans a directory and returns the list of files to index. */
+/**
+ * Recursively scans a directory and returns the list of files to index.
+ * `langSet` (from a `.cidx.json` `languages` allowlist) keeps only files whose
+ * extension produces a language label inside the set — unlabeled extensions are
+ * dropped while a filter is active. Filtered-out files are absent from the
+ * returned list, so the deleted-file cleanup prunes them on the next sync.
+ */
 export async function collectFiles(
   baseDir: string,
   ig: Ignore,
   allowSet?: Set<string> | null,
+  langSet?: Set<string> | null,
 ): Promise<string[]> {
   const out: string[] = [];
   async function walk(dir: string): Promise<void> {
@@ -96,6 +106,11 @@ export async function collectFiles(
       } else if (entry.isFile() && isAllowed(full)) {
         // In git-tracked mode, only files in the allowed set.
         if (allowSet && !allowSet.has(full)) continue;
+        // Per-project language allowlist (.cidx.json `languages`).
+        if (langSet) {
+          const lang = extToLanguage(path.extname(full));
+          if (!lang || !langSet.has(lang)) continue;
+        }
         out.push(full);
       }
     }
@@ -114,6 +129,7 @@ export async function indexFile(
   filePath: string,
   registry?: Registry,
   signal?: AbortSignal,
+  embedModel?: string | undefined,
 ): Promise<FileIndexResult> {
   if (!isAllowed(filePath)) return { chunks: 0, dim: null };
   if (signal?.aborted) return { chunks: 0, dim: null };
@@ -135,7 +151,7 @@ export async function indexFile(
     return { chunks: 0, dim: null };
   }
 
-  const model = CONFIG.OLLAMA_MODEL;
+  const model = embedModel ?? CONFIG.OLLAMA_MODEL;
   const texts = chunks.map((c) => c.content);
   const hashes = texts.map(hashContent);
   const vectors: (number[] | null)[] = new Array(chunks.length).fill(null);
@@ -167,7 +183,7 @@ export async function indexFile(
     // corresponding chunks are not written; this is fine since cancellation will
     // drop the table anyway.
     if (signal?.aborted) return;
-    const embs = await getEmbeddings(batch.map((i) => texts[i]!));
+    const embs = await getEmbeddings(batch.map((i) => texts[i]!), model);
     for (let k = 0; k < batch.length; k++) {
       const i = batch[k]!;
       const vec = embs[k];
@@ -252,12 +268,24 @@ export async function indexDirectory(
     );
   }
 
-  const ig = await buildIgnore(target.baseDir);
+  // Per-project configuration (.cidx.json): extra ignore patterns, language
+  // allowlist, embedding model. Read fresh on every job, so a reindex picks up
+  // edits; filtered-out files are pruned by the deleted-file cleanup.
+  const pcfg = readProjectConfig(target.baseDir);
+  if (pcfg?.embedModel && pcfg.embedModel !== CONFIG.OLLAMA_MODEL) {
+    console.error(`[indexer] '${target.indexName}' using per-project embedding model: ${pcfg.embedModel}`);
+  }
+  const langSet = languageAllowSet(pcfg);
+  if (langSet) {
+    console.error(`[indexer] '${target.indexName}' language filter: ${[...langSet].join(", ")}`);
+  }
+
+  const ig = await buildIgnore(target.baseDir, pcfg?.ignore);
   const allowSet = CONFIG.GIT_TRACKED_ONLY ? await gitTrackedFiles(target.baseDir) : null;
   if (CONFIG.GIT_TRACKED_ONLY && allowSet) {
     console.error(`[indexer] '${target.indexName}' git-tracked mode: ${allowSet.size} tracked files.`);
   }
-  const files = await collectFiles(target.baseDir, ig, allowSet);
+  const files = await collectFiles(target.baseDir, ig, allowSet, langSet);
   const total = files.length;
 
   // --- Clean up deleted/ignored files (incremental sync) ---
@@ -286,7 +314,7 @@ export async function indexDirectory(
   for (const file of files) {
     if (opts.signal?.aborted) break;
     try {
-      const r = await indexFile(target, file, opts.registry, opts.signal);
+      const r = await indexFile(target, file, opts.registry, opts.signal, pcfg?.embedModel);
       chunks += r.chunks;
       if (dim === null && r.dim !== null) dim = r.dim;
     } catch (err) {

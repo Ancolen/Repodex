@@ -25,7 +25,8 @@ import {
   type SearchResult,
   type SearchFilters,
 } from "../services/db";
-import { cachedEmbed } from "../services/ollama";
+import { cachedEmbed, getEmbedding } from "../services/ollama";
+import { readProjectConfig } from "./project-config";
 import { rerankScores } from "../services/rerank";
 import { selectMMR } from "../utils/mmr";
 import { applyCharBudget } from "../utils/budget";
@@ -376,7 +377,9 @@ export class IndexManager {
       status: "indexing",
       fileCount: 0,
       chunkCount: 0,
-      embedModel: CONFIG.OLLAMA_MODEL,
+      // A per-project model override (.cidx.json `embedModel`) wins over the
+      // global config; the record pins the model the table is built with.
+      embedModel: readProjectConfig(baseDir)?.embedModel ?? CONFIG.OLLAMA_MODEL,
       embedDim: null,
       lastIndexedAt: null,
       createdAt: now,
@@ -418,6 +421,17 @@ export class IndexManager {
     const rec = this.registry.getIndex(name);
     if (!rec) throw new Error(`Index not found: ${name}`);
     if (rec.status === "indexing") return rec; // already in progress
+
+    // A changed per-project embedding model (.cidx.json) can't be applied
+    // incrementally — vectors from two models can never share a table. Escalate
+    // to a full reindex, which rewrites every file with the new model.
+    const pcfgModel = readProjectConfig(rec.path)?.embedModel;
+    if (pcfgModel && rec.embedModel && pcfgModel !== rec.embedModel) {
+      console.error(
+        `[manager] '${name}' .cidx.json embedModel changed (${rec.embedModel} → ${pcfgModel}); reindexing from scratch.`,
+      );
+      return this.reindex(name);
+    }
 
     this.registry.setIndexStatus(name, "indexing");
     const target: IndexTarget = {
@@ -488,13 +502,13 @@ export class IndexManager {
     const rec = this.registry.getIndex(name);
     if (!rec) throw new Error(`Index not found: ${name}`);
     const mode = opts?.mode ?? "hybrid";
-    if (mode !== "text" && !this.modelMatches(rec)) {
-      throw new Error(
-        `'${name}' was indexed with model '${rec.embedModel}'; active model is '${CONFIG.OLLAMA_MODEL}'. ` +
-          `Incompatible vectors. Fix: 'reindex ${name}' (or mode:"text").`,
-      );
-    }
-    const vector = mode === "text" ? null : await cachedEmbed(query, CONFIG.OLLAMA_MODEL, this.registry);
+    // The query is embedded with the model the table was built with (the record
+    // pins it — global config or a .cidx.json per-project override), so vectors
+    // are always comparable. A legacy record without a model falls back to the
+    // global config.
+    const projectModel = rec.embedModel ?? CONFIG.OLLAMA_MODEL;
+    const vector =
+      mode === "text" ? null : await cachedEmbed(query, projectModel, this.registry, (t) => getEmbedding(t, projectModel));
     const rerankOn = this.wantRerank(opts);
     const mmrOn = this.wantMMR(opts);
     const fetchLimit = rerankOn || mmrOn ? Math.max(limit, CONFIG.RERANK_TOP_K, CONFIG.MMR_TOP_K) : limit;
@@ -505,23 +519,11 @@ export class IndexManager {
     return applyCharBudget(enriched, opts?.maxChars);
   }
 
-  /** Search across all compatible projects; results are merged and ranked. */
+  /** Search across all projects; results are merged and ranked. */
   async searchAll(query: string, limit = 5, opts?: SearchOptions): Promise<ScopedSearchResult[]> {
     const mode = opts?.mode ?? "hybrid";
-    const all = this.registry.listIndexes();
-    // In "text" mode, model compatibility is not required (no vectors used).
-    const indexes = mode === "text" ? all : all.filter((rec) => this.modelMatches(rec));
-    if (mode !== "text") {
-      const skipped = all.filter((rec) => !this.modelMatches(rec));
-      if (skipped.length > 0) {
-        console.error(
-          `[manager] Projects excluded from the search due to model mismatch (reindex needed): ` +
-            skipped.map((r) => r.name).join(", "),
-        );
-      }
-    }
+    const indexes = this.registry.listIndexes();
     if (indexes.length === 0) return [];
-    const vector = mode === "text" ? null : await cachedEmbed(query, CONFIG.OLLAMA_MODEL, this.registry);
     const rerankOn = this.wantRerank(opts);
     const mmrOn = this.wantMMR(opts);
     const fetchLimit = rerankOn || mmrOn ? Math.max(limit, CONFIG.RERANK_TOP_K, CONFIG.MMR_TOP_K) : limit;
@@ -529,6 +531,12 @@ export class IndexManager {
     const perTable = await Promise.all(
       indexes.map(async (rec) => {
         try {
+          // Each table is queried with a vector embedded by the model the table
+          // was built with (per-project overrides make models differ between
+          // projects). Caveat: cross-project ranking mixes distances from
+          // different embedding spaces when models differ.
+          const model = rec.embedModel ?? CONFIG.OLLAMA_MODEL;
+          const vector = mode === "text" ? null : await cachedEmbed(query, model, this.registry, (t) => getEmbedding(t, model));
           const rows = await this.searchOnTable(rec.tableName, query, vector, fetchLimit, opts);
           return rows.map((r) => this.scope(r, rec.name, rec.lastIndexedAt));
         } catch {
@@ -1471,10 +1479,6 @@ export class IndexManager {
   }
 
   /** Is the index compatible with the active embedding model? (compatible if no model recorded.) */
-  private modelMatches(rec: IndexRecord): boolean {
-    return !rec.embedModel || rec.embedModel === CONFIG.OLLAMA_MODEL;
-  }
-
   // ----------------------------------------------------------------- restore
 
   /**
@@ -1546,7 +1550,9 @@ export class IndexManager {
       } else {
         this.registry.setIndexStats(t.indexName, result.files, result.chunks, Date.now());
         if (result.dim !== null) {
-          this.registry.setIndexEmbedding(t.indexName, CONFIG.OLLAMA_MODEL, result.dim);
+          // Pin the model actually used for this run (per-project override or global).
+          const usedModel = readProjectConfig(t.baseDir)?.embedModel ?? CONFIG.OLLAMA_MODEL;
+          this.registry.setIndexEmbedding(t.indexName, usedModel, result.dim);
         }
         this.registry.setIndexStatus(t.indexName, "ready");
         const pruned = this.registry.pruneEmbeddingCache(CONFIG.EMBED_CACHE_MAX);

@@ -1,6 +1,8 @@
 import chokidar, { type FSWatcher } from "chokidar";
+import path from "node:path";
 import { CONFIG } from "../config";
 import { buildIgnore, isPathIgnored, indexFile, removeFileIndex, type IndexTarget } from "./indexer";
+import { readProjectConfig, extToLanguage, languageAllowSet } from "../core/project-config";
 import type { Registry } from "../core/registry";
 
 export interface WatchOptions {
@@ -53,15 +55,34 @@ export function startWatcher(target: IndexTarget, opts: WatchOptions = {}): FSWa
   const fire = async (filePath: string, action: PendingAction): Promise<void> => {
     try {
       const ig = await igPromise;
-      if (isPathIgnored(ig, target.baseDir, filePath)) {
-        // Ignored file: do not index. If it was indexed before (a rule started
-        // covering it later), remove it from the table → stays consistent with
-        // full indexing.
+      // Per-project config is read fresh per event so watcher writes follow the
+      // same rules as the next full index (`.cidx.json` `languages` allowlist +
+      // `embedModel` override; extra `ignore` patterns still come from the
+      // startup matcher, matching the .cidxignore semantics above).
+      const pcfg = readProjectConfig(target.baseDir);
+      const langSet = languageAllowSet(pcfg);
+      const lang = extToLanguage(path.extname(filePath));
+      if (isPathIgnored(ig, target.baseDir, filePath) || (langSet !== null && (!lang || !langSet.has(lang)))) {
+        // Ignored/filtered file: do not index. If it was indexed before (a rule
+        // started covering it later), remove it from the table → stays
+        // consistent with full indexing.
         await removeFileIndex(target, filePath, opts.registry);
         return;
       }
+      // A changed per-project embedding model must not mix vectors from two
+      // models into one table: skip writes until the project is reindexed.
+      if (pcfg?.embedModel && opts.registry) {
+        const rec = opts.registry.getIndex(target.indexName);
+        if (rec?.embedModel && rec.embedModel !== pcfg.embedModel) {
+          console.error(
+            `[watcher] '${target.indexName}' .cidx.json embedModel changed (${rec.embedModel} → ${pcfg.embedModel}); ` +
+              `skipping '${filePath}'. Reindex to apply.`,
+          );
+          return;
+        }
+      }
       if (action === "index") {
-        await indexFile(target, filePath, opts.registry);
+        await indexFile(target, filePath, opts.registry, undefined, pcfg?.embedModel);
       } else {
         await removeFileIndex(target, filePath, opts.registry);
       }

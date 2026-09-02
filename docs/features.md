@@ -79,6 +79,21 @@ What the tool **does today** (version 2.2.0). For what's planned, see [`status.m
 - Optional git-tracked-only indexing (`gitTrackedOnly`).
 - **Automatic incremental sync on branch change** (watches `.git/HEAD`).
 
+## Per-project configuration (`.cidx.json`)
+
+- A project root can carry a **`.cidx.json`** — the per-project counterpart to the global `~/.cidx/config.yml`. Three optional fields, validated independently (an invalid field is dropped with a warning; a file with no valid fields is ignored; invalid JSON warns and is skipped — indexing never fails because of it):
+  ```json
+  {
+    "languages": ["typescript", "gdscript"],
+    "ignore": ["vendor/**", "*.gen.ts"],
+    "embedModel": "qwen3-embedding:8b-q8_0"
+  }
+  ```
+- **`languages`** — an allowlist of language labels (the same labels as the `language` search filter: `typescript`, `python`, `gdscript`, `markdown`, …). Files whose extension produces no label are dropped while the filter is active. Filtered-out files are absent from the file list, so the **deleted-file cleanup prunes them on the next sync**; the watcher removes them live on file events.
+- **`ignore`** — extra ignore patterns layered on top of `.gitignore` + `.cidxignore` (same `ignore`-package semantics).
+- **`embedModel`** — a per-project embedding model. The record's `embedModel` is pinned at `createIndex`, a **`sync` escalates to a full reindex** when the project config's model differs (vectors from two models can't share a table), and the **watcher skips writes** for a project whose model changed until it is reindexed. Queries are embedded with the model the table was built with, so search stays self-consistent. (Caveat: `searchAll` across projects using different models mixes distances from different embedding spaces.)
+- Read **fresh on every index job and watcher event** — editing `.cidx.json` takes effect on the next sync/reindex (or immediately for watcher events), no daemon restart.
+
 ## Transports
 
 - **Streamable HTTP** (`POST /mcp`, stateless) — recommended.

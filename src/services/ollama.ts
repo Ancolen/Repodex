@@ -4,10 +4,10 @@ import { hashContent } from "../utils/hash";
 
 const ollama = new Ollama({ host: CONFIG.OLLAMA_URL });
 
-/** Generates an embedding for a single text. */
-export async function getEmbedding(text: string): Promise<number[]> {
+/** Generates an embedding for a single text (model defaults to the global config). */
+export async function getEmbedding(text: string, model: string = CONFIG.OLLAMA_MODEL): Promise<number[]> {
   const res = await ollama.embeddings({
-    model: CONFIG.OLLAMA_MODEL,
+    model,
     prompt: text,
   });
   return res.embedding;
@@ -17,10 +17,13 @@ export async function getEmbedding(text: string): Promise<number[]> {
  * Embeds multiple texts in a single call (batch indexing).
  * The Ollama `embed` API accepts an array as input.
  */
-export async function getEmbeddings(texts: string[]): Promise<number[][]> {
+export async function getEmbeddings(
+  texts: string[],
+  model: string = CONFIG.OLLAMA_MODEL,
+): Promise<number[][]> {
   if (texts.length === 0) return [];
   const res = await ollama.embed({
-    model: CONFIG.OLLAMA_MODEL,
+    model,
     input: texts,
   });
   return res.embeddings;

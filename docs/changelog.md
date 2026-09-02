@@ -8,6 +8,20 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ## Unreleased
 
+### Per-project configuration (`.cidx.json`)
+
+A project root can carry a **`.cidx.json`** — the per-project counterpart to the global config — with three independently-validated optional fields:
+
+- **`languages`** — a language-label allowlist (same labels as the `language` search filter). Files whose extension produces no label are dropped while the filter is active; filtered-out files are absent from the file list, so the deleted-file cleanup prunes them on the next sync, and the watcher removes them live on file events.
+- **`ignore`** — extra ignore patterns layered over `.gitignore` + `.cidxignore`.
+- **`embedModel`** — a per-project embedding model. Pinned to the record at `createIndex`; a `sync` **escalates to a full reindex** when the configured model differs (vectors from two models can't share a table); the **watcher skips writes** for a changed model until the reindex runs. Queries are embedded with the model the table was built with.
+
+The file is read fresh on every index job and watcher event (no daemon restart). Invalid fields are dropped with warnings; invalid JSON warns and is skipped — indexing never fails because of the file.
+
+**Behavior change (model compatibility):** `searchIndex`/`searchAll` no longer throw when the global `OLLAMA_MODEL` differs from what a table was built with — the query is now embedded with the **record's pinned model** (`rec.embedModel ?? CONFIG.OLLAMA_MODEL`). This makes per-project model overrides self-consistent; the old global-mismatch throw is gone. Caveat: `searchAll` across projects using different models mixes distances from different embedding spaces.
+
+Wired through the full stack (`indexer` full-index + `watcher` live writes + `index-manager` create/sync/search + `ollama.ts` model-parameterized embeds). New module `src/core/project-config.ts`; `extToLanguage` unifies grammar labels (`EXT_TO_GRAMMAR`) and text labels (`TEXT_LANG_BY_EXT`). Tests: 13 new (`tests/project-config.test.ts`) → **281/281** (751 expect); `bun run typecheck` clean.
+
 ### cidx identity — every user-facing name now says "cidx"
 
 The old generic names (`.mcpignore`, `indexer.yml`, `~/.mcp-indexer`, `MCP_INDEXER_HOME`, the `mcp-code-indexer` product name and systemd unit) made it hard to tell what a file or setting belonged to. **Clean break** — old names are no longer read:

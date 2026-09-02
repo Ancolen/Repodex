@@ -415,6 +415,24 @@ watcher:
 > testdata/
 > ```
 
+## Per-project configuration (`.cidx.json`)
+
+The global `~/.cidx/config.yml` applies to every project. A project root can carry a **`.cidx.json`** to customize how *that* project is indexed. All fields are optional; invalid values are dropped with a warning and indexing never fails because of the file.
+
+```json
+{
+  "languages": ["typescript", "gdscript"],
+  "ignore": ["vendor/**", "*.gen.ts"],
+  "embedModel": "qwen3-embedding:8b-q8_0"
+}
+```
+
+- **`languages`** — allowlist of language labels (same labels as the `language` search filter: `typescript`, `python`, `gdscript`, `markdown`, …). Files with no label for their extension are dropped while the filter is active; already-indexed files that no longer pass are pruned on the next `sync` (and removed live by the watcher).
+- **`ignore`** — extra ignore patterns layered on top of `.gitignore` + `.cidxignore`.
+- **`embedModel`** — a per-project embedding model. Set it **before the first index** (the model is pinned to the project at creation). Changing it later escalates the next `sync` to a full reindex, and the watcher skips writes until that reindex runs, so vectors from two models never share a table. Queries are always embedded with the model the table was built with.
+
+The file is read fresh on every index job and watcher event — no daemon restart needed.
+
 ## Data and Storage
 
 All data is kept under the central `~/.cidx/`:
