@@ -3,7 +3,7 @@
  *
  * Chunks a fixed long TS function and prints { count, contentLen }. The caller
  * sets MAX_CHUNK_TOKENS in the env so the chunker's effective char limit changes;
- * INDEXER_CONFIG points at a non-existent YAML so only defaults + env apply.
+ * CIDX_CONFIG points at a non-existent YAML so only defaults + env apply.
  */
 import { chunkCode } from "../../src/chunking/chunker";
 

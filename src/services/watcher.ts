@@ -24,7 +24,7 @@ type PendingAction = "index" | "remove";
  * - While a full index/sync is running (isBusy), events are deferred; this way
  *   the background job and the watcher do not write to the same LanceDB table
  *   concurrently.
- * - RESPECTS .gitignore/.mcpignore/global ignore rules: to stay consistent with
+ * - RESPECTS .gitignore/.cidxignore/global ignore rules: to stay consistent with
  *   full indexing, ignored files are not indexed (and are cleaned up if they were
  *   indexed before). Rules are read once at watcher startup; if they change, the
  *   next full reindex/sync reflects them.

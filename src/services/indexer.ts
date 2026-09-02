@@ -52,7 +52,7 @@ export function isPathIgnored(ig: Ignore, baseDir: string, fullPath: string): bo
   return ig.ignores(rel);
 }
 
-/** Builds an ignore matcher from .gitignore + .mcpignore + global ignores. */
+/** Builds an ignore matcher from .gitignore + .cidxignore + global ignores. */
 export async function buildIgnore(baseDir: string): Promise<Ignore> {
   const ig = ignore().add(CONFIG.GLOBAL_IGNORED_DIRS);
   // .gitignore (optional, controlled by CONFIG.RESPECT_GITIGNORE)
@@ -64,12 +64,12 @@ export async function buildIgnore(baseDir: string): Promise<Ignore> {
       // it's fine if there is no .gitignore
     }
   }
-  // .mcpignore (project-level extra rules, can override/extend .gitignore)
+  // .cidxignore (project-level extra rules, can override/extend .gitignore)
   try {
-    const content = await readFile(path.join(baseDir, ".mcpignore"), "utf-8");
+    const content = await readFile(path.join(baseDir, ".cidxignore"), "utf-8");
     ig.add(content);
   } catch {
-    // continue with defaults if there is no .mcpignore
+    // continue with defaults if there is no .cidxignore
   }
   return ig;
 }

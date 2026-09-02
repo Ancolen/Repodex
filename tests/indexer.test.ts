@@ -1,7 +1,7 @@
 /**
  * File collection / ignore logic tests for indexer.ts (does not require embedding).
  * Sets up a temporary directory tree; verifies that collectFiles collects allowed extensions
- * and respects ignoredDirs + .gitignore + .mcpignore rules.
+ * and respects ignoredDirs + .gitignore + .cidxignore rules.
  */
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
@@ -36,8 +36,8 @@ beforeAll(() => {
   w(".gitignore", "secret/\n*.log\n");
   w("secret/key.ts", "const k = 1");
   w("app.log", "logline");
-  // Ignored by .mcpignore
-  w(".mcpignore", "vendor/\n");
+  // Ignored by .cidxignore
+  w(".cidxignore", "vendor/\n");
   w("vendor/v.ts", "vendored");
 });
 
@@ -83,7 +83,7 @@ describe("collectFiles", () => {
 
     // .gitignore excluded
     expect(rel).not.toContain("secret/key.ts");
-    // .mcpignore excluded
+    // .cidxignore excluded
     expect(rel).not.toContain("vendor/v.ts");
   });
 

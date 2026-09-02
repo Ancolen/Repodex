@@ -996,13 +996,13 @@ function printHelp(): void {
   lines.push("");
   lines.push("CONFIGURATION");
   lines.push(`  Active file: ${CONFIG_SOURCE ?? "(none — defaults)"}`);
-  lines.push("  Search order: $INDEXER_CONFIG → ./indexer.yml → <home>/config.yml (created if absent)");
+  lines.push("  Search order: $CIDX_CONFIG → ./cidx.yml → <home>/config.yml (created if absent)");
   lines.push("  Priority: in-code default < YAML < environment variable");
   lines.push("  Show:    cidx config   ·   path only:  cidx config path");
-  lines.push("  Add extra ignore rules by placing a .mcpignore at the project root (.gitignore is also obeyed).");
+  lines.push("  Add extra ignore rules by placing a .cidxignore at the project root (.gitignore is also obeyed).");
   lines.push("");
   lines.push("ENVIRONMENT VARIABLES (temporary override)");
-  lines.push("  MCP_INDEXER_HOME, OLLAMA_URL, OLLAMA_MODEL, MCP_PORT, CONTROL_PORT,");
+  lines.push("  CIDX_HOME, CIDX_CONFIG, OLLAMA_URL, OLLAMA_MODEL, MCP_PORT, CONTROL_PORT,");
   lines.push("  EMBED_BATCH_SIZE, EMBED_CONCURRENCY, EMBED_CACHE_MAX, MAX_CHUNK_TOKENS,");
   lines.push("  VECTOR_INDEX_THRESHOLD, JOB_CONCURRENCY, RERANK_MODEL, RERANK_TOP_K,");
   lines.push("  RERANK_CONCURRENCY, MMR_LAMBDA, MMR_TOP_K");

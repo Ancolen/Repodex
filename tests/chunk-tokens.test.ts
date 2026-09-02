@@ -4,12 +4,12 @@ import { tmpdir } from "node:os";
 import { CHARS_PER_TOKEN, estimateTokens, effectiveChunkChars } from "../src/chunking/chunker";
 
 const CAP_FIXTURE = join(import.meta.dir, "fixtures", "chunk-token-cap.ts");
-const NO_YAML = join(tmpdir(), `mcp-no-such-config-${crypto.randomUUID()}.yml`);
+const NO_YAML = join(tmpdir(), `cidx-no-such-config-${crypto.randomUUID()}.yml`);
 
 /** Spawns the chunk-token-cap fixture (a single long function) and returns { count, contentLen }. */
 async function runCap(env: Record<string, string>): Promise<{ count: number; contentLen: number }> {
   const proc = Bun.spawn(["bun", "run", CAP_FIXTURE], {
-    env: { ...process.env, INDEXER_CONFIG: NO_YAML, ...env },
+    env: { ...process.env, CIDX_CONFIG: NO_YAML, ...env },
     stdout: "pipe",
     stderr: "pipe",
   });

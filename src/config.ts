@@ -1,6 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 
 /**
@@ -9,10 +9,14 @@ import { parse as parseYaml } from "yaml";
  * Priority (low to high): in-code defaults < YAML file < environment variables.
  *
  * The YAML file is searched in this order:
- *   1) $INDEXER_CONFIG (full path)
- *   2) ./indexer.yml or ./.indexer.yml (working directory)
- *   3) <home>/config.yml  (home = $MCP_INDEXER_HOME or ~/.mcp-indexer)
+ *   1) $CIDX_CONFIG (full path)
+ *   2) ./cidx.yml or ./.cidx.yml or ./cidx.yaml (working directory)
+ *   3) <home>/config.yml  (home = $CIDX_HOME or ~/.cidx)
  * If none exist, a default file with comments is CREATED at location (3).
+ *
+ * Migration: installs from before the cidx rename stored everything under
+ * ~/.mcp-indexer. If the new default home (~/.cidx) does not exist yet and the
+ * old one does, it is moved once at startup (see migrateLegacyHome).
  */
 
 export interface IndexerConfig {
@@ -64,7 +68,7 @@ export interface IndexerConfig {
 }
 
 const DEFAULTS: IndexerConfig = {
-  home: path.join(os.homedir(), ".mcp-indexer"),
+  home: path.join(os.homedir(), ".cidx"),
   server: { host: "127.0.0.1", mcpPort: 9371, controlPort: 9372 },
   ollama: { url: "http://127.0.0.1:11434", model: "qwen3-embedding", batchSize: 8, concurrency: 4 },
   embedding: { cacheMax: 50000 },
@@ -90,7 +94,7 @@ const DEFAULTS: IndexerConfig = {
     ],
     ignoredDirs: [
       "node_modules", ".git", ".lancedb", "dist", "build",
-      "out", ".cache", "target", ".claude", ".mcp-indexer",
+      "out", ".cache", "target", ".claude", ".cidx",
       ".godot",
     ],
     vectorIndexThreshold: 50000,
@@ -106,7 +110,7 @@ const DEFAULTS: IndexerConfig = {
 };
 
 /** Editable default YAML template (written if the file does not exist). */
-export const DEFAULT_CONFIG_YAML = `# mcp-code-indexer configuration
+export const DEFAULT_CONFIG_YAML = `# cidx configuration
 # Restart the daemon after making changes.
 
 # The root directory where all data (LanceDB + meta.db + log) is stored.
@@ -170,13 +174,50 @@ function strArray(v: unknown): string[] | undefined {
 }
 
 function configHomeBase(): string {
-  return expandHome(process.env.MCP_INDEXER_HOME ?? DEFAULTS.home);
+  return expandHome(process.env.CIDX_HOME ?? DEFAULTS.home);
+}
+
+/**
+ * One-time migration from the pre-rename data home: ~/.mcp-indexer → ~/.cidx.
+ * Runs only when the new default home does not exist yet and the old one does,
+ * and only for the *default* home (an explicit $CIDX_HOME is the user's own
+ * choice and is never auto-populated). Also skipped when $CIDX_CONFIG is set
+ * (an explicitly provided config file means the caller manages their own setup)
+ * or under a test run (`bun test` sets NODE_ENV=test) so tests never touch real
+ * user data. Idempotent: after the move the old dir is gone, so subsequent
+ * boots are no-ops.
+ */
+const LEGACY_DEFAULT_HOME = path.join(os.homedir(), ".mcp-indexer");
+function migrateLegacyHome(home: string): void {
+  if (home !== DEFAULTS.home || process.env.CIDX_CONFIG || process.env.NODE_ENV === "test") return;
+  if (existsSync(DEFAULTS.home) || !existsSync(LEGACY_DEFAULT_HOME)) return;
+  try {
+    renameSync(LEGACY_DEFAULT_HOME, DEFAULTS.home);
+    // The default config template pins `home:` to an absolute path; a config
+    // written by an older release points at the old home, which would make the
+    // daemon recreate ~/.mcp-indexer on the next boot. Rewrite it in place.
+    const cfgPath = path.join(DEFAULTS.home, "config.yml");
+    if (existsSync(cfgPath)) {
+      const text = readFileSync(cfgPath, "utf-8");
+      // The old default template also listed the old home dir name under
+      // indexing.ignoredDirs — swap that literal for the new one as well.
+      const patched = text
+        .split(LEGACY_DEFAULT_HOME)
+        .join(DEFAULTS.home)
+        .replace('    - ".mcp-indexer"', '    - ".cidx"');
+      if (patched !== text) writeFileSync(cfgPath, patched);
+    }
+    console.error(`[config] migrated data home: ${LEGACY_DEFAULT_HOME} → ${DEFAULTS.home}`);
+  } catch (err) {
+    console.error(`[config] failed to migrate ${LEGACY_DEFAULT_HOME} → ${DEFAULTS.home}:`, err);
+  }
 }
 
 /** Resolves the YAML file path; creates the default file if needed. */
 export function resolveConfigPath(): string | null {
-  if (process.env.INDEXER_CONFIG) return process.env.INDEXER_CONFIG;
-  for (const c of ["indexer.yml", ".indexer.yml", "indexer.yaml"]) {
+  migrateLegacyHome(configHomeBase());
+  if (process.env.CIDX_CONFIG) return process.env.CIDX_CONFIG;
+  for (const c of ["cidx.yml", ".cidx.yml", "cidx.yaml"]) {
     const p = path.resolve(process.cwd(), c);
     if (existsSync(p)) return p;
   }
@@ -207,7 +248,7 @@ const y = loadYaml(CONFIG_SOURCE);
 
 /** Resolved configuration (default < YAML < environment variable). */
 export const RESOLVED: IndexerConfig = {
-  home: expandHome(process.env.MCP_INDEXER_HOME ?? y.home ?? DEFAULTS.home),
+  home: expandHome(process.env.CIDX_HOME ?? y.home ?? DEFAULTS.home),
   server: {
     host: process.env.HOST ?? y.server?.host ?? DEFAULTS.server.host,
     mcpPort: num(process.env.MCP_PORT) ?? y.server?.mcpPort ?? DEFAULTS.server.mcpPort,
