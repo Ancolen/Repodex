@@ -1,5 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import * as lancedb from "@lancedb/lancedb";
+import { Field, FixedSizeList, Float32, Float64, Schema, Utf8 } from "apache-arrow";
+import type { DataType } from "apache-arrow";
 import { CONFIG } from "../config";
 
 /**
@@ -163,9 +165,41 @@ export async function insertChunks(table: string, records: CodeRecord[]): Promis
       await t.delete(`filePath IN (${inList})`);
       await t.add(await stripUnknownColumns(t, records));
     } else {
-      await conn.createTable(table, records);
+      await conn.createTable(table, records, { schema: arrowSchemaFor(records) });
     }
   });
+}
+
+/**
+ * Explicit Arrow schema for table creation, mirroring what inference produced
+ * for the original columns (number → Float64, string → Utf8, vector →
+ * FixedSizeList(dim, Float32)) plus the nullable docstring columns. Needed
+ * because inference cannot type an all-null field — a `doc: null` row 0 would
+ * fail createTable with "Failed to infer data type for field doc".
+ * The vector dim comes from the batch's first non-null vector (always present —
+ * the indexer skips chunks without a vector).
+ */
+function arrowSchemaFor(records: CodeRecord[]): lancedb.SchemaLike {
+  const dim = records.find((r) => r.vector?.length)?.vector.length ?? 0;
+  // The child field must be nullable too — doc_vector rows are null when a
+  // chunk carries no doc.
+  const vecType = new FixedSizeList(dim, new Field("item", new Float32(), true));
+  // All fields nullable — inference-created tables are nullable too, and
+  // doc / doc_vector legitimately hold nulls.
+  const f = (name: string, type: DataType): Field => new Field(name, type, true);
+  return new Schema([
+    f("id", new Utf8()),
+    f("filePath", new Utf8()),
+    f("content", new Utf8()),
+    f("vector", vecType),
+    f("language", new Utf8()),
+    f("symbolName", new Utf8()),
+    f("symbolType", new Utf8()),
+    f("startLine", new Float64()),
+    f("endLine", new Float64()),
+    f("doc", new Utf8()),
+    f("doc_vector", vecType),
+  ]);
 }
 
 /**
