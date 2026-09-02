@@ -10,6 +10,11 @@ Version-by-version implementation history, **newest first**. For the current don
 
 Version bumped 2.2.0 → **2.3.0**; `bun run typecheck` clean, `bun test` **287/287** (763 expect). Shipped together: the user-facing rename sweep (below), per-project `.cidx.json` configuration, and the `cidx open` search→editor handoff.
 
+### Fixes found on the live instance
+
+- **Rerank was silently dead on live indexes.** Rows returned by LanceDB arrive as non-extensible Proxy objects (Bun interop), so `refineAndSlice`'s in-place `result._rerankScore = …` assignment always threw and fell back to RRF order — rerank never actually applied, and every search logged the failure. Candidates are now shallow-copied before scoring; `_rerankScore` verified live.
+- **Honest post-sync stats.** `list`/`status` showed the **last job's** write counts after an incremental sync (mtime-skips + deletions made "107 files, 3 chunks" look like data loss when the table actually held 596 chunks). The registry now records the table's true row count (`countTableRows`) and the cached file count after every job.
+
 ### `cidx open` — search, then open the result in your editor
 
 The "search found it, now jump into it" step, end-to-end from the shell:

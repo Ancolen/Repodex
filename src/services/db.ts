@@ -317,6 +317,19 @@ export async function dropTable(table: string): Promise<void> {
 }
 
 /**
+ * Total rows in a table (0 when the table does not exist). Used to report the
+ * table's true chunk count after a job — an incremental sync's per-job write
+ * count would otherwise masquerade as the total.
+ */
+export async function countTableRows(table: string): Promise<number> {
+  const conn = getDB();
+  const names = await conn.tableNames();
+  if (!names.includes(table)) return 0;
+  const t = await conn.openTable(table);
+  return await t.countRows();
+}
+
+/**
  * If the table exceeds `minRows` rows and does not yet have a vector index,
  * builds an ANN index on the `vector` column (default: IVF_PQ, chosen by LanceDB
  * based on column statistics). On small tables, brute-force is already fast enough,

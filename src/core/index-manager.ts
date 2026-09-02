@@ -13,6 +13,7 @@ import {
 } from "../services/indexer";
 import { startWatcher } from "../services/watcher";
 import {
+  countTableRows,
   dropTable,
   searchTable,
   searchTableText,
@@ -1423,7 +1424,12 @@ export class IndexManager {
     mmrOn: boolean,
   ): Promise<T[]> {
     if (!(rerankOn || mmrOn) || rows.length <= limit) return rows.slice(0, limit);
-    const candidates = rows.slice(0, Math.max(limit, CONFIG.RERANK_TOP_K, CONFIG.MMR_TOP_K));
+    // Shallow-copy the candidates: rows come straight from LanceDB and arrive as
+    // non-extensible Proxy objects, so assigning `_rerankScore` in place throws
+    // ("Proxy object's 'set' trap returned falsy") and silently disables rerank.
+    const candidates = rows
+      .slice(0, Math.max(limit, CONFIG.RERANK_TOP_K, CONFIG.MMR_TOP_K))
+      .map((r) => ({ ...r }) as T);
 
     // 1) Rerank for precision (re-score + sort by relevance).
     if (rerankOn && (await this.ensureRerankAvailable())) {
@@ -1548,7 +1554,12 @@ export class IndexManager {
           this.registry.setIndexStatus(t.indexName, "error", "indexing cancelled");
         }
       } else {
-        this.registry.setIndexStats(t.indexName, result.files, result.chunks, Date.now());
+        // Report the table's true state, not the job's write counts: after an
+        // incremental sync (mtime-skips + deletions), result.files/chunks only
+        // describe what THIS job touched.
+        const fileCount = this.registry.listCachedFiles(t.indexName).length;
+        const chunkCount = await countTableRows(t.tableName);
+        this.registry.setIndexStats(t.indexName, fileCount, chunkCount, Date.now());
         if (result.dim !== null) {
           // Pin the model actually used for this run (per-project override or global).
           const usedModel = readProjectConfig(t.baseDir)?.embedModel ?? CONFIG.OLLAMA_MODEL;
