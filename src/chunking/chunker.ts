@@ -2,6 +2,7 @@ import path from "node:path";
 import type Parser from "web-tree-sitter";
 import { CONFIG } from "../config";
 import { EXT_TO_GRAMMAR, languageForExt, getParser } from "./tree-sitter";
+import { extractDoc } from "./docstring";
 
 type Node = Parser.SyntaxNode;
 
@@ -28,6 +29,13 @@ export interface Chunk {
   symbolName?: string;
   symbolType?: string;
   language?: string;
+  /**
+   * The symbol's docstring / doc comment (see `docstring.ts`). Present only on
+   * the FIRST chunk of a symbol (split chunks share the code body but not the
+   * doc), so each symbol contributes exactly one doc leg. Purely additive —
+   * the doc text is never removed from `content`.
+   */
+  doc?: string;
 }
 
 // --- Node type classification (cross-language common sets) ---
@@ -212,14 +220,19 @@ function splitLarge(text: string, baseLine: number, meta: Meta): Chunk[] {
 }
 
 /** Converts a whole node (with correct line range) into a chunk; splits it if large. */
-function emitNode(out: Chunk[], code: string, outer: Node, innerType: string, meta: Meta): void {
+function emitNode(out: Chunk[], code: string, outer: Node, innerType: string, meta: Meta, doc?: string): void {
   const text = code.slice(outer.startIndex, outer.endIndex);
   if (text.trim().length === 0) return;
   const startLine = outer.startPosition.row + 1;
   if (text.length <= MAX) {
-    out.push({ content: text, startLine, endLine: outer.endPosition.row + 1, ...meta });
+    const chunk: Chunk = { content: text, startLine, endLine: outer.endPosition.row + 1, ...meta };
+    if (doc !== undefined) chunk.doc = doc;
+    out.push(chunk);
   } else {
-    out.push(...splitLarge(text, startLine, meta));
+    // Split symbol: only the FIRST chunk carries the doc (one doc leg per symbol).
+    const parts = splitLarge(text, startLine, meta);
+    if (doc !== undefined && parts[0]) parts[0].doc = doc;
+    out.push(...parts);
   }
   void innerType;
 }
@@ -228,16 +241,19 @@ function emitNode(out: Chunk[], code: string, outer: Node, innerType: string, me
 function emitClass(out: Chunk[], code: string, outer: Node, cls: Node, language?: string): void {
   const className = nameOf(cls);
   const meta = buildMeta(language, className, symbolTypeOf(cls.type));
+  const doc = extractDoc(outer, cls, language);
   const whole = code.slice(outer.startIndex, outer.endIndex);
 
   if (whole.length <= MAX) {
-    emitNode(out, code, outer, cls.type, meta);
+    emitNode(out, code, outer, cls.type, meta, doc);
     return;
   }
 
   const body = cls.childForFieldName("body");
   if (!body) {
-    out.push(...splitLarge(whole, outer.startPosition.row + 1, meta));
+    const parts = splitLarge(whole, outer.startPosition.row + 1, meta);
+    if (doc !== undefined && parts[0]) parts[0].doc = doc;
+    out.push(...parts);
     return;
   }
 
@@ -249,16 +265,27 @@ function emitClass(out: Chunk[], code: string, outer: Node, cls: Node, language?
     const baseLine = outer.startPosition.row + 1;
     if (headerText.length <= MAX) {
       const endLine = baseLine + countLines(headerText);
-      out.push({ content: headerText, startLine: baseLine, endLine, ...meta });
+      const header: Chunk = { content: headerText, startLine: baseLine, endLine, ...meta };
+      if (doc !== undefined) header.doc = doc;
+      out.push(header);
     } else {
-      out.push(...splitLarge(headerText, baseLine, meta));
+      const parts = splitLarge(headerText, baseLine, meta);
+      if (doc !== undefined && parts[0]) parts[0].doc = doc;
+      out.push(...parts);
     }
   }
 
   for (const m of methods) {
     const mi = unwrap(m);
     const mname = className ? `${className}.${nameOf(mi) ?? "anonymous"}` : nameOf(mi);
-    emitNode(out, code, m, mi.type, buildMeta(language, mname, symbolTypeOf(mi.type)));
+    emitNode(
+      out,
+      code,
+      m,
+      mi.type,
+      buildMeta(language, mname, symbolTypeOf(mi.type)),
+      extractDoc(m, mi, language),
+    );
   }
 }
 
@@ -275,6 +302,9 @@ function emitGoTypeDecl(out: Chunk[], code: string, outer: Node, decl: Node, lan
     return;
   }
   const single = specs.length === 1;
+  // A doc comment above the declaration is unambiguous only for a single spec;
+  // a `type ( A ...; B ... )` group has no per-spec attribution, so no doc.
+  const doc = single ? extractDoc(outer, decl, language) : undefined;
   for (const spec of specs) {
     const name = spec.childForFieldName("name")?.text ?? nameOf(spec);
     const typeNode = spec.childForFieldName("type");
@@ -284,7 +314,7 @@ function emitGoTypeDecl(out: Chunk[], code: string, outer: Node, decl: Node, lan
         : typeNode?.type === "struct_type"
           ? "struct"
           : "type";
-    emitNode(out, code, single ? outer : spec, spec.type, buildMeta(language, name, st));
+    emitNode(out, code, single ? outer : spec, spec.type, buildMeta(language, name, st), doc);
   }
 }
 
@@ -333,7 +363,14 @@ function walk(parent: Node, code: string, language: string | undefined, out: Chu
       emitClass(out, code, top, inner, language);
     } else if (FUNCTION_LIKE.has(t)) {
       flushLoose();
-      emitNode(out, code, top, inner.type, buildMeta(language, nameOf(inner), symbolTypeOf(inner.type)));
+      emitNode(
+        out,
+        code,
+        top,
+        inner.type,
+        buildMeta(language, nameOf(inner), symbolTypeOf(inner.type)),
+        extractDoc(top, inner, language),
+      );
     } else {
       loose.push(top);
     }
