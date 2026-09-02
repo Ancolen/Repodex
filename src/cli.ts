@@ -192,7 +192,7 @@ async function cmdSearch(positionals: string[], flags: Record<string, string | b
   await requireDaemon();
   const query = positionals.join(" ");
   if (!query) {
-    console.error('Usage: cidx search "<query>" [--project x] [--limit n] [--mode hybrid|vector|text] [--language x] [--type x] [--path glob] [--rerank] [--mmr] [--max-chars n]');
+    console.error('Usage: cidx search "<query>" [--project x] [--limit n] [--mode hybrid|vector|text] [--language x] [--type x] [--path glob] [--rerank] [--mmr] [--max-chars n] [--doc]');
     process.exit(1);
   }
   const body: {
@@ -207,6 +207,7 @@ async function cmdSearch(positionals: string[], flags: Record<string, string | b
     rerank?: boolean;
     mmr?: boolean;
     maxChars?: number;
+    doc?: boolean;
   } = { query };
   if (typeof flags.project === "string") body.project = flags.project;
   if (typeof flags.limit === "string") body.limit = Number(flags.limit);
@@ -223,6 +224,9 @@ async function cmdSearch(positionals: string[], flags: Record<string, string | b
   else if (flags.mmr === "false") body.mmr = false;
   // --max-chars caps the returned text (results dropped whole to fit; top-1 always kept).
   if (typeof flags["max-chars"] === "string") body.maxChars = Number(flags["max-chars"]);
+  // --doc false skips the docstring retrieval legs (on by default where available).
+  if (flags.doc === true || flags.doc === "true") body.doc = true;
+  else if (flags.doc === "false") body.doc = false;
   const results = await api<any[]>("POST", "/search", body);
   printResults(results);
 }
@@ -231,7 +235,7 @@ async function cmdOpen(positionals: string[], flags: Record<string, string | boo
   await requireDaemon();
   const query = positionals.join(" ");
   if (!query) {
-    console.error('Usage: cidx open "<query>" [--pick n] [--project x] [--mode hybrid|vector|text] [--limit n] [--language x] [--type x] [--path glob] [--rerank] [--mmr]');
+    console.error('Usage: cidx open "<query>" [--pick n] [--project x] [--mode hybrid|vector|text] [--limit n] [--language x] [--type x] [--path glob] [--rerank] [--mmr] [--doc]');
     console.error("\nSearches, prints the results, and opens the selected one in $VISUAL/$EDITOR at the matching line.");
     process.exit(1);
   }
@@ -245,6 +249,7 @@ async function cmdOpen(positionals: string[], flags: Record<string, string | boo
     pathGlob?: string;
     rerank?: boolean;
     mmr?: boolean;
+    doc?: boolean;
   } = { query, limit: 10 }; // a list worth picking from, unless --limit says otherwise
   if (typeof flags.project === "string") body.project = flags.project;
   if (typeof flags.limit === "string") body.limit = Number(flags.limit);
@@ -256,6 +261,8 @@ async function cmdOpen(positionals: string[], flags: Record<string, string | boo
   else if (flags.rerank === "false") body.rerank = false;
   if (flags.mmr === true || flags.mmr === "true") body.mmr = true;
   else if (flags.mmr === "false") body.mmr = false;
+  if (flags.doc === true || flags.doc === "true") body.doc = true;
+  else if (flags.doc === "false") body.doc = false;
 
   const results = await api<any[]>("POST", "/search", body);
   if (results.length === 0) {
@@ -294,7 +301,7 @@ async function cmdBatch(positionals: string[], flags: Record<string, string | bo
   // Each positional is a separate query (quote multi-word queries).
   const queries = positionals;
   if (queries.length === 0) {
-    console.error('Usage: cidx batch "<q1>" "<q2>" ... [--project x] [--limit n] [--mode hybrid|vector|text] [--language x] [--type x] [--path glob] [--max-chars n]');
+    console.error('Usage: cidx batch "<q1>" "<q2>" ... [--project x] [--limit n] [--mode hybrid|vector|text] [--language x] [--type x] [--path glob] [--max-chars n] [--doc]');
     process.exit(1);
   }
   const body: {
@@ -309,6 +316,7 @@ async function cmdBatch(positionals: string[], flags: Record<string, string | bo
     rerank?: boolean;
     mmr?: boolean;
     maxChars?: number;
+    doc?: boolean;
   } = { queries };
   if (typeof flags.project === "string") body.project = flags.project;
   if (typeof flags.limit === "string") body.limit = Number(flags.limit);
@@ -322,6 +330,8 @@ async function cmdBatch(positionals: string[], flags: Record<string, string | bo
   if (flags.mmr === true || flags.mmr === "true") body.mmr = true;
   else if (flags.mmr === "false") body.mmr = false;
   if (typeof flags["max-chars"] === "string") body.maxChars = Number(flags["max-chars"]);
+  if (flags.doc === true || flags.doc === "true") body.doc = true;
+  else if (flags.doc === "false") body.doc = false;
   const groups = await api<any[]>("POST", "/search/batch", body);
   printBatchResults(groups);
 }
@@ -371,7 +381,8 @@ function printResults(results: any[]): void {
         : r._distance !== undefined
           ? `score ${r._distance.toFixed(3)}`
           : "";
-    console.log(`\n${i + 1}. [${r.project}] ${loc}${sym}${score ? `  (${score})` : ""}`);
+    const docHit = r._docHit ? "  [doc hit]" : "";
+    console.log(`\n${i + 1}. [${r.project}] ${loc}${sym}${score ? `  (${score})` : ""}${docHit}`);
     if (r.signature) console.log(`   ↳ ${r.signature}`);
     if (Array.isArray(r.contextBefore)) {
       r.contextBefore.forEach((l: string) => console.log(`   · ${l}`));
@@ -791,6 +802,7 @@ const COMMANDS: Record<string, CmdDoc> = {
       ["--rerank [bool]", "Second-stage reranker (on by default). --rerank true forces it on; --rerank false skips it for a faster lookup. Auto-disables if no reranker model is configured."],
       ["--mmr [bool]", "MMR diversification (on by default). --mmr true forces it on; --mmr false keeps a pure relevance order. Drops near-duplicate chunks so the top results are distinct."],
       ["--max-chars <n>", "Cap returned text to ~n chars: results are kept whole in ranked order while they fit (top-1 always returned). Pair with a higher --limit for recall without bloating output."],
+      ["--doc [bool]", "Docstring retrieval legs (on by default where available): results whose docstring/doc comment matched are marked [doc hit]. --doc false skips the doc legs."],
     ],
     details: [
       "mode=text requires no model compatibility (uses no vectors); works on old/incompatible indexes.",
@@ -816,6 +828,7 @@ const COMMANDS: Record<string, CmdDoc> = {
       ["--path <glob>", "File path pattern ('*' wildcard)."],
       ["--rerank [bool]", "Reranker (on by default). --rerank false skips it."],
       ["--mmr [bool]", "MMR diversification (on by default). --mmr false skips it."],
+      ["--doc [bool]", "Docstring retrieval legs (on by default where available). --doc false skips them."],
     ],
     details: [
       "Editor is $VISUAL, then $EDITOR, then vi. Line positioning: +<line> for terminal editors",
@@ -842,6 +855,7 @@ const COMMANDS: Record<string, CmdDoc> = {
       ["--rerank [bool]", "Second-stage reranker (on by default). --rerank false skips it."],
       ["--mmr [bool]", "MMR diversification (on by default). --mmr false keeps pure relevance."],
       ["--max-chars <n>", "Character budget applied PER QUERY; results kept whole while they fit."],
+      ["--doc [bool]", "Docstring retrieval legs (on by default where available). --doc false skips them."],
     ],
     details: ["Each argument is a separate query; quote multi-word queries. Duplicate queries are de-duped."],
     examples: [

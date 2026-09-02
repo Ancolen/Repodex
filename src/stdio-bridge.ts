@@ -159,6 +159,7 @@ async function main(): Promise<void> {
             rerank: args.rerank,
             mmr: args.mmr,
             maxChars: args.maxChars,
+            doc: args.doc,
           });
           return ok(formatResults(results));
         }
@@ -175,6 +176,7 @@ async function main(): Promise<void> {
             rerank: args.rerank,
             mmr: args.mmr,
             maxChars: args.maxChars,
+            doc: args.doc,
           });
           return ok(formatBatchResults(groups));
         }

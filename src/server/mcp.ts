@@ -60,6 +60,7 @@ function buildServer(deps: McpDeps): Server {
         rerank?: boolean;
         mmr?: boolean;
         maxChars?: number;
+        doc?: boolean;
       };
       const limit = args.limit ?? 5;
       const opts = {
@@ -71,6 +72,7 @@ function buildServer(deps: McpDeps): Server {
         rerank: args.rerank,
         mmr: args.mmr,
         maxChars: args.maxChars,
+        doc: args.doc,
       };
       try {
         const results = args.project
@@ -96,6 +98,7 @@ function buildServer(deps: McpDeps): Server {
         rerank?: boolean;
         mmr?: boolean;
         maxChars?: number;
+        doc?: boolean;
       };
       if (!Array.isArray(args.queries) || args.queries.length === 0) {
         return {
@@ -113,6 +116,7 @@ function buildServer(deps: McpDeps): Server {
         rerank: args.rerank,
         mmr: args.mmr,
         maxChars: args.maxChars,
+        doc: args.doc,
       };
       try {
         const groups = await deps.manager.searchBatch(

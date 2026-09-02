@@ -36,6 +36,8 @@ export interface SearchResult extends CodeRecord {
   _score?: number;
   /** Second-stage reranker relevance (0–1, higher = more relevant). Present only when reranking ran. */
   _rerankScore?: number;
+  /** This result matched via a docstring leg (doc_vector ANN or doc BM25). */
+  _docHit?: boolean;
 }
 
 /** Metadata filters that narrow search results. */

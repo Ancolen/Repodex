@@ -21,6 +21,7 @@ import {
   searchContent,
   tableMetadata,
   tableSymbolsWithContent,
+  tableColumns,
   ensureFtsIndex,
   buildWhere,
   type SearchResult,
@@ -118,6 +119,13 @@ export interface SearchOptions extends SearchFilters {
    * context. Always keeps at least the top result. Default undefined (no cap).
    */
   maxChars?: number | undefined;
+  /**
+   * Override the docstring retrieval legs for this call (tables indexed with
+   * `indexing.docstrings` carry a `doc_vector` + `doc` column per chunk).
+   * - false → skip the doc legs even if the table has them.
+   * - true/undefined → include them when the columns exist (default on).
+   */
+  doc?: boolean | undefined;
 }
 
 /** One occurrence of a symbol name found in the indexed code. */
@@ -1333,20 +1341,77 @@ export class IndexManager {
   ): Promise<SearchResult[]> {
     const where = buildWhere(opts);
     const mode = opts?.mode ?? "hybrid";
+    const wantDoc = opts?.doc !== false;
 
-    if (mode === "vector") return searchTable(table, vector!, limit, where);
-    if (mode === "text") return searchTableText(table, query, limit, where);
+    if (mode === "vector") {
+      const vec = await searchTable(table, vector!, limit, where);
+      if (!wantDoc) return vec;
+      return this.mergeWithDocLegs(table, query, vector, where, limit, [vec]);
+    }
+    if (mode === "text") {
+      const fts = await searchTableText(table, query, limit, where);
+      if (!wantDoc) return fts;
+      return this.mergeWithDocLegs(table, query, vector, where, limit, [fts]);
+    }
 
-    // hybrid: vector + BM25 → RRF
+    // hybrid: vector + BM25 → RRF (plus the docstring legs, when present)
     const pool = Math.max(limit * 3, 10);
     const [vec, fts] = await Promise.all([
       searchTable(table, vector!, pool, where),
       searchTableText(table, query, pool, where),
     ]);
-    // If the FTS index isn't built yet (old table), fall back to vector only.
-    if (fts.length === 0) return vec.slice(0, limit);
-    const merged = rrfMerge([vec, fts], (r) => String(r.id), 60);
-    return merged.slice(0, limit).map(({ item, score }) => ({ ...item, _score: score }));
+    if (!wantDoc) return this.combine([vec, fts], limit);
+    return this.mergeWithDocLegs(table, query, vector, where, pool, [vec, fts]);
+  }
+
+  /** Merges non-empty result lists: a single list keeps its native metric, multiple lists go through RRF. */
+  private combine(lists: SearchResult[][], fetchCount: number): SearchResult[] {
+    const nonEmpty = lists.filter((l) => l.length > 0);
+    if (nonEmpty.length === 0) return [];
+    if (nonEmpty.length === 1) return nonEmpty[0]!.slice(0, fetchCount);
+    return rrfMerge(nonEmpty, (r) => String(r.id), 60)
+      .slice(0, fetchCount)
+      .map(({ item, score }) => ({ ...item, _score: score }));
+  }
+
+  /**
+   * Merges the docstring retrieval legs with the base result lists via RRF.
+   * The legs are gated on the table actually having the columns (tables indexed
+   * before 2.4.0 predate `doc`/`doc_vector`): `doc_vector` ANN (needs a query
+   * vector) and BM25 over `doc`. Results that matched via a doc leg carry
+   * `_docHit: true` — useful for explaining why a code chunk answered an
+   * intent-style query ("how do we …?"). When no doc leg yields anything, the
+   * base lists keep their legacy semantics untouched.
+   */
+  private async mergeWithDocLegs(
+    table: string,
+    query: string,
+    vector: number[] | null,
+    where: string | undefined,
+    fetchCount: number,
+    base: SearchResult[][],
+  ): Promise<SearchResult[]> {
+    const cols = await tableColumns(table);
+    const docIds = new Set<string>();
+    const lists = [...base];
+    if (vector !== null && cols.has("doc_vector")) {
+      const hits = await searchTable(table, vector, fetchCount, where, "doc_vector");
+      for (const h of hits) docIds.add(String(h.id));
+      if (hits.length > 0) lists.push(hits);
+    }
+    if (cols.has("doc")) {
+      const hits = await searchTableText(table, query, fetchCount, where, ["doc"]);
+      for (const h of hits) docIds.add(String(h.id));
+      if (hits.length > 0) lists.push(hits);
+    }
+    if (lists.length === base.length) return this.combine(base, fetchCount);
+    return rrfMerge(lists, (r) => String(r.id), 60)
+      .slice(0, fetchCount)
+      .map(({ item, score }) => {
+        const row: SearchResult = { ...item, _score: score };
+        if (docIds.has(String(row.id))) row._docHit = true;
+        return row;
+      });
   }
 
   /** Sorts cross-project results by the metric appropriate for the mode. */
@@ -1354,7 +1419,13 @@ export class IndexManager {
     if (mode === "vector") {
       return rows
         .filter((r) => r._distance !== undefined)
-        .sort((a, b) => a._distance! - b._distance!);
+        // Merged results (docstring legs joined) carry an RRF `_score`; a plain
+        // single-column vector search does not and keeps the distance order.
+        .sort((a, b) =>
+          a._score !== undefined || b._score !== undefined
+            ? (b._score ?? 0) - (a._score ?? 0)
+            : a._distance! - b._distance!,
+        );
     }
     // hybrid/text → higher score first
     return rows.sort((a, b) => (b._score ?? 0) - (a._score ?? 0));

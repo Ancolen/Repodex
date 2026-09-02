@@ -80,6 +80,14 @@ export const TOOL_DEFINITIONS: Tool[] = [
             "ranked order while they fit (never truncated mid-chunk) — use a higher 'limit' for recall " +
             "and 'maxChars' to cap how much text comes back. The top result is always returned. Default: no cap.",
         },
+        doc: {
+          type: "boolean",
+          description:
+            "Docstring retrieval legs are ON by default (tables indexed with the docstring feature carry a " +
+            "separate doc_vector/doc column per symbol). Their vectors embed a symbol's docstring/comment, so " +
+            "intent-style queries ('how do we retry with backoff?') surface the code chunk that has that doc. " +
+            "Doc-matching results are marked with '[doc hit]'. Pass false to skip the doc legs.",
+        },
       },
       required: ["query"],
     },
@@ -125,6 +133,10 @@ export const TOOL_DEFINITIONS: Tool[] = [
         maxChars: {
           type: "number",
           description: "Optional character budget applied PER QUERY; results kept whole while they fit.",
+        },
+        doc: {
+          type: "boolean",
+          description: "Docstring retrieval legs ON by default (same semantics as search_codebase's 'doc'); pass false to skip.",
         },
       },
       required: ["queries"],

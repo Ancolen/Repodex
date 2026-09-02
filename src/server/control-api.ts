@@ -142,6 +142,7 @@ export function startControlApi(
       rerank,
       mmr,
       maxChars,
+      doc,
     } = (req.body ?? {}) as {
       query?: string;
       project?: string;
@@ -154,12 +155,13 @@ export function startControlApi(
       rerank?: boolean;
       mmr?: boolean;
       maxChars?: number;
+      doc?: boolean;
     };
     if (!query) {
       res.status(400).json({ error: "'query' is required" });
       return;
     }
-    const opts = { mode, language, symbolType, pathGlob, contextLines, rerank, mmr, maxChars };
+    const opts = { mode, language, symbolType, pathGlob, contextLines, rerank, mmr, maxChars, doc };
     try {
       const results = project
         ? await deps.manager.searchIndex(project, query, limit ?? 5, opts)
@@ -183,6 +185,7 @@ export function startControlApi(
       rerank,
       mmr,
       maxChars,
+      doc,
     } = (req.body ?? {}) as {
       queries?: unknown;
       project?: string;
@@ -195,12 +198,13 @@ export function startControlApi(
       rerank?: boolean;
       mmr?: boolean;
       maxChars?: number;
+      doc?: boolean;
     };
     if (!Array.isArray(queries) || queries.length === 0 || !queries.every((q) => typeof q === "string")) {
       res.status(400).json({ error: "'queries' must be a non-empty array of strings" });
       return;
     }
-    const opts = { mode, language, symbolType, pathGlob, contextLines, rerank, mmr, maxChars };
+    const opts = { mode, language, symbolType, pathGlob, contextLines, rerank, mmr, maxChars, doc };
     try {
       const groups = await deps.manager.searchBatch(queries as string[], project, limit ?? 5, opts);
       res.json(groups);

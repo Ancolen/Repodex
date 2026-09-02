@@ -38,7 +38,11 @@ export function formatResults(results: ScopedSearchResult[]): string {
           : r._distance !== undefined
             ? `Score (low=close): ${r._distance.toFixed(4)}`
             : "";
-      const meta = [relevance, r.indexedAt ? `indexed: ${fmtTime(r.indexedAt)}` : ""]
+      const meta = [
+        relevance,
+        r._docHit ? "doc hit" : "",
+        r.indexedAt ? `indexed: ${fmtTime(r.indexedAt)}` : "",
+      ]
         .filter(Boolean)
         .join(" · ");
       const sig = r.signature && r.signature !== r.content.trim() ? `\nSignature: ${r.signature}` : "";
