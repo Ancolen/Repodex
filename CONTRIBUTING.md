@@ -45,3 +45,30 @@ Open a GitHub issue with: what you ran, what you expected, what happened. For
 indexing bugs, include the file type/language involved (no proprietary code —
 a minimal repro snippet is enough). Security-sensitive reports go through
 [SECURITY.md](SECURITY.md), not public issues.
+
+## Releasing
+
+Releases are cut from `main` with a tag; CI does the rest.
+
+1. Bump the version — it appears in **five** places that must move together:
+   `package.json`, `src/server/mcp.ts` (Server info), `src/server/control-api.ts`
+   (`/ping`), `src/stdio-bridge.ts`, and `CLI_VERSION` in `src/cli.ts`.
+2. Convert the "Unreleased" section of `docs/changelog.md` into the new version.
+3. Tag and push:
+   ```bash
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
+
+Since native modules (LanceDB) are platform-specific, the binaries are not
+cross-compiled — the Release workflow builds each on its own native runner:
+
+| Asset               | Runner                 |
+|---------------------|------------------------|
+| `cidx-linux-x64`    | `ubuntu-latest`        |
+| `cidx-linux-arm64`  | `ubuntu-24.04-arm`     |
+| `cidx-darwin-x64`   | `macos-13` (Intel)     |
+| `cidx-darwin-arm64` | `macos-14` (Apple Silicon) |
+
+Each asset is uploaded to the GitHub Release with a `.sha256` checksum file;
+the clone-free one-line install (`web-install.sh`) downloads the latest one.

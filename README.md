@@ -8,6 +8,8 @@ A **Bun**-based daemon that vectorizes codebases with a local **Ollama** (`qwen3
 
 A single long-lived daemon manages **multiple projects**. By sending commands to the running daemon through a thin **CLI**, you can index new projects; while one project is being indexed in the background, you can run **uninterrupted searches** in other projects.
 
+**Contents**: [Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Service management](#automatic-startup-and-service-management) · [Usage](#usage) · [AI-agent setup](#connecting-to-an-ai-agent) · [Configuration](#configuration) · [Data and Storage](#data-and-storage) · [Architecture](#architecture) · [Development](#development) · [Releases](#releases) · [Contributing](#contributing) · [Security](#security) · [License](#license)
+
 ## Features
 
 - 🚀 **Asynchronous daemon** — the server opens instantly, indexing runs in the background on a job queue; while one project is being indexed, search continues uninterrupted in the others. Thanks to a configurable **worker pool** (`jobConcurrency`, default 2), multiple projects can be indexed in parallel; a long/large job does not block other projects.
@@ -71,7 +73,7 @@ ASSUME_YES=1 ... | bash    # auto-confirm prompts (headless install)
 BIN_DIR=~/bin ... | bash   # choose the directory where cidx/repodex go
 ```
 
-> For the one-line install to work, at least one **release** (a `v*` tag) must be published in the repo — see [Releases and CI](#releases-and-ci).
+> For the one-line install to work, at least one **release** (a `v*` tag) must be published in the repo — see [Releases](#releases).
 
 ### Install from source (with the script)
 
@@ -450,31 +452,17 @@ bun run build:binary  # produce a single executable → dist/cidx (grammars embe
 
 Once the single binary is built, `dist/cidx` can be run directly; the CLI, daemon and stdio bridge are dispatched within the same binary (`__daemon` / `__bridge` / CLI).
 
-## Releases and CI
+## Releases
 
-There are two GitHub Actions workflows:
+Binaries for Linux and macOS (x64 + arm64) are built automatically on each tagged release and published as GitHub Release assets (with sha256 checksums) — that's what the one-line install downloads. For how releases are produced, see [CONTRIBUTING.md](CONTRIBUTING.md#releasing).
 
-- **CI** (`.github/workflows/ci.yml`) — runs on every push and PR to `main`: `bun install`, `typecheck`, `test`; plus a smoke test (`./dist/cidx version`) that verifies the single binary actually compiles and runs.
-- **Release** (`.github/workflows/release.yml`) — runs when a `v*` tag is pushed. Since **native modules** like lancedb are **platform-specific**, the binaries are **not cross-compiled**; each is built on its own native runner:
+## Contributing
 
-  | Asset | Runner |
-  |-------|--------|
-  | `cidx-linux-x64`    | `ubuntu-latest` |
-  | `cidx-linux-arm64`  | `ubuntu-24.04-arm` |
-  | `cidx-darwin-x64`   | `macos-13` (Intel) |
-  | `cidx-darwin-arm64` | `macos-14` (Apple Silicon) |
+Bug reports and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for setup, project ground rules, and the release process.
 
-  Each asset is uploaded to the GitHub Release together with a `.sha256` checksum file. The clone-free one-line install (`web-install.sh`) downloads these assets.
+## Security
 
-### Publishing a new release
-
-```bash
-# update the version in package.json, then:
-git tag v2.2.0
-git push origin v2.2.0      # triggers the Release workflow
-```
-
-When the tag is pushed, binaries for four platforms are built and automatically added to the Release; after that the `curl … | web-install.sh | bash` one-liner becomes usable.
+This tool is designed to run **locally, for a single user**; both servers are localhost-only and unauthenticated. To report a security issue, please follow [SECURITY.md](SECURITY.md) instead of opening a public issue.
 
 ## License
 

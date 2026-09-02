@@ -16,7 +16,7 @@ Motivated by a Godot game project: index a version-matched engine class referenc
 
 - `allowedExtensions` += `.xml`, `.rst` (defaults in `src/config.ts`, so the generated `DEFAULT_CONFIG_YAML` picks them up; **live `~/.mcp-indexer/config.yml` overrides defaults — update it too**).
 - `src/chunking/chunker.ts`: new exported `TEXT_LANG_BY_EXT` (`.xml`→`xml`, `.rst`→`rst`, `.json`→`json`, `.md`→`markdown`); `chunkCode` derives the language label as `EXT_TO_GRAMMAR[ext] ?? TEXT_LANG_BY_EXT[ext]` so fallback-chunked doc formats carry a meaningful `language` column and the `language` search filter works on them (grammar extensions unchanged; `.tscn`/`.tres`/`.gdshader`/`.godot` deliberately stay unlabeled).
-- No grammar added by design: per `CLAUDE.md`, any new grammar must pass the interleaved-determinism suite, and docs need search, not symbols — character fallback plus a label is the right weight here. Consequence: `find_symbol`/outline/deps return nothing for these files (expected).
+- No grammar added by design: any new grammar must pass the interleaved-determinism suite (see [`architecture.md`](./architecture.md)), and docs need search, not symbols — character fallback plus a label is the right weight here. Consequence: `find_symbol`/outline/deps return nothing for these files (expected).
 - Tests: `tests/chunker.test.ts` gains a "doc formats (xml/rst)" describe (fallback chunking + label propagation via `buildMeta`, Godot class-XML fixture, `.rst` fixture, `.md` retro-label); `tests/config.test.ts` asserts the new extensions.
 
 #### pathGlob: project-relative patterns actually match now
