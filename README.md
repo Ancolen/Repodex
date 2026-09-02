@@ -24,7 +24,7 @@ A single long-lived daemon manages **multiple projects**. By sending commands to
 - 🎮 **Godot support** — GDScript (`.gd`) gets full AST chunking (`class_name`, inner classes, `signal`, `enum`, `func`/`_init`), `extends "res://…"` + `preload`/`load` dependency resolution against the project root, and dead-code scoring that understands engine virtuals (`_ready`, `_process`, …) and editor-connected `_on_*` handlers. Godot text formats — `.gdshader`, `.tscn`, `.tres`, `project.godot` — are indexed with character-based chunking (searchable text, no symbols); the `.godot/` cache directory is ignored.
 - ⚡ **Efficient indexing** — batch + bounded parallel embedding, content-hash embedding cache (does not re-embed an unchanged symbol), mtime cache (skips an unchanged file), an ANN vector index + BM25/FTS index on large tables.
 - 🔁 **Incremental sync** — `sync` indexes only changed/new files and cleans up deleted ones; catches up at startup on changes made while the daemon was down.
-- 👀 **Live watching** — `chokidar` + debounce; supports atomic save/rename; obeys `.gitignore`/`.mcpignore` rules.
+- 👀 **Live watching** — `chokidar` + debounce; supports atomic save/rename; obeys `.gitignore`/`.cidxignore` rules.
 - 🌿 **Git awareness** — respects `.gitignore`, optional git-tracked-only files, automatic incremental sync on branch change.
 - 💾 **Persistent state** — registry, file cache and job state with `bun:sqlite`; resumes where it left off even if the daemon restarts.
 - 🔌 **Multiple transports** — **Streamable HTTP** (`/mcp`, recommended) + **SSE** (`/sse`, legacy) for AI agents; a **stdio bridge** (`cidx mcp`) for clients that expect stdio like Claude Desktop.
@@ -78,8 +78,8 @@ BIN_DIR=~/bin ... | bash   # choose the directory where cidx/repodex go
 ### Install from source (with the script)
 
 ```bash
-git clone https://github.com/Ancolen/repodex.git mcp-code-indexer
-cd mcp-code-indexer
+git clone https://github.com/Ancolen/repodex.git cidx
+cd cidx
 ./install.sh          # or: bun run setup
 ```
 
@@ -118,13 +118,13 @@ bun run src/cli.ts start      # starts the daemon in the background
 
 ## Automatic startup and service management
 
-`install.sh` manages the daemon as a **systemd user service** (`mcp-code-indexer`):
+`install.sh` manages the daemon as a **systemd user service** (`cidx`):
 
 ```bash
-systemctl --user status  mcp-code-indexer     # status
-systemctl --user restart mcp-code-indexer     # restart (after a config change)
-systemctl --user stop    mcp-code-indexer     # stop
-journalctl  --user -u    mcp-code-indexer -f  # live log
+systemctl --user status  cidx     # status
+systemctl --user restart cidx     # restart (after a config change)
+systemctl --user stop    cidx     # stop
+journalctl  --user -u    cidx -f  # live log
 ```
 
 For automatic startup at boot, user `linger` is enabled; manually if needed:
@@ -139,7 +139,7 @@ sudo loginctl enable-linger "$USER"
 
 ```bash
 ./uninstall.sh                # removes the service and commands, preserves data
-PURGE_DATA=1 ./uninstall.sh   # also deletes the ~/.mcp-indexer data
+PURGE_DATA=1 ./uninstall.sh   # also deletes the ~/.cidx data
 ```
 
 ## Usage
@@ -339,22 +339,22 @@ Practical consequences — what AI agents need to know:
 
 ## Configuration
 
-Everything is managed from a **YAML file**. On its first run, the daemon automatically creates `~/.mcp-indexer/config.yml` with comments. Edit it and restart the daemon.
+Everything is managed from a **YAML file**. On its first run, the daemon automatically creates `~/.cidx/config.yml` with comments. Edit it and restart the daemon.
 
 The file is searched in this order:
-1. `$INDEXER_CONFIG` (full path)
-2. `./indexer.yml` / `./.indexer.yml` (working directory — project-specific setting)
+1. `$CIDX_CONFIG` (full path)
+2. `./cidx.yml` / `./.cidx.yml` (working directory — project-specific setting)
 3. `<home>/config.yml` (created here if absent)
 
 To see the active file: `cidx config` (or the path only: `cidx config path`).
 
-> **Where is the data kept?** The default data root is `~/.mcp-indexer/` (config.yml, `db/`, `meta.db`, `daemon.log`).
-> With a bun installed via the official installer, `os.homedir()` returns the real `~`, so this path works naturally; no machine-specific path is forced. If you want a different location, set `MCP_INDEXER_HOME` (if you provide it before installation, `install.sh` also passes it to the service and to `cidx`/`repodex`) or edit the `home:` field in `config.yml`.
+> **Where is the data kept?** The default data root is `~/.cidx/` (config.yml, `db/`, `meta.db`, `daemon.log`).
+> With a bun installed via the official installer, `os.homedir()` returns the real `~`, so this path works naturally; no machine-specific path is forced. If you want a different location, set `CIDX_HOME` (if you provide it before installation, `install.sh` also passes it to the service and to `cidx`/`repodex`) or edit the `home:` field in `config.yml`.
 > (If bun is installed via **snap**, the data ends up in an isolated directory; that's why snap is not supported — see Requirements.)
 
 Example `config.yml`:
 ```yaml
-home: ~/.mcp-indexer          # data root (db + meta.db + log)
+home: ~/.cidx          # data root (db + meta.db + log)
 
 server:
   host: 127.0.0.1             # localhost only is recommended
@@ -405,11 +405,11 @@ watcher:
   debounceMs: 300
 ```
 
-**Priority:** in-code defaults < YAML < environment variables. Environment variables can also be used for a quick temporary override: `MCP_INDEXER_HOME`, `OLLAMA_URL`, `OLLAMA_MODEL`, `MCP_PORT`, `CONTROL_PORT`, `EMBED_BATCH_SIZE`, `EMBED_CONCURRENCY`, `EMBED_CACHE_MAX`, `MAX_CHUNK_TOKENS`, `VECTOR_INDEX_THRESHOLD`, `JOB_CONCURRENCY`, `RERANK_MODEL`, `RERANK_TOP_K`, `RERANK_CONCURRENCY`, `MMR_LAMBDA`, `MMR_TOP_K`. You can define additional ignore rules by placing a `.mcpignore` at a project root (`.gitignore` is also obeyed).
+**Priority:** in-code defaults < YAML < environment variables. Environment variables can also be used for a quick temporary override: `CIDX_HOME`, `OLLAMA_URL`, `OLLAMA_MODEL`, `MCP_PORT`, `CONTROL_PORT`, `EMBED_BATCH_SIZE`, `EMBED_CONCURRENCY`, `EMBED_CACHE_MAX`, `MAX_CHUNK_TOKENS`, `VECTOR_INDEX_THRESHOLD`, `JOB_CONCURRENCY`, `RERANK_MODEL`, `RERANK_TOP_K`, `RERANK_CONCURRENCY`, `MMR_LAMBDA`, `MMR_TOP_K`. You can define additional ignore rules by placing a `.cidxignore` at a project root (`.gitignore` is also obeyed).
 
-> 💡 **Exclude large data folders.** Since `allowedExtensions` includes `.json`, generated/very large JSON data files (e.g. HuggingFace `tokenizer.json`, fixture/static data) get split into thousands of chunks and embedded — this slows down indexing and pollutes search results. Exclude such folders by placing a `.mcpignore` at the project root:
+> 💡 **Exclude large data folders.** Since `allowedExtensions` includes `.json`, generated/very large JSON data files (e.g. HuggingFace `tokenizer.json`, fixture/static data) get split into thousands of chunks and embedded — this slows down indexing and pollutes search results. Exclude such folders by placing a `.cidxignore` at the project root:
 > ```gitignore
-> # .mcpignore
+> # .cidxignore
 > tokenizers/
 > **/*.lock
 > testdata/
@@ -417,12 +417,12 @@ watcher:
 
 ## Data and Storage
 
-All data is kept under the central `~/.mcp-indexer/`:
+All data is kept under the central `~/.cidx/`:
 - `db/` — LanceDB tables (`idx_<name>` per project)
 - `meta.db` — `bun:sqlite`: registry, file cache, job state
 - `daemon.log` — daemon logs
 
-To reset, just stop the daemon and delete the `~/.mcp-indexer/` folder.
+To reset, just stop the daemon and delete the `~/.cidx/` folder.
 
 ## Architecture
 

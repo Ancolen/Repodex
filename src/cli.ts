@@ -887,7 +887,7 @@ const COMMANDS: Record<string, CmdDoc> = {
   stop: {
     usage: "stop",
     summary: "Stops the running daemon gracefully (via the Control API).",
-    details: ["If installed as a systemd service, the service may restart it; use 'systemctl --user stop mcp-code-indexer'."],
+    details: ["If installed as a systemd service, the service may restart it; use 'systemctl --user stop cidx'."],
   },
   version: {
     usage: "version",
@@ -945,7 +945,7 @@ function printCommandHelp(name: string): void {
 /** Comprehensive general help — everything is reachable from here. */
 function printHelp(): void {
   const lines: string[] = [];
-  lines.push(`mcp-code-indexer ${CLI_VERSION} — local, multi-project, asynchronous code search daemon`);
+  lines.push(`cidx ${CLI_VERSION} — local, multi-project, asynchronous code search daemon`);
   lines.push("");
   lines.push("Indexes codebases with Ollama embeddings; offers AI agents hybrid (semantic +");
   lines.push("exact-term) search over MCP. A single daemon manages multiple projects.");
@@ -1022,7 +1022,7 @@ function printHelp(): void {
 }
 
 async function cmdVersion(): Promise<void> {
-  console.log(`cidx (mcp-code-indexer) ${CLI_VERSION}`);
+  console.log(`cidx ${CLI_VERSION}`);
   try {
     const r = await api<{ version: string; pid: number }>("GET", "/ping");
     console.log(`daemon: running (version ${r.version}, pid ${r.pid})`);

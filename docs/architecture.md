@@ -1,6 +1,6 @@
 # Architecture
 
-The design of `mcp-code-indexer` (`cidx` / `repodex`): a single long-lived Bun daemon that vectorizes codebases with a local Ollama and exposes hybrid code search over MCP.
+The design of `cidx` (`cidx` / `repodex`): a single long-lived Bun daemon that vectorizes codebases with a local Ollama and exposes hybrid code search over MCP.
 
 ## Purpose
 
@@ -30,9 +30,9 @@ The design of `mcp-code-indexer` (`cidx` / `repodex`): a single long-lived Bun d
 
 | Topic | Decision | Rationale |
 |------|-------|---------|
-| DB location | Central: `~/.mcp-indexer/` | The daemon finds all indexes no matter where it runs from |
+| DB location | Central: `~/.cidx/` | The daemon finds all indexes no matter where it runs from |
 | Isolation | Separate LanceDB table per project (`idx_<name>`) + central registry | Clean isolation + multi-project search via registry |
-| Registry / Job store | `~/.mcp-indexer/meta.db` (bun:sqlite) | Atomic, queryable, persistent |
+| Registry / Job store | `~/.cidx/meta.db` (bun:sqlite) | Atomic, queryable, persistent |
 | Indexing | Asynchronous job queue + background worker pool | Server opens instantly, indexing runs in the background |
 | Control API | HTTP, **bound to `127.0.0.1` only** | Security: others on the network cannot access it |
 | Chunking | web-tree-sitter (AST-based) | Splitting by code structure → highest quality gain |
@@ -59,7 +59,7 @@ stdio client ──▶ cidx mcp (bridge) ──▶ Control API    Registry (bun:
 ## Persistence split
 
 - **`Registry`** (`src/core/registry.ts`, **`bun:sqlite`**) — `indexes`, `file_cache` (mtime skip), `jobs` (survives restart), `embedding_cache` (content-hash → Float32 BLOB).
-- **LanceDB** (`src/services/db.ts`, `~/.mcp-indexer/db/`) — one table per project, `idx_<name>`. Fixed schema: every row carries `id, filePath, content, vector, language, symbolName, symbolType, startLine, endLine`.
+- **LanceDB** (`src/services/db.ts`, `~/.cidx/db/`) — one table per project, `idx_<name>`. Fixed schema: every row carries `id, filePath, content, vector, language, symbolName, symbolType, startLine, endLine`.
 
 ## Directory layout
 

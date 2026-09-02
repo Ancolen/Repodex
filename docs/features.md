@@ -75,7 +75,7 @@ What the tool **does today** (version 2.2.0). For what's planned, see [`status.m
 
 ## Git awareness
 
-- Respects `.gitignore` + `.mcpignore` + global ignores (full-index **and** watcher paths).
+- Respects `.gitignore` + `.cidxignore` + global ignores (full-index **and** watcher paths).
 - Optional git-tracked-only indexing (`gitTrackedOnly`).
 - **Automatic incremental sync on branch change** (watches `.git/HEAD`).
 

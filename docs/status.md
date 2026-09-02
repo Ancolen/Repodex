@@ -57,7 +57,7 @@
 - ✅ Incremental sync (changed / new + deleted cleanup).
 - ✅ Deleted-file cleanup on restore (offline removals pruned).
 - ✅ Live watcher with debounce + atomic / awaitWriteFinish rename handling.
-- ✅ `.gitignore` / `.mcpignore` / global ignore (full-index **and** watcher paths).
+- ✅ `.gitignore` / `.cidxignore` / global ignore (full-index **and** watcher paths).
 - ✅ `gitTrackedOnly` (full-index).
 - ✅ Auto sync on branch change (`.git/HEAD` watcher).
 
@@ -110,7 +110,7 @@ _(Nothing actively in flight — the codebase is stable at 2.2.0.)_
 | **Recency signal** | Slight boost for recently changed code (git mtime). | Medium | Low-Medium |
 | **`cidx open <result>`** | Open a result in `$EDITOR` at the right line. | Low | Low |
 | **Per-project `.mcpindex.json`** | Project-level language filter / extra ignore / embedding model. | Medium | Medium |
-| **`maxFileSizeBytes` guard** | Skip oversized data files without relying solely on `.mcpignore`. | Low-Medium | Low |
+| **`maxFileSizeBytes` guard** | Skip oversized data files without relying solely on `.cidxignore`. | Low-Medium | Low |
 | **Combined `search + outline`** | Return a hit's file outline in the same call; saves a turn. | Low-Medium | Low |
 
 ### Suggested order

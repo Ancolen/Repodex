@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# mcp-code-indexer — uninstall script
+# cidx — uninstall script
 #
 #   ./uninstall.sh
 #
@@ -8,7 +8,7 @@
 #   1. Stops the daemon, disables and removes the systemd service.
 #   2. Removes the cidx / repodex wrappers.
 #
-# Data (~/.mcp-indexer) is PRESERVED. To delete it completely:
+# Data (~/.cidx) is PRESERVED. To delete it completely:
 #   PURGE_DATA=1 ./uninstall.sh
 #
 set -euo pipefail
@@ -18,7 +18,7 @@ info() { printf "%s==>%s %s\n" "$BLUE$BOLD" "$NC" "$*"; }
 ok()   { printf "%s  ✓%s %s\n" "$GREEN" "$NC" "$*"; }
 warn() { printf "%s  !%s %s\n" "$YELLOW" "$NC" "$*"; }
 
-SERVICE_NAME="mcp-code-indexer"
+SERVICE_NAME="cidx"
 REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 # 1) systemd service
@@ -28,6 +28,11 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl --user disable "$SERVICE_NAME.service" 2>/dev/null || true
   unit="$HOME/.config/systemd/user/$SERVICE_NAME.service"
   if [ -f "$unit" ]; then rm -f "$unit"; ok "Service file deleted: $unit"; fi
+  # Legacy unit from before the cidx rename, if still present.
+  legacy_unit="$HOME/.config/systemd/user/mcp-code-indexer.service"
+  systemctl --user stop    "mcp-code-indexer.service" 2>/dev/null || true
+  systemctl --user disable "mcp-code-indexer.service" 2>/dev/null || true
+  if [ -f "$legacy_unit" ]; then rm -f "$legacy_unit"; ok "Legacy service file deleted: $legacy_unit"; fi
   systemctl --user daemon-reload 2>/dev/null || true
 fi
 
@@ -45,7 +50,7 @@ for d in "${BIN_DIR:-}" "$HOME/.local/bin" "$HOME/.bun/bin" "/usr/local/bin"; do
   for name in cidx repodex; do
     f="$d/$name"
     # only delete the wrapper we generated
-    if [ -f "$f" ] && grep -q "mcp-code-indexer CLI wrapper" "$f" 2>/dev/null; then
+    if [ -f "$f" ] && grep -q "cidx CLI wrapper" "$f" 2>/dev/null; then
       rm -f "$f"; ok "Deleted: $f"; removed=1
     fi
   done
@@ -53,7 +58,7 @@ done
 [ "$removed" = "1" ] || warn "No wrappers found to delete."
 
 # 3) data (optional)
-DATA_DIR="${MCP_INDEXER_HOME:-$HOME/.mcp-indexer}"
+DATA_DIR="${CIDX_HOME:-$HOME/.cidx}"
 if [ "${PURGE_DATA:-0}" = "1" ]; then
   info "Deleting data: $DATA_DIR"
   rm -rf "$DATA_DIR"

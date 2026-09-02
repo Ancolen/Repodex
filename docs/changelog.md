@@ -6,6 +6,19 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ---
 
+## Unreleased
+
+### cidx identity — every user-facing name now says "cidx"
+
+The old generic names (`.mcpignore`, `indexer.yml`, `~/.mcp-indexer`, `MCP_INDEXER_HOME`, the `mcp-code-indexer` product name and systemd unit) made it hard to tell what a file or setting belonged to. **Clean break** — old names are no longer read:
+
+- **Ignore file:** `.mcpignore` → **`.cidxignore`** (project-root extra ignore rules, layered over `.gitignore`).
+- **Config file:** `$INDEXER_CONFIG` → `$CIDX_CONFIG`; `./indexer.yml` / `.indexer.yml` / `indexer.yaml` → `./cidx.yml` / `.cidx.yml` / `cidx.yaml`.
+- **Data home:** `~/.mcp-indexer` → **`~/.cidx`**; env `MCP_INDEXER_HOME` → `$CIDX_HOME`; the global `ignoredDirs` entry updated to match.
+- **Product name:** `mcp-code-indexer` → `cidx` everywhere — `package.json`, MCP `Server` info, stdio-bridge identity, CLI banner, and the **systemd user unit** (`mcp-code-indexer.service` → `cidx.service`).
+- **Auto-migration.** On boot, if the new default home (`~/.cidx`) does not exist yet and the legacy `~/.mcp-indexer` does, the daemon **renames the old directory into place** and patches the carried-over `config.yml` in place (the pinned absolute `home:` path and the stale `ignoredDirs` entry). Skipped when `$CIDX_CONFIG` is set (an explicitly provided config means the caller manages their own setup) and under test runs (`bun test` sets `NODE_ENV=test`) so tests never touch real user data. `install.sh` stops/removes the legacy `mcp-code-indexer.service` unit when present; `uninstall.sh` removes both.
+- **Upgrading:** rename `.mcpignore` → `.cidxignore` in your projects (the old file is no longer read); everything under `~/.mcp-indexer` moves automatically on the first daemon start. Tests: 3 new sandboxed migration tests (move + config patch, no-op when the fresh home exists, skip when `CIDX_CONFIG` is set).
+
 ## 2.2.0 — Godot / GDScript + doc-format indexing
 
 Full Godot support at the same depth as the other languages: AST chunking, dependency graph, dead-code scoring, config, docs, and a new grammar-acceptance test suite. Version bumped 2.1.0 → **2.2.0**; `bun run typecheck` clean, `bun test` **260/260** (700 expect).
@@ -14,7 +27,7 @@ Full Godot support at the same depth as the other languages: AST chunking, depen
 
 Motivated by a Godot game project: index a version-matched engine class reference (`godot --doctool` dumps per-class `.xml`) next to the game code so API questions ("does this method exist in 4.7? what are the params?") are answerable by hybrid search without leaving the machine. `bun run typecheck` clean; `bun test` green (chunker + config suites extended).
 
-- `allowedExtensions` += `.xml`, `.rst` (defaults in `src/config.ts`, so the generated `DEFAULT_CONFIG_YAML` picks them up; **live `~/.mcp-indexer/config.yml` overrides defaults — update it too**).
+- `allowedExtensions` += `.xml`, `.rst` (defaults in `src/config.ts`, so the generated `DEFAULT_CONFIG_YAML` picks them up; **live `~/.cidx/config.yml` overrides defaults — update it too**).
 - `src/chunking/chunker.ts`: new exported `TEXT_LANG_BY_EXT` (`.xml`→`xml`, `.rst`→`rst`, `.json`→`json`, `.md`→`markdown`); `chunkCode` derives the language label as `EXT_TO_GRAMMAR[ext] ?? TEXT_LANG_BY_EXT[ext]` so fallback-chunked doc formats carry a meaningful `language` column and the `language` search filter works on them (grammar extensions unchanged; `.tscn`/`.tres`/`.gdshader`/`.godot` deliberately stay unlabeled).
 - No grammar added by design: any new grammar must pass the interleaved-determinism suite (see [`architecture.md`](./architecture.md)), and docs need search, not symbols — character fallback plus a label is the right weight here. Consequence: `find_symbol`/outline/deps return nothing for these files (expected).
 - Tests: `tests/chunker.test.ts` gains a "doc formats (xml/rst)" describe (fallback chunking + label propagation via `buildMeta`, Godot class-XML fixture, `.rst` fixture, `.md` retro-label); `tests/config.test.ts` asserts the new extensions.
@@ -45,7 +58,7 @@ Motivated by a Godot game project: index a version-matched engine class referenc
 ### Config + watcher
 
 - `allowedExtensions` += `.gd` (grammar) and `.gdshader` / `.tscn` / `.tres` / `.godot` (character-fallback text formats — Godot shaders, scenes, resources, `project.godot`; searchable but symbol-less, like `.json`/`.md`). `ignoredDirs` + watcher `IGNORE_RE` += `.godot` (the cache dir; `project.godot` the file is unaffected — segment-bounded match).
-- **Upgrade caveat:** the YAML `allowedExtensions` list **replaces** the default wholesale — an existing `~/.mcp-indexer/config.yml` must gain the new entries by hand, then the project reindexed, or Godot files are silently not collected.
+- **Upgrade caveat:** the YAML `allowedExtensions` list **replaces** the default wholesale — an existing `~/.cidx/config.yml` must gain the new entries by hand, then the project reindexed, or Godot files are silently not collected.
 
 ### Determinism suite (codifies the Lua lesson)
 
@@ -198,7 +211,7 @@ Found while testing on real multi-language codebases. `bun test` **85/85** (288 
 - `JobQueue` is now a worker pool (`JobQueueOptions.concurrency`, default 1 = backward compatible); `pump()` runs up to `maxWorkers` jobs at once. The daemon passes `indexing.jobConcurrency` (default 2; env `JOB_CONCURRENCY`). Parallel indexing is safe (separate tables + per-table write lock).
 
 ### Large data files
-- Solved via `.mcpignore` (excludes e.g. `tokenizers/`); a persistent `maxFileSizeBytes` guard is proposed later.
+- Solved via `.cidxignore` (excludes e.g. `tokenizers/`); a persistent `maxFileSizeBytes` guard is proposed later.
 
 ---
 
@@ -208,7 +221,7 @@ End-to-end review after v2. Two serious data-consistency issues + several medium
 
 - 🔴 **Shrinking files left stale chunks** — `insertChunks` deleted by `id` (`${file}#${i}`); when a file shrank, high-index chunks lingered. Fixed: delete by **`filePath`**.
 - 🔴 **Inaccessible directory wiped the index** — `indexDirectory` didn't guard `baseDir`; an empty file list triggered full cleanup. Fixed: `stat(baseDir)` guard → job errors, no cleanup.
-- 🟠 **Watcher ignored `.gitignore` / `.mcpignore`** — `indexFile` checked only ext + mtime → flapping inconsistency. Fixed: watcher sets up the ignore matcher once.
+- 🟠 **Watcher ignored `.gitignore` / `.cidxignore`** — `indexFile` checked only ext + mtime → flapping inconsistency. Fixed: watcher sets up the ignore matcher once.
 - 🟠 **`remove` → `dropTable` race** — `removeIndex` didn't wait for the job. Fixed: `JobQueue.waitForJob(id)` before `dropTable`.
 - 🟠 **Security** — open CORS + no DNS-rebinding protection. Fixed: localhost-only CORS + `enableDnsRebindingProtection` + `allowedHosts`.
 - 🟠 **Progress persisted per file** — thousands of sync SQLite writes. Fixed: throttle (`PROGRESS_PERSIST_MS = 1000`); in-memory job stays instant.
@@ -238,7 +251,7 @@ The parts promised in the design but missing / error-prone in v1. `bun test` **2
 - **Deleted-file cleanup + incremental sync** — `Registry.listCachedFiles`; `indexDirectory` diffs disk vs `file_cache` and prunes; new `syncIndex` (`fresh=false`); `restore()` now incremental-syncs `ready` projects too. Exposed `POST /sync` + `cidx sync`.
 - **ANN vector index** — `ensureVectorIndex(table, minRows)` builds LanceDB's ANN index above `vectorIndexThreshold` (default 50k).
 - **Watcher↔full-index race** — `WatchOptions.isBusy` callback; `IndexManager` passes `isBusy = () => isIndexing(name)`; busy events reschedule.
-- **`.gitignore` awareness** — `buildIgnore` applies `.gitignore` + `.mcpignore` + global (pulled forward from v2).
+- **`.gitignore` awareness** — `buildIgnore` applies `.gitignore` + `.cidxignore` + global (pulled forward from v2).
 - **Test suite** — first working `bun test` suite (concurrency, registry, job-queue, chunker).
 
 ---

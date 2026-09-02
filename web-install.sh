@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# repodex / mcp-code-indexer — CLONE-FREE installation (single command)
+# repodex / cidx — CLONE-FREE installation (single command)
 #
 #   curl -fsSL https://raw.githubusercontent.com/Ancolen/repodex/main/web-install.sh | bash
 #
@@ -21,14 +21,14 @@
 #   BIN_DIR=~/bin           -> directory where cidx/repodex are placed
 #   NO_SERVICE=1            -> do not install the systemd service (only manual `cidx start`)
 #   ASSUME_YES=1           -> automatically answer "yes" to interactive prompts
-#   MCP_INDEXER_HOME=...    -> explicitly set the data root (passed to the service + CLI)
+#   CIDX_HOME=...    -> explicitly set the data root (passed to the service + CLI)
 #   OLLAMA_MODEL=...        -> embedding model (default: qwen3-embedding)
 #   REPODEX_REPO=owner/name -> source repo (default: Ancolen/repodex)
 #
 set -euo pipefail
 
 REPO="${REPODEX_REPO:-Ancolen/repodex}"
-SERVICE_NAME="mcp-code-indexer"
+SERVICE_NAME="cidx"
 MODEL="${OLLAMA_MODEL:-qwen3-embedding}"
 
 # ----------------------------------------------------------------- helpers
@@ -105,8 +105,8 @@ if ! download "$BASE_URL/$ASSET" "$TMP/$ASSET"; then
   cat >&2 <<EOF
 
   Source install (Bun required):
-      git clone https://github.com/$REPO mcp-code-indexer
-      cd mcp-code-indexer && ./install.sh
+      git clone https://github.com/$REPO cidx
+      cd cidx && ./install.sh
 EOF
   exit 1
 fi
@@ -173,19 +173,19 @@ else
 fi
 
 # --------------------------------------------- 5) systemd service (Linux only)
-HOME_OVERRIDE="${MCP_INDEXER_HOME:-}"
-DATA_HOME="${MCP_INDEXER_HOME:-$HOME/.mcp-indexer}"
+HOME_OVERRIDE="${CIDX_HOME:-}"
+DATA_HOME="${CIDX_HOME:-$HOME/.cidx}"
 
 setup_systemd() {
   local unit_dir="$HOME/.config/systemd/user"
   local unit="$unit_dir/$SERVICE_NAME.service"
   mkdir -p "$unit_dir"
   local home_env=""
-  [ -n "$HOME_OVERRIDE" ] && home_env="Environment=MCP_INDEXER_HOME=$HOME_OVERRIDE"
+  [ -n "$HOME_OVERRIDE" ] && home_env="Environment=CIDX_HOME=$HOME_OVERRIDE"
   # The compiled binary starts the daemon with the hidden `__daemon` sub-command.
   cat > "$unit" <<EOF
 [Unit]
-Description=MCP Code Indexer Daemon (repodex)
+Description=cidx daemon (repodex)
 Documentation=https://github.com/$REPO
 After=network-online.target
 Wants=network-online.target

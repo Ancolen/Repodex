@@ -24,13 +24,13 @@ sudo systemctl start ollama     # bring back the GPU-backed service
 
 ```bash
 # Create a CPU-only variant of the embedding model
-mkdir -p ~/.mcp-indexer/models
-cat > ~/.mcp-indexer/models/qwen3-embedding-cpu.Modelfile <<'EOF'
+mkdir -p ~/.cidx/models
+cat > ~/.cidx/models/qwen3-embedding-cpu.Modelfile <<'EOF'
 FROM qwen3-embedding
 PARAMETER num_gpu 0
 EOF
 
-ollama create qwen3-embedding-cpu -f ~/.mcp-indexer/models/qwen3-embedding-cpu.Modelfile
+ollama create qwen3-embedding-cpu -f ~/.cidx/models/qwen3-embedding-cpu.Modelfile
 
 # Point cidx at it: set model: qwen3-embedding-cpu in config.yml
 # CAUTION: the model name changes → cidx requires a full reindex
