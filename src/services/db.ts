@@ -6,6 +6,11 @@ import { CONFIG } from "../config";
  * The DB record of a code chunk.
  * Fixed schema — tree-sitter metadata fields (symbolName, startLine ...) are
  * present in every record (LanceDB expects the same columns in all rows).
+ *
+ * `doc` / `doc_vector` (docstring embedding leg, 2.4.0): the symbol's
+ * docstring/doc comment and its embedding. Null on chunks without a symbol
+ * doc. Tables created before 2.4.0 lack these columns — `insertChunks` strips
+ * the fields for those (legacy tables gain them on a full reindex).
  */
 export interface CodeRecord {
   id: string;
@@ -17,6 +22,10 @@ export interface CodeRecord {
   symbolType?: string;
   startLine?: number;
   endLine?: number;
+  /** Docstring / doc comment of the symbol (null when none). */
+  doc?: string | null;
+  /** Embedding of `doc`, same model/dim as `vector` (null when no doc). */
+  doc_vector?: number[] | null;
   [key: string]: unknown; // for LanceDB Data compatibility
 }
 
@@ -133,6 +142,11 @@ export function buildWhere(filters?: SearchFilters): string | undefined {
  * always belong to a single file, to be safe all distinct filePaths in the records
  * are cleaned up. The table is created if it does not exist.
  *
+ * LEGACY COMPATIBILITY: tables created before 2.4.0 have no `doc`/`doc_vector`
+ * columns; adding records with unknown fields fails at the Arrow layer, so the
+ * fields are stripped for those tables (search skips the doc legs there too).
+ * A full reindex recreates the table with the full schema.
+ *
  * Writes are serialized per table (against a concurrent createTable race).
  */
 export async function insertChunks(table: string, records: CodeRecord[]): Promise<void> {
@@ -145,10 +159,25 @@ export async function insertChunks(table: string, records: CodeRecord[]): Promis
       const paths = [...new Set(records.map((r) => r.filePath))];
       const inList = paths.map((p) => `'${sqlLit(p)}'`).join(",");
       await t.delete(`filePath IN (${inList})`);
-      await t.add(records);
+      await t.add(await stripUnknownColumns(t, records));
     } else {
       await conn.createTable(table, records);
     }
+  });
+}
+
+/**
+ * Drops `doc` / `doc_vector` from records when the table predates those columns
+ * (LanceDB rejects unknown fields with "Found field not in schema").
+ */
+async function stripUnknownColumns(t: lancedb.Table, records: CodeRecord[]): Promise<CodeRecord[]> {
+  const cols = new Set((await t.schema()).fields.map((f) => f.name));
+  if (cols.has("doc") && cols.has("doc_vector")) return records;
+  return records.map((r) => {
+    const { doc, doc_vector, ...rest } = r;
+    void doc;
+    void doc_vector;
+    return rest as CodeRecord;
   });
 }
 
@@ -163,38 +192,57 @@ export async function deleteFileRecords(table: string, filePath: string): Promis
   });
 }
 
+/**
+ * Column names of a table (empty set when the table does not exist). Used to
+ * adapt to legacy tables that predate the `doc` / `doc_vector` columns and to
+ * decide which search legs are available.
+ */
+export async function tableColumns(table: string): Promise<Set<string>> {
+  const conn = getDB();
+  const names = await conn.tableNames();
+  if (!names.includes(table)) return new Set();
+  const t = await conn.openTable(table);
+  return new Set((await t.schema()).fields.map((f) => f.name));
+}
+
 /** Vector (semantic) search; with an optional metadata filter. */
 export async function searchTable(
   table: string,
   queryVector: number[],
   limit = 5,
   where?: string,
+  column: string = "vector",
 ): Promise<SearchResult[]> {
   const conn = getDB();
   const names = await conn.tableNames();
   if (!names.includes(table)) return [];
   const t = await conn.openTable(table);
-  let q = t.search(queryVector).limit(limit);
+  // The vector column is always explicit: once a table carries a second vector
+  // column (`doc_vector`), LanceDB refuses to guess which one to search.
+  // `nearestTo` (unlike `search`) is statically a VectorQuery, so `.column` typechecks.
+  let q = t.query().nearestTo(queryVector).column(column).limit(limit);
   if (where) q = q.where(where);
   return (await q.toArray()) as SearchResult[];
 }
 
 /**
  * Full-text (BM25) search; with an optional metadata filter.
- * Requires an FTS index on `content` (returns empty if absent).
+ * Requires an FTS index on the searched columns (returns empty if absent).
+ * `columns` defaults to `content`; the docstring leg passes `doc`.
  */
 export async function searchTableText(
   table: string,
   queryText: string,
   limit = 5,
   where?: string,
+  columns: string[] = ["content"],
 ): Promise<SearchResult[]> {
   const conn = getDB();
   const names = await conn.tableNames();
   if (!names.includes(table)) return [];
   const t = await conn.openTable(table);
   try {
-    let q = t.query().fullTextSearch(queryText, { columns: ["content"] }).limit(limit);
+    let q = t.query().fullTextSearch(queryText, { columns }).limit(limit);
     if (where) q = q.where(where);
     return (await q.toArray()) as SearchResult[];
   } catch {
@@ -331,51 +379,68 @@ export async function countTableRows(table: string): Promise<number> {
 
 /**
  * If the table exceeds `minRows` rows and does not yet have a vector index,
- * builds an ANN index on the `vector` column (default: IVF_PQ, chosen by LanceDB
- * based on column statistics). On small tables, brute-force is already fast enough,
+ * builds an ANN index on the given vector column (default `vector`; pass
+ * `doc_vector` for the docstring leg — skipped when the column is absent,
+ * i.e. legacy tables). On small tables, brute-force is already fast enough,
  * so no index is built (training cost + memory).
  *
  * @returns true if an index was built.
  */
-export async function ensureVectorIndex(table: string, minRows: number): Promise<boolean> {
+export async function ensureVectorIndex(table: string, minRows: number, column = "vector"): Promise<boolean> {
   const conn = getDB();
   const names = await conn.tableNames();
   if (!names.includes(table)) return false;
   const t = await conn.openTable(table);
+
+  if (!(await tableColumns(table)).has(column)) return false;
 
   const rows = await t.countRows();
   if (rows < minRows) return false;
 
   const existing = await t.listIndices();
-  const hasVectorIndex = existing.some((ix) => ix.columns.includes("vector"));
+  const hasVectorIndex = existing.some((ix) => ix.columns.includes(column));
   if (hasVectorIndex) return false;
 
-  await t.createIndex("vector");
+  await t.createIndex(column);
   return true;
 }
 
 /**
- * Builds a full-text (BM25) index on the `content` column (if absent).
- * Required for the BM25 leg of hybrid search. Skipped if the table is empty.
+ * Builds full-text (BM25) indexes on the `content` column and — when the table
+ * has the docstring column — on `doc` (both if absent). Required for the BM25
+ * legs of hybrid search. Skipped if the table is empty.
  *
- * @returns true if an index was built.
+ * @returns the number of indexes built.
  */
-export async function ensureFtsIndex(table: string): Promise<boolean> {
+export async function ensureFtsIndex(table: string): Promise<number> {
   const conn = getDB();
   const names = await conn.tableNames();
-  if (!names.includes(table)) return false;
+  if (!names.includes(table)) return 0;
   const t = await conn.openTable(table);
 
-  if ((await t.countRows()) === 0) return false;
+  if ((await t.countRows()) === 0) return 0;
 
   const existing = await t.listIndices();
-  const hasFts = existing.some(
-    (ix) => ix.columns.includes("content") && /fts|inverted/i.test(ix.indexType),
-  );
-  if (hasFts) return false;
+  const hasFtsOn = (col: string) =>
+    existing.some((ix) => ix.columns.includes(col) && /fts|inverted/i.test(ix.indexType));
 
-  await t.createIndex("content", { config: lancedb.Index.fts() });
-  return true;
+  let built = 0;
+  if (!hasFtsOn("content")) {
+    await t.createIndex("content", { config: lancedb.Index.fts() });
+    built++;
+  }
+  // The doc column duplicates docstring text only; BM25 over it gives the text
+  // leg of the docstring search. Legacy tables without the column are skipped.
+  if ((await tableColumns(table)).has("doc") && !hasFtsOn("doc")) {
+    try {
+      await t.createIndex("doc", { config: lancedb.Index.fts() });
+      built++;
+    } catch (err) {
+      // Never fail the whole job over the optional doc leg.
+      console.error(`[db] failed to build FTS index on 'doc' for '${table}':`, err);
+    }
+  }
+  return built;
 }
 
 export async function listTables(): Promise<string[]> {

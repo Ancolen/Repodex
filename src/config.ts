@@ -41,6 +41,13 @@ export interface IndexerConfig {
     respectGitignore: boolean;
     /** If true, only git-tracked files are indexed (in git repos). */
     gitTrackedOnly: boolean;
+    /**
+     * If true, each symbol's docstring/doc comment (`chunk.doc`) is embedded
+     * into a separate `doc_vector` column (the docstring retrieval leg).
+     * Turning it off skips the extra embeddings; existing `doc_vector` data is
+     * untouched until a reindex recreates the table.
+     */
+    docstrings: boolean;
     /** Number of indexing jobs that can run at the same time (worker pool). */
     jobConcurrency: number;
   };
@@ -100,6 +107,7 @@ const DEFAULTS: IndexerConfig = {
     vectorIndexThreshold: 50000,
     respectGitignore: true,
     gitTrackedOnly: false,
+    docstrings: true,
     jobConcurrency: 2,
   },
   watcher: { debounceMs: 300 },
@@ -141,6 +149,7 @@ ${DEFAULTS.indexing.ignoredDirs.map((d) => `    - "${d}"`).join("\n")}
   vectorIndexThreshold: ${DEFAULTS.indexing.vectorIndexThreshold}   # an ANN vector index is built when a table exceeds this chunk count
   respectGitignore: ${DEFAULTS.indexing.respectGitignore}           # also obey .gitignore rules
   gitTrackedOnly: ${DEFAULTS.indexing.gitTrackedOnly}            # index only git-tracked files (in git repos)
+  docstrings: ${DEFAULTS.indexing.docstrings}                # embed each symbol's docstring/comment into a separate doc_vector (docstring search leg)
   jobConcurrency: ${DEFAULTS.indexing.jobConcurrency}              # number of indexing jobs running at the same time (worker pool)
 
 search:
@@ -282,6 +291,10 @@ export const RESOLVED: IndexerConfig = {
       typeof y.indexing?.gitTrackedOnly === "boolean"
         ? y.indexing.gitTrackedOnly
         : DEFAULTS.indexing.gitTrackedOnly,
+    docstrings:
+      typeof y.indexing?.docstrings === "boolean"
+        ? y.indexing.docstrings
+        : DEFAULTS.indexing.docstrings,
     jobConcurrency:
       num(process.env.JOB_CONCURRENCY) ??
       y.indexing?.jobConcurrency ??
@@ -335,6 +348,7 @@ export const CONFIG = {
   VECTOR_INDEX_THRESHOLD: RESOLVED.indexing.vectorIndexThreshold,
   RESPECT_GITIGNORE: RESOLVED.indexing.respectGitignore,
   GIT_TRACKED_ONLY: RESOLVED.indexing.gitTrackedOnly,
+  DOCSTRINGS: RESOLVED.indexing.docstrings,
   JOB_CONCURRENCY: RESOLVED.indexing.jobConcurrency,
 
   WATCH_DEBOUNCE_MS: RESOLVED.watcher.debounceMs,

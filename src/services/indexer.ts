@@ -120,41 +120,19 @@ export async function collectFiles(
 }
 
 /**
- * Indexes a single file. Skips it if unchanged (mtime cache).
- * Embeddings are read from the content-hash cache; missing ones are fetched from
- * Ollama in batches and written to the cache.
+ * Embeds a list of texts through the content-hash cache: cache hits fill the
+ * slot, misses go to Ollama in batches with bounded parallelism, and results
+ * are written back to the cache. Returns null per text when aborted mid-way
+ * (the caller then skips the write).
  */
-export async function indexFile(
-  target: IndexTarget,
-  filePath: string,
+async function embedTexts(
+  texts: string[],
+  model: string,
   registry?: Registry,
   signal?: AbortSignal,
-  embedModel?: string | undefined,
-): Promise<FileIndexResult> {
-  if (!isAllowed(filePath)) return { chunks: 0, dim: null };
-  if (signal?.aborted) return { chunks: 0, dim: null };
-
-  const st = await stat(filePath);
-  if (!st.isFile()) return { chunks: 0, dim: null };
-
-  const mtime = st.mtimeMs;
-  if (registry && registry.getFileMtime(target.indexName, filePath) === mtime) {
-    return { chunks: 0, dim: null }; // unchanged → skip
-  }
-
-  const content = await readFile(filePath, "utf-8");
-  const chunks = await chunkCode(filePath, content);
-
-  if (chunks.length === 0) {
-    await deleteFileRecords(target.tableName, filePath);
-    registry?.setFileMtime(target.indexName, filePath, mtime);
-    return { chunks: 0, dim: null };
-  }
-
-  const model = embedModel ?? CONFIG.OLLAMA_MODEL;
-  const texts = chunks.map((c) => c.content);
+): Promise<(number[] | null)[]> {
   const hashes = texts.map(hashContent);
-  const vectors: (number[] | null)[] = new Array(chunks.length).fill(null);
+  const vectors: (number[] | null)[] = new Array(texts.length).fill(null);
 
   // 1) Read from cache
   if (registry) {
@@ -193,6 +171,62 @@ export async function indexFile(
     }
   });
   if (registry && toCache.length > 0) registry.putCachedEmbeddings(model, toCache);
+  return vectors;
+}
+
+/**
+ * Indexes a single file. Skips it if unchanged (mtime cache).
+ * Embeddings are read from the content-hash cache; missing ones are fetched from
+ * Ollama in batches and written to the cache.
+ *
+ * Each chunk's docstring (`chunk.doc`, see `chunking/docstring.ts`) is embedded
+ * into a separate `doc_vector` (same model, same dimension), so symbol docs form
+ * their own retrieval leg.
+ */
+export async function indexFile(
+  target: IndexTarget,
+  filePath: string,
+  registry?: Registry,
+  signal?: AbortSignal,
+  embedModel?: string | undefined,
+): Promise<FileIndexResult> {
+  if (!isAllowed(filePath)) return { chunks: 0, dim: null };
+  if (signal?.aborted) return { chunks: 0, dim: null };
+
+  const st = await stat(filePath);
+  if (!st.isFile()) return { chunks: 0, dim: null };
+
+  const mtime = st.mtimeMs;
+  if (registry && registry.getFileMtime(target.indexName, filePath) === mtime) {
+    return { chunks: 0, dim: null }; // unchanged → skip
+  }
+
+  const content = await readFile(filePath, "utf-8");
+  const chunks = await chunkCode(filePath, content);
+
+  if (chunks.length === 0) {
+    await deleteFileRecords(target.tableName, filePath);
+    registry?.setFileMtime(target.indexName, filePath, mtime);
+    return { chunks: 0, dim: null };
+  }
+
+  const model = embedModel ?? CONFIG.OLLAMA_MODEL;
+  const vectors = await embedTexts(chunks.map((c) => c.content), model, registry, signal);
+
+  // Docstring leg: one extra embedding per doc-carrying chunk.
+  const docIdx: number[] = [];
+  const docTexts: string[] = [];
+  if (CONFIG.DOCSTRINGS) {
+    for (let i = 0; i < chunks.length; i++) {
+      const doc = chunks[i]!.doc;
+      if (doc && doc.trim().length > 0) {
+        docIdx.push(i);
+        docTexts.push(doc);
+      }
+    }
+  }
+  const docVecs =
+    docIdx.length > 0 ? await embedTexts(docTexts, model, registry, signal) : null;
 
   // If aborted, don't write half data for this file; exit silently.
   if (signal?.aborted) return { chunks: 0, dim: null };
@@ -215,7 +249,17 @@ export async function indexFile(
       symbolType: chunk.symbolType ?? "",
       startLine: chunk.startLine,
       endLine: chunk.endLine,
+      // Docstring leg: null on doc-less chunks (fixed-schema nullable columns).
+      doc: chunk.doc ?? null,
+      doc_vector: null,
     });
+  }
+  if (docVecs) {
+    for (let k = 0; k < docIdx.length; k++) {
+      const rec = records[docIdx[k]!];
+      const vec = docVecs[k];
+      if (rec && vec) rec.doc_vector = vec;
+    }
   }
 
   if (records.length > 0) {
@@ -333,8 +377,16 @@ export async function indexDirectory(
       console.error(`[indexer] failed to build vector index for '${target.tableName}':`, err);
     }
     try {
-      const created = await ensureFtsIndex(target.tableName);
-      if (created) console.error(`[indexer] built BM25/FTS index for '${target.tableName}'.`);
+      // Same threshold logic for the docstring leg; a no-op on legacy tables
+      // (no doc_vector column) and small tables.
+      const created = await ensureVectorIndex(target.tableName, CONFIG.VECTOR_INDEX_THRESHOLD, "doc_vector");
+      if (created) console.error(`[indexer] built ANN doc_vector index for '${target.tableName}'.`);
+    } catch (err) {
+      console.error(`[indexer] failed to build doc_vector index for '${target.tableName}':`, err);
+    }
+    try {
+      const built = await ensureFtsIndex(target.tableName);
+      if (built > 0) console.error(`[indexer] built ${built} BM25/FTS index(es) for '${target.tableName}'.`);
     } catch (err) {
       console.error(`[indexer] failed to build FTS index for '${target.tableName}':`, err);
     }
