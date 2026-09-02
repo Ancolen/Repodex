@@ -6,9 +6,6 @@
  * - Results are returned in **input order** (even if workers finish in a
  *   different order).
  * - If any worker throws, the first error propagates up (fail-fast).
- *
- * Implements the "4-8 parallel embedding pipeline" that was designed but never
- * implemented in Phase 5.
  */
 export async function mapWithConcurrency<T, R>(
   items: readonly T[],

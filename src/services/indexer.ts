@@ -13,8 +13,7 @@ import type { Registry } from "../core/registry";
 /**
  * An indexing target: which project (indexName + cache scope),
  * which LanceDB table and which root directory.
- * In Phase 2 multiple targets are generated from the registry; in Phase 1 there
- * is a single "default" target.
+ * One target per registered index; generated from the registry.
  */
 export interface IndexTarget {
   indexName: string;

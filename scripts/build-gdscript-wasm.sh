@@ -56,10 +56,9 @@ if (!pkg["tree-sitter"]) {
 ' "$GR/package.json"
 
 echo "==> building wasm in docker (emcc via ${EMSDK_IMAGE}, tree-sitter-cli@${TS_CLI_VERSION})"
-# Use host networking on Linux only: some WSL2 setups have broken DNS on the
-# docker bridge (getent EAI_AGAIN for registry.npmjs.org) where host networking
-# resolves fine. Docker Desktop (macOS/Windows) doesn't support --network host,
-# so fall back to the default bridge there.
+# Host networking on Linux: avoids DNS failures on some setups (e.g. WSL2,
+# where the docker bridge can fail to resolve registry.npmjs.org). Docker
+# Desktop (macOS/Windows) lacks --network host, so keep the default bridge there.
 NETWORK_ARGS=""
 if [[ "$(uname -s)" == "Linux" ]]; then
 	NETWORK_ARGS="--network host"

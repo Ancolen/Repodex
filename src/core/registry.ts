@@ -183,12 +183,10 @@ export class Registry {
    * Use this for complete removal where you want zero traces.
    */
   removeIndexDeep(name: string): void {
-    // Delete all registry records
     this.db.query(`DELETE FROM indexes WHERE name = $name`).run({ $name: name });
-    // Cascading: file_cache also deleted via the indexes FK
     this.db.query(`DELETE FROM file_cache WHERE index_name = $name`).run({ $name: name });
-    // Delete stale job records for this index (payload contains the index name)
-    // Since jobs have JSON payload, we do a LIKE match on the indexName field in the JSON.
+    // Stale job records are matched by a LIKE on the indexName field inside the
+    // JSON payload.
     this.db
       .query(
         `DELETE FROM jobs

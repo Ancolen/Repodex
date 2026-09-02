@@ -10,8 +10,8 @@ export interface JobQueueOptions {
    * Maximum number of jobs that can run at the same time (worker pool size).
    * Default 1 (serial). When >1, a stuck/long job (e.g. a very large file) does
    * NOT BLOCK the indexing of other projects — since each project writes to an
-   * independent table, it is parallel-safe. The default of 1 preserves the
-   * current test/behavior semantics; the daemon passes a higher value from config.
+   * independent table, it is parallel-safe. The daemon passes a higher value
+   * from config.
    */
   concurrency?: number | undefined;
 }
@@ -25,12 +25,11 @@ const PROGRESS_PERSIST_MS = 1000;
  * - New job types are added with registerHandler(type, fn).
  * - enqueue() puts the job in the queue and returns IMMEDIATELY (doesn't block
  *   the server).
- * - Jobs are processed in order (single worker); since the event loop is free
- *   while waiting for I/O, searches/requests continue uninterrupted.
+ * - Jobs are dispatched by `pump()`, at most `concurrency` at a time; since the
+ *   event loop is free while waiting for I/O, searches/requests continue
+ *   uninterrupted.
  * - EventEmitter: "enqueued" | "started" | "progress" | "finished" events
- *   (for live progress broadcasting via SSE in Phase 3/6).
- *
- * If parallel workers are needed later, the `process()` loop can be turned into a pool.
+ *   (for live progress broadcasting via SSE).
  */
 export class JobQueue extends EventEmitter {
   private jobs = new Map<string, Job>();

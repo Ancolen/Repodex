@@ -14,7 +14,7 @@ export async function getEmbedding(text: string): Promise<number[]> {
 }
 
 /**
- * Embeds multiple texts in a single call (Phase 5: batch indexing).
+ * Embeds multiple texts in a single call (batch indexing).
  * The Ollama `embed` API accepts an array as input.
  */
 export async function getEmbeddings(texts: string[]): Promise<number[][]> {

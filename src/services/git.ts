@@ -45,8 +45,8 @@ export async function gitTrackedFiles(baseDir: string): Promise<Set<string> | nu
 }
 
 /**
- * Returns the branch/commit the current HEAD points to (to detect branch changes).
- * Falls back to the commit hash when `.git/HEAD` content is not sufficient (detached).
+ * Returns the path to `.git/HEAD`, or null when absent
+ * (used for mtime-based branch-change detection).
  */
 export function gitHeadPath(baseDir: string): string | null {
   const head = path.join(baseDir, ".git", "HEAD");

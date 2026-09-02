@@ -158,7 +158,7 @@ describe("scoreDeadCode", () => {
       symbolType: "trait",
       language: "rust",
       content: "pub trait T : X {} trait Y {}",
-      symbolName: "render", // exported +30 demote, poly −35, hook −25 = 80 −90 → clamp 0... but exported on trait "pub trait" matches
+      symbolName: "render", // exported (−30) + poly (−35) + hook (−25) = −90 applied to 80 → clamps at 0
       referenceCount: 0,
       ownerClassReferenced: false,
       isCommonName: true,
