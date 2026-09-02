@@ -1,0 +1,43 @@
+name: Bug report
+description: Something doesn't work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For security-sensitive reports, use [SECURITY.md](SECURITY.md) instead
+        of this public template.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you ran (command / MCP call), what you expected, what you got. Please don't paste proprietary code — a minimal repro is enough.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Indexing (chunking, embedding, watchers)
+        - Search (hybrid/vector/text, rerank, MMR)
+        - Code intelligence (deps/callgraph/dead-code/commits)
+        - MCP server / stdio bridge
+        - CLI / install scripts
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: cidx version
+      description: "`cidx --version`, or the commit you're running"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: "OS, Bun version, Ollama version + embedding model"
+    validations:
+      required: true
