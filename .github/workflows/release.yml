@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*" # runs when a tag like v1.2.3 is pushed
+  workflow_dispatch: # can also be triggered manually if needed
+    inputs:
+      tag:
+        description: "Release tag (e.g. v2.0.0)"
+        required: true
+
+permissions:
+  contents: write # to create a GitHub Release and upload assets
+
+jobs:
+  build:
+    name: build ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: cidx-linux-x64
+          - os: ubuntu-24.04-arm
+            asset: cidx-linux-arm64
+          - os: macos-13 # Intel
+            asset: cidx-darwin-x64
+          - os: macos-14 # Apple Silicon
+            asset: cidx-darwin-arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Native modules like lancedb are platform-specific; that's why we do NOT
+      # cross-compile — each binary is built on its own native runner.
+      - name: Build standalone binary
+        run: bun run build:binary
+
+      - name: Smoke test binary
+        run: ./dist/cidx version
+
+      - name: Rename + checksum
+        shell: bash
+        run: |
+          mkdir -p out
+          cp dist/cidx "out/${{ matrix.asset }}"
+          cd out
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          fi
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          fail_on_unmatched_files: true
+          files: |
+            out/${{ matrix.asset }}
+            out/${{ matrix.asset }}.sha256

@@ -1,0 +1,44 @@
+{
+  "name": "mcp-code-indexer",
+  "version": "2.1.0",
+  "type": "module",
+  "module": "src/index.ts",
+  "private": true,
+  "description": "Bun-based, multi-project, asynchronous MCP code indexing daemon",
+  "license": "Apache-2.0",
+  "author": "Ancolen",
+  "bin": {
+    "cidx": "src/cli.ts",
+    "repodex": "src/cli.ts",
+    "cidx-mcp": "src/stdio-bridge.ts"
+  },
+  "scripts": {
+    "setup": "bash install.sh",
+    "uninstall": "bash uninstall.sh",
+    "start": "bun run src/index.ts",
+    "daemon": "bun run src/index.ts",
+    "dev": "bun --watch src/index.ts",
+    "cli": "bun run src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "build:binary": "bun build --compile --minify --outfile dist/cidx src/main.ts"
+  },
+  "dependencies": {
+    "@lancedb/lancedb": "^0.30.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "chokidar": "^5.0.0",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "ignore": "^7.0.5",
+    "ollama": "^0.6.3",
+    "tree-sitter-wasms": "^0.1.13",
+    "web-tree-sitter": "0.22.6",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "typescript": "^6.0.3"
+  }
+}
