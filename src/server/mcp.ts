@@ -10,6 +10,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { CONFIG } from "../config";
+import { hostGuard } from "./host-guard";
 import { fileOutline } from "../chunking/chunker";
 import { TOOL_DEFINITIONS } from "./tool-defs";
 import {
@@ -426,6 +427,10 @@ export function startMcpServer(
       },
     }),
   );
+  // SECURITY: DNS-rebinding protection on EVERY endpoint (Host-header check).
+  // The Streamable HTTP transport additionally validates the Host itself for
+  // POST /mcp; this middleware covers /health, /sse and /message too.
+  app.use(hostGuard(host, port));
 
   app.get("/health", (_req, res) => {
     const jobs = deps.jobQueue.listJobs();
@@ -515,12 +520,20 @@ export function startMcpServer(
     await transport.handlePostMessage(req, res);
   });
 
-  return new Promise<void>((resolve) => {
-    app.listen(port, host, () => {
+  return new Promise<void>((resolve, reject) => {
+    const server = app.listen(port, host, () => {
       console.error(
         `[mcp] MCP server listening: http://${host}:${port}/mcp (Streamable HTTP) · /sse (legacy)`,
       );
       resolve();
+    });
+    // Fail loudly (the daemon exits with a clear message) instead of silently
+    // logging "ready" while another daemon instance owns the port.
+    server.on("error", (err) => {
+      if ((err as NodeJS.ErrnoException).code === "EADDRINUSE") {
+        err.message = `port ${port} is already in use — is another daemon running? (cidx stop first, or change mcpPort)`;
+      }
+      reject(err);
     });
   });
 }

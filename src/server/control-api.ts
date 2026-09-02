@@ -2,6 +2,7 @@ import { existsSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import express from "express";
 import { CONFIG } from "../config";
+import { hostGuard } from "./host-guard";
 import { fileOutline } from "../chunking/chunker";
 import type { JobQueue } from "../core/job-queue";
 import type { IndexManager } from "../core/index-manager";
@@ -43,7 +44,9 @@ function viewIndex(deps: ControlDeps, rec: IndexRecord) {
 
 /**
  * The HTTP API the CLI client talks to. Bound ONLY to 127.0.0.1; not accessible
- * from outside (a local control channel for the user's own machine).
+ * from outside (a local control channel for the user's own machine). The API is
+ * unauthenticated, so it also validates the Host header (DNS-rebinding
+ * protection) — a rebound hostname would otherwise reach it from the browser.
  */
 export function startControlApi(
   deps: ControlDeps,
@@ -51,6 +54,7 @@ export function startControlApi(
   host: string = CONFIG.HOST,
 ): Promise<void> {
   const app = express();
+  app.use(hostGuard(host, port));
   app.use(express.json());
 
   app.get("/ping", (_req, res) => {
@@ -420,10 +424,18 @@ export function startControlApi(
     setTimeout(() => void deps.onShutdown(), 50);
   });
 
-  return new Promise<void>((resolve) => {
-    app.listen(port, host, () => {
+  return new Promise<void>((resolve, reject) => {
+    const server = app.listen(port, host, () => {
       console.error(`[control] Control API listening: http://${host}:${port}`);
       resolve();
+    });
+    // Fail loudly (the daemon exits with a clear message) instead of silently
+    // logging "ready" while another daemon instance owns the port.
+    server.on("error", (err) => {
+      if ((err as NodeJS.ErrnoException).code === "EADDRINUSE") {
+        err.message = `port ${port} is already in use — is another daemon running? (cidx stop first, or change controlPort)`;
+      }
+      reject(err);
     });
   });
 }
