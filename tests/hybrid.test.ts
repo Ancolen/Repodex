@@ -51,8 +51,8 @@ describe("buildWhere", () => {
     expect(w).toBe("language = 'python' AND symbolType = 'class'");
   });
 
-  test("pathGlob: wildcard '*' → LIKE '%'", () => {
-    expect(buildWhere({ pathGlob: "src/*" })).toBe("filePath LIKE 'src/%' ESCAPE '\\'");
+  test("pathGlob: wildcard '*' → LIKE '%' (project-relative: '%' prepended)", () => {
+    expect(buildWhere({ pathGlob: "src/*" })).toBe("filePath LIKE '%src/%' ESCAPE '\\'");
   });
 
   test("pathGlob: without wildcard → substring (%...%)", () => {

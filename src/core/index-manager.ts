@@ -1,4 +1,5 @@
 import path from "node:path";
+import { statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import chokidar, { type FSWatcher } from "chokidar";
 import { CONFIG } from "../config";
@@ -18,15 +19,35 @@ import {
   searchSymbol,
   searchContent,
   tableMetadata,
+  tableSymbolsWithContent,
   ensureFtsIndex,
   buildWhere,
   type SearchResult,
   type SearchFilters,
 } from "../services/db";
-import { getEmbedding } from "../services/ollama";
-import { gitHeadPath } from "../services/git";
+import { cachedEmbed } from "../services/ollama";
+import { rerankScores } from "../services/rerank";
+import { selectMMR } from "../utils/mmr";
+import { applyCharBudget } from "../utils/budget";
+import { gitHeadPath, isGitRepo, searchGitLog } from "../services/git";
 import { rrfMerge } from "../utils/rrf";
 import { deriveSignature, matchIdentifierLines } from "../utils/text";
+import { extractImports } from "../chunking/imports";
+import { resolveImports, buildFileIndex, type ResolvedDep } from "./resolve";
+import {
+  countReferences,
+  scoreDeadCode,
+  matchNamesFor,
+  type CountSymbol,
+  type CountChunk,
+  type DeadSignal,
+} from "./deadcode";
+import { buildCallEdges, traverseCallGraph, matchRootSymbols } from "./callgraph";
+import type { CallSymbol, CallChunk, CallGraphNode } from "./callgraph";
+export type { CallGraphNode } from "./callgraph";
+import type { CommitHit, CommitQueryOpts } from "./commits";
+export type { CommitHit, CommitQueryOpts } from "./commits";
+import { mapWithConcurrency } from "../utils/concurrency";
 
 const INDEX_JOB = "index";
 
@@ -55,6 +76,12 @@ export interface ScopedSearchResult extends SearchResult {
   contextAfter?: string[];
 }
 
+/** One query's worth of batch-search results (`searchBatch`). */
+export interface BatchSearchGroup {
+  query: string;
+  results: ScopedSearchResult[];
+}
+
 /** Search behavior: merge mode + metadata filters. */
 export interface SearchOptions extends SearchFilters {
   /**
@@ -68,6 +95,27 @@ export interface SearchOptions extends SearchFilters {
    * the file on disk) before/after each result chunk. Default 0 (off).
    */
   contextLines?: number | undefined;
+  /**
+   * Override the default second-stage reranker behavior for this call.
+   * - true  → rerank even if disabled in config (no-op if no reranker model is configured).
+   * - false → skip reranking even if enabled in config.
+   * - undefined → use CONFIG.RERANK_ENABLED.
+   */
+  rerank?: boolean | undefined;
+  /**
+   * Override the default MMR diversification for this call.
+   * - true  → diversify even if disabled in config.
+   * - false → skip diversification even if enabled in config.
+   * - undefined → use CONFIG.MMR_ENABLED.
+   */
+  mmr?: boolean | undefined;
+  /**
+   * If > 0, cap the returned results to an approximate character budget: results
+   * are kept in ranked order (whole, never truncated mid-chunk) while they fit,
+   * so a high `limit` can be used for recall without bloating the caller's
+   * context. Always keeps at least the top result. Default undefined (no cap).
+   */
+  maxChars?: number | undefined;
 }
 
 /** One occurrence of a symbol name found in the indexed code. */
@@ -100,6 +148,89 @@ export interface RepoOverview {
   largestFiles: { file: string; symbols: number }[];
 }
 
+/** One import edge of a file: a specifier resolved (or not) to an indexed file. */
+export interface DependencyEdge {
+  raw: string;
+  language: string;
+  line: number;
+  /** Absolute path when resolved to an indexed file. */
+  path?: string;
+  /** Repo-relative path when resolved. */
+  relativePath?: string;
+  status: "resolved" | "external" | "unresolved";
+  reason?: string;
+}
+
+/** Result of `get_dependencies`: what a file imports + who imports it. */
+export interface DependencyResult {
+  project: string;
+  file: string;
+  relativeFile: string;
+  imports: DependencyEdge[];
+  /** Repo-relative paths of files that import the queried file. */
+  importedBy: string[];
+  /** The reverse list was capped at the call's `limit`. */
+  truncated: boolean;
+  /** Files scanned to build the reverse graph (the first call is the costly one). */
+  scannedFiles: number;
+}
+
+/** A single candidate dead symbol (a zero-reference symbol that survived scoring). */
+export interface DeadCodeResult {
+  project: string;
+  symbolName: string;
+  symbolType: string;
+  filePath: string;
+  relativePath: string;
+  startLine: number;
+  endLine: number;
+  language?: string;
+  signature?: string;
+  referenceCount: number;
+  signals: DeadSignal[];
+  confidence: number;
+  category: "likely dead" | "uncertain" | "review";
+}
+
+/** Result of `find_dead_code`: scored zero-reference symbols for one project. */
+export interface DeadCodeReport {
+  project: string;
+  results: DeadCodeResult[];
+  scannedSymbols: number;
+  scannedChunks: number;
+  /** The table hit the row cap — coverage is partial (reindex/raise to be exhaustive). */
+  truncated: boolean;
+}
+
+/** Result of `get_call_graph`: caller/callee trees rooted at the anchor symbol(s). */
+export interface CallGraphResult {
+  project: string;
+  /** Anchor symbol(s): one if a unique symbol was named, several for a file/ambiguous name. */
+  roots: CallGraphNode[];
+  direction: "callers" | "callees" | "both";
+  depth: number;
+  /** Trees of who calls each root (empty when direction excludes callers). */
+  callers: CallGraphNode[];
+  /** Trees of what each root calls (empty when direction excludes callees). */
+  callees: CallGraphNode[];
+  scannedSymbols: number;
+  /** The node budget or table cap was hit — the graph is partial (raise --limit for more). */
+  truncated: boolean;
+}
+
+/** Result of `searchCommits`: git-history / commit-message matches for a project. */
+export interface CommitSearchResult {
+  project: string;
+  /** The message query that was run (absent for a pure path/author/date filter). */
+  query?: string;
+  count: number;
+  commits: CommitHit[];
+  /** The commit limit was hit — older matching commits exist beyond it (raise --limit). */
+  truncated: boolean;
+  /** The project directory is not a git repo — no history to search. */
+  notARepo: boolean;
+}
+
 /** Converts a project name to a safe LanceDB table name. */
 function sanitize(name: string): string {
   const s = name
@@ -107,6 +238,79 @@ function sanitize(name: string): string {
     .replace(/[^a-z0-9_]+/g, "_")
     .replace(/^_+|_+$/g, "");
   return s.length > 0 ? s : "idx";
+}
+
+/** Symbol types worth checking for dead code (skip `code`/`impl`/anonymous). */
+const DEAD_CANDIDATE_TYPES = new Set([
+  "function", "method", "class", "interface", "enum", "struct", "trait", "record",
+]);
+
+/** Symbol types that can make/receive a call (the call-graph inventory). */
+const CALLABLE_TYPES = new Set(["function", "method", "constructor"]);
+
+/** Empty adjacency, reused to render depth-0 root nodes via `traverseCallGraph`. */
+const EMPTY_ADJ: Map<string, Set<string>> = new Map();
+
+/** Test-file patterns: symbols here are exercised indirectly, so never dead. */
+function isTestFile(filePath: string): boolean {
+  const base = path.basename(filePath).toLowerCase();
+  const norm = filePath.replace(/\\/g, "/");
+  if (/^test_/.test(base)) return true; // test_*.py / test_*.go
+  if (/_test\.[a-z0-9]+$/.test(base)) return true; // foo_test.go
+  if (/\.(test|spec)\.[a-z0-9]+$/.test(base)) return true; // foo.test.ts / bar.spec.js
+  if (/(^|\/)(tests?|__tests?__|spec)\//.test(norm)) return true; // tests/, __tests__/, spec/
+  return false;
+}
+
+/** Entry-point files (main/index/app/…): their symbols are called by the runtime. */
+function isEntryPointFile(filePath: string): boolean {
+  const base = path.basename(filePath, path.extname(filePath)).toLowerCase();
+  return ENTRY_POINT_NAMES.has(base);
+}
+
+/** A cached, mtime-keyed import graph for one project (reverse deps are on-demand). */
+interface DepGraph {
+  forward: Map<string, string[]>; // importer abs path → resolved imported abs paths
+  reverse: Map<string, string[]>; // imported abs path → importer abs paths
+  fileMtimes: Map<string, number>;
+  scannedFiles: number;
+}
+interface DepGraphCacheEntry {
+  /** Join of the indexed-file set; a change invalidates the cache. */
+  setKey: string;
+  graph: DepGraph;
+}
+
+/** A cached call-graph adjacency for one project (rebuilt when the index changes). */
+interface CallGraphCacheEntry {
+  /** `IndexRecord.lastIndexedAt`; a change invalidates the cache (data lives in LanceDB, not on disk). */
+  lastIndexedAt: number | null;
+  forward: Map<string, Set<string>>;
+  reverse: Map<string, Set<string>>;
+  /** key → symbol metadata (node rendering). */
+  symbolsByKey: Map<string, CallSymbol>;
+  /** stored symbolName → symbols (anchor resolution by name). */
+  nameToSymbols: Map<string, CallSymbol[]>;
+  scannedSymbols: number;
+  truncated: boolean;
+}
+
+/** Converts a ResolvedDep into the edge shape we return. */
+function toEdge(dep: ResolvedDep, projectRoot: string): DependencyEdge {
+  const edge: DependencyEdge = {
+    raw: dep.raw,
+    language: dep.language,
+    line: dep.line,
+    status: dep.status,
+  };
+  if (dep.resolvedPath) edge.path = dep.resolvedPath;
+  if (dep.relativePath) edge.relativePath = dep.relativePath;
+  else if (dep.resolvedPath) {
+    const rel = path.relative(projectRoot, dep.resolvedPath);
+    if (rel && !rel.startsWith("..")) edge.relativePath = rel;
+  }
+  if (dep.reason) edge.reason = dep.reason;
+  return edge;
 }
 
 /**
@@ -121,6 +325,10 @@ export class IndexManager {
   private watchers = new Map<string, FSWatcher>();
   private branchWatchers = new Map<string, FSWatcher>();
   private jobByIndex = new Map<string, string>();
+  /** On-demand, mtime-keyed reverse-dependency graph, one entry per project. */
+  private depGraphCache = new Map<string, DepGraphCacheEntry>();
+  /** On-demand call-graph adjacency, one entry per project (keyed on lastIndexedAt). */
+  private callGraphCache = new Map<string, CallGraphCacheEntry>();
 
   constructor(
     private registry: Registry,
@@ -248,6 +456,8 @@ export class IndexManager {
     // Deep cleanup: removes indexes, file_cache, AND stale job records
     this.registry.removeIndexDeep(name);
     this.jobByIndex.delete(name);
+    this.depGraphCache.delete(name);
+    this.callGraphCache.delete(name);
     return true;
   }
 
@@ -284,10 +494,15 @@ export class IndexManager {
           `Incompatible vectors. Fix: 'reindex ${name}' (or mode:"text").`,
       );
     }
-    const vector = mode === "text" ? null : await getEmbedding(query);
-    const rows = await this.searchOnTable(rec.tableName, query, vector, limit, opts);
-    const scoped = rows.map((r) => this.scope(r, name, rec.lastIndexedAt));
-    return this.enrich(scoped, opts?.contextLines ?? 0);
+    const vector = mode === "text" ? null : await cachedEmbed(query, CONFIG.OLLAMA_MODEL, this.registry);
+    const rerankOn = this.wantRerank(opts);
+    const mmrOn = this.wantMMR(opts);
+    const fetchLimit = rerankOn || mmrOn ? Math.max(limit, CONFIG.RERANK_TOP_K, CONFIG.MMR_TOP_K) : limit;
+    const rows = await this.searchOnTable(rec.tableName, query, vector, fetchLimit, opts);
+    const refined = await this.refineAndSlice(rows, query, limit, mode, rerankOn, mmrOn);
+    const scoped = refined.map((r) => this.scope(r, name, rec.lastIndexedAt));
+    const enriched = await this.enrich(scoped, opts?.contextLines ?? 0);
+    return applyCharBudget(enriched, opts?.maxChars);
   }
 
   /** Search across all compatible projects; results are merged and ranked. */
@@ -306,12 +521,15 @@ export class IndexManager {
       }
     }
     if (indexes.length === 0) return [];
-    const vector = mode === "text" ? null : await getEmbedding(query);
+    const vector = mode === "text" ? null : await cachedEmbed(query, CONFIG.OLLAMA_MODEL, this.registry);
+    const rerankOn = this.wantRerank(opts);
+    const mmrOn = this.wantMMR(opts);
+    const fetchLimit = rerankOn || mmrOn ? Math.max(limit, CONFIG.RERANK_TOP_K, CONFIG.MMR_TOP_K) : limit;
 
     const perTable = await Promise.all(
       indexes.map(async (rec) => {
         try {
-          const rows = await this.searchOnTable(rec.tableName, query, vector, limit, opts);
+          const rows = await this.searchOnTable(rec.tableName, query, vector, fetchLimit, opts);
           return rows.map((r) => this.scope(r, rec.name, rec.lastIndexedAt));
         } catch {
           return [] as ScopedSearchResult[];
@@ -319,8 +537,34 @@ export class IndexManager {
       }),
     );
 
-    const ranked = this.rankCombined(perTable.flat(), mode).slice(0, limit);
-    return this.enrich(ranked, opts?.contextLines ?? 0);
+    const ranked = this.rankCombined(perTable.flat(), mode);
+    const refined = await this.refineAndSlice(ranked, query, limit, mode, rerankOn, mmrOn);
+    const enriched = await this.enrich(refined, opts?.contextLines ?? 0);
+    return applyCharBudget(enriched, opts?.maxChars);
+  }
+
+  /**
+   * Runs several queries concurrently in a single round-trip. Duplicate /
+   * blank query strings are de-duped; each query reuses searchIndex/searchAll
+   * (so rerank/MMR/maxChars + the shared query cache apply per query). Returns
+   * one group per distinct query, in first-seen order.
+   */
+  async searchBatch(
+    queries: string[],
+    project: string | undefined,
+    limit = 5,
+    opts?: SearchOptions,
+  ): Promise<BatchSearchGroup[]> {
+    const uniq = [...new Set(queries.map((q) => q.trim()).filter((q) => q.length > 0))];
+    if (uniq.length === 0) return [];
+    return Promise.all(
+      uniq.map(async (query) => {
+        const results = project
+          ? await this.searchIndex(project, query, limit, opts)
+          : await this.searchAll(query, limit, opts);
+        return { query, results };
+      }),
+    );
   }
 
   /**
@@ -546,6 +790,530 @@ export class IndexManager {
     };
   }
 
+  // ------------------------------------------------------------- dependencies
+
+  /**
+   * What does a file import, and who imports it?
+   * - Forward (imports): read the file, parse its imports (tree-sitter), resolve
+   *   each specifier against the indexed-file set (resolved / external / unresolved).
+   * - Reverse (imported-by): from the on-demand, mtime-cached import graph. The
+   *   first call per project pays the cost of parsing every indexed file's imports;
+   *   later calls are free until a file's mtime changes (watcher-reflecting).
+   */
+  async getDependencies(
+    filePath: string,
+    project?: string,
+    opts?: { limit?: number },
+  ): Promise<DependencyResult> {
+    const abs = path.resolve(filePath);
+    const rec = this.resolveProjectForFile(abs, project);
+    const limit = opts?.limit ?? 200;
+
+    let content: string;
+    try {
+      content = await readFile(abs, "utf-8");
+    } catch (err) {
+      throw new Error(`Cannot read '${abs}': ${err instanceof Error ? err.message : err}`);
+    }
+
+    const specs = await extractImports(abs, content);
+    const indexedFiles = this.registry.listCachedFiles(rec.name);
+    const imports =
+      specs.length === 0
+        ? []
+        : resolveImports(specs, rec.path, buildFileIndex(new Set(indexedFiles)), abs).map((d) =>
+            toEdge(d, rec.path),
+          );
+
+    const graph = await this.buildImportGraph(rec);
+    const reverse = graph.reverse.get(abs) ?? [];
+    const importedBy = reverse.slice(0, limit).map((f) => path.relative(rec.path, f));
+
+    return {
+      project: rec.name,
+      file: abs,
+      relativeFile: path.relative(rec.path, abs),
+      imports,
+      importedBy,
+      truncated: reverse.length > limit,
+      scannedFiles: graph.scannedFiles,
+    };
+  }
+
+  /**
+   * Call graph for a symbol and/or file: who calls it (callers) and what it calls
+   * (callees), as bounded, cycle-safe trees. Adjacency comes from whole-identifier
+   * matching over chunk content (same discipline as `find_references` /
+   * `find_dead_code`), so this is additive — no schema change, no reindex.
+   *
+   * The per-project adjacency is cached and keyed on `lastIndexedAt` (not file
+   * mtimes): it is built from LanceDB rows, which can change on a re-chunk even
+   * when source mtimes do not. The first call per project pays the scan; later
+   * calls are instant until the project is reindexed.
+   */
+  async getCallGraph(opts: {
+    symbol?: string;
+    path?: string;
+    project?: string;
+    direction?: "callers" | "callees" | "both";
+    depth?: number;
+    limit?: number;
+  }): Promise<CallGraphResult> {
+    const symbol = opts.symbol?.trim();
+    const filePath = opts.path?.trim();
+    if (!symbol && !filePath) {
+      throw new Error("getCallGraph needs a symbol name and/or a file path.");
+    }
+    const direction = opts.direction ?? "both";
+    const depth = opts.depth ?? 3;
+    const limit = opts.limit ?? 100;
+
+    // Resolve the project: from the file path, the explicit name, or the single
+    // indexed project. (The anchor may be a symbol with no file, so we can't
+    // always infer from a path like `getDependencies` does.)
+    let rec: IndexRecord;
+    let absFile: string | undefined;
+    if (filePath) {
+      absFile = path.resolve(filePath);
+      rec = this.resolveProjectForFile(absFile, opts.project);
+    } else if (opts.project) {
+      const r = this.registry.getIndex(opts.project);
+      if (!r) throw new Error(`Index not found: ${opts.project}`);
+      rec = r;
+    } else {
+      const all = this.registry.listIndexes();
+      if (all.length === 0) throw new Error("No indexed project; index a directory first.");
+      if (all.length > 1) {
+        throw new Error(
+          `'${symbol}' could belong to multiple projects (${all.map((p) => p.name).join(", ")}); pass --project.`,
+        );
+      }
+      rec = all[0]!;
+    }
+
+    const graph = await this.buildCallGraph(rec);
+    const { forward, reverse, symbolsByKey, nameToSymbols, scannedSymbols, truncated: scanTruncated } = graph;
+
+    // Resolve anchor keys. `matchRootSymbols` mirrors `find_symbol` so a bare
+    // method name (e.g. `getDependencies`) resolves to its `Class.method` form.
+    let matched: CallSymbol[];
+    if (symbol) {
+      matched = matchRootSymbols(nameToSymbols, symbol);
+      if (absFile) matched = matched.filter((s) => s.filePath === absFile);
+      if (matched.length === 0) {
+        const where = absFile ? ` in ${path.relative(rec.path, absFile)}` : "";
+        throw new Error(`No callable symbol '${symbol}' found${where} (project: ${rec.name}).`);
+      }
+    } else {
+      matched = absFile
+        ? [...symbolsByKey.values()].filter((s) => s.filePath === absFile)
+        : [];
+      if (matched.length === 0) {
+        throw new Error(
+          `No callable symbols found in '${path.relative(rec.path, absFile!)}' (project: ${rec.name}).`,
+        );
+      }
+    }
+    const rootKeys = [...new Set(matched.map((s) => s.key))];
+
+    const wantCallers = direction === "callers" || direction === "both";
+    const wantCallees = direction === "callees" || direction === "both";
+
+    const rootNodes = traverseCallGraph(rootKeys, EMPTY_ADJ, symbolsByKey, rec.path, 0, limit).nodes;
+    const callersRes = wantCallers
+      ? traverseCallGraph(rootKeys, reverse, symbolsByKey, rec.path, depth, limit)
+      : null;
+    const calleesRes = wantCallees
+      ? traverseCallGraph(rootKeys, forward, symbolsByKey, rec.path, depth, limit)
+      : null;
+
+    return {
+      project: rec.name,
+      roots: rootNodes,
+      direction,
+      depth,
+      callers: callersRes?.nodes ?? [],
+      callees: calleesRes?.nodes ?? [],
+      scannedSymbols,
+      truncated: scanTruncated || (callersRes?.truncated ?? false) || (calleesRes?.truncated ?? false),
+    };
+  }
+
+  /**
+   * Git-history / commit-message search for a project: runs `git log` in the
+   * project root and returns matching commits ("when / why was feature X added",
+   * "who changed this file"). Live — no indexing, no embedding, no reindex
+   * (additive, like `getDependencies` / `findDeadCode`). Filters by message
+   * (`query`), path, author, and date range; `withFiles` appends changed files.
+   * Returns `notARepo: true` when the directory isn't a git working tree.
+   */
+  async searchCommits(
+    project: string,
+    opts?: CommitQueryOpts,
+  ): Promise<CommitSearchResult> {
+    const rec = this.registry.getIndex(project);
+    if (!rec) throw new Error(`Index not found: ${project}`);
+    const limit = opts?.limit ?? 50;
+    if (!(await isGitRepo(rec.path))) {
+      return { project, count: 0, commits: [], truncated: false, notARepo: true };
+    }
+    const commits = await searchGitLog(rec.path, opts ?? {});
+    const result: CommitSearchResult = {
+      project,
+      count: commits.length,
+      commits,
+      truncated: commits.length >= limit,
+      notARepo: false,
+    };
+    if (opts?.query) result.query = opts.query;
+    return result;
+  }
+
+  /**
+   * Builds (and caches) the project's caller→callee adjacency from one
+   * `tableSymbolsWithContent` pass. The cache is keyed on `lastIndexedAt`: the
+   * data lives in LanceDB, so file mtimes are not a correct freshness signal (a
+   * chunker bump or embedding-only reindex rewrites rows without moving mtimes).
+   */
+  private async buildCallGraph(rec: IndexRecord): Promise<CallGraphCacheEntry> {
+    const cached = this.callGraphCache.get(rec.name);
+    if (cached && cached.lastIndexedAt === rec.lastIndexedAt) return cached;
+
+    const allRows = await tableSymbolsWithContent(rec.tableName);
+    const truncated = allRows.length >= 200000;
+
+    // Inventory: callable symbols, deduped by (name, file), keeping the min start
+    // line as the declaration and the longest content for signature recovery.
+    const byKey = new Map<string, CallSymbol>();
+    for (const r of allRows) {
+      const name = r.symbolName;
+      const st = r.symbolType;
+      if (!name || !st || !CALLABLE_TYPES.has(st)) continue;
+      if (typeof r.startLine !== "number" || typeof r.endLine !== "number") continue;
+      const content = typeof r.content === "string" ? r.content : "";
+      const key = `${name}\0${r.filePath}`;
+      const ex = byKey.get(key);
+      if (!ex) {
+        const sym: CallSymbol = {
+          key,
+          symbolName: name,
+          symbolType: st,
+          matchNames: matchNamesFor(name),
+          filePath: r.filePath,
+          declarationLine: r.startLine,
+          endLine: r.endLine,
+          content,
+        };
+        if (r.language) sym.language = r.language;
+        byKey.set(key, sym);
+      } else {
+        ex.declarationLine = Math.min(ex.declarationLine, r.startLine);
+        ex.endLine = Math.max(ex.endLine, r.endLine);
+        if (content.length > (ex.content?.length ?? 0)) ex.content = content;
+      }
+    }
+    const symbols = [...byKey.values()];
+
+    // Bodies to scan: every callable chunk, tagged with its caller key (so a
+    // function split across chunks is scanned in full).
+    const chunks: CallChunk[] = [];
+    for (const r of allRows) {
+      const name = r.symbolName;
+      const st = r.symbolType;
+      if (!name || !st || !CALLABLE_TYPES.has(st)) continue;
+      if (typeof r.startLine !== "number") continue;
+      const content = typeof r.content === "string" ? r.content : "";
+      if (!content) continue;
+      chunks.push({
+        callerKey: `${name}\0${r.filePath}`,
+        filePath: r.filePath,
+        startLine: r.startLine,
+        content,
+      });
+    }
+
+    const { forward, reverse } = buildCallEdges(symbols, chunks);
+
+    const nameToSymbols = new Map<string, CallSymbol[]>();
+    for (const s of symbols) {
+      let arr = nameToSymbols.get(s.symbolName);
+      if (!arr) {
+        arr = [];
+        nameToSymbols.set(s.symbolName, arr);
+      }
+      arr.push(s);
+    }
+    const symbolsByKey = new Map<string, CallSymbol>();
+    for (const s of symbols) symbolsByKey.set(s.key, s);
+
+    const entry: CallGraphCacheEntry = {
+      lastIndexedAt: rec.lastIndexedAt,
+      forward,
+      reverse,
+      symbolsByKey,
+      nameToSymbols,
+      scannedSymbols: symbols.length,
+      truncated,
+    };
+    this.callGraphCache.set(rec.name, entry);
+    return entry;
+  }
+
+  /**
+   * Conservative dead-code detection for one project: symbols with zero
+   * whole-identifier references anywhere, scored by a multi-signal model that is
+   * reluctant to flag anything reachable via export/polymorphism/dynamic-call.
+   * Single pass over all chunk content; no reindex required.
+   */
+  async findDeadCode(
+    project: string,
+    opts?: { language?: string; symbolType?: string; minConfidence?: number; limit?: number },
+  ): Promise<DeadCodeReport> {
+    const rec = this.registry.getIndex(project);
+    if (!rec) throw new Error(`Index not found: ${project}`);
+    const minConfidence = opts?.minConfidence ?? 0;
+    const limit = opts?.limit ?? 200;
+
+    const allRows = await tableSymbolsWithContent(rec.tableName);
+    const truncated = allRows.length >= 200000;
+
+    // Optional language/symbolType filters shrink the scanned set (and the regex).
+    const rows = allRows.filter((r) => {
+      if (opts?.language && r.language !== opts.language) return false;
+      if (opts?.symbolType && r.symbolType !== opts.symbolType) return false;
+      return true;
+    });
+
+    // Candidate inventory: real symbols, deduped by (symbolName, filePath), keeping
+    // the min start line as the declaration line and the longest content chunk for
+    // signature/export recovery.
+    const byKey = new Map<
+      string,
+      {
+        symbolName: string;
+        symbolType: string;
+        filePath: string;
+        language: string;
+        declLine: number;
+        endLine: number;
+        content: string;
+      }
+    >();
+    for (const r of rows) {
+      const name = r.symbolName;
+      const st = r.symbolType;
+      if (!name || !st || !DEAD_CANDIDATE_TYPES.has(st)) continue;
+      if (typeof r.startLine !== "number" || typeof r.endLine !== "number") continue;
+      const content = typeof r.content === "string" ? r.content : "";
+      const key = `${name} ${r.filePath}`;
+      const ex = byKey.get(key);
+      if (!ex) {
+        byKey.set(key, {
+          symbolName: name,
+          symbolType: st,
+          filePath: r.filePath,
+          language: r.language ?? "",
+          declLine: r.startLine,
+          endLine: r.endLine,
+          content,
+        });
+      } else {
+        ex.declLine = Math.min(ex.declLine, r.startLine);
+        ex.endLine = Math.max(ex.endLine, r.endLine);
+        if (content.length > ex.content.length) ex.content = content;
+      }
+    }
+
+    // Pre-filter: drop test files and entry points entirely.
+    const candidates = [...byKey.values()].filter(
+      (c) => !isTestFile(c.filePath) && !isEntryPointFile(c.filePath),
+    );
+    const scannedSymbols = candidates.length;
+
+    // Common-name detection: the bare name is shared by > 3 distinct symbols.
+    const nameCount = new Map<string, number>();
+    for (const c of candidates) {
+      const bare = c.symbolName.split(".").pop() ?? c.symbolName;
+      nameCount.set(bare, (nameCount.get(bare) ?? 0) + 1);
+    }
+
+    const countSymbols: CountSymbol[] = candidates.map((c) => ({
+      key: `${c.symbolName} ${c.filePath} ${c.declLine}`,
+      matchNames: matchNamesFor(c.symbolName),
+      filePath: c.filePath,
+      declarationLine: c.declLine,
+    }));
+    const countChunks: CountChunk[] = rows
+      .filter((r) => typeof r.content === "string" && r.content.length > 0)
+      .map((r) => ({
+        filePath: r.filePath,
+        startLine: typeof r.startLine === "number" ? r.startLine : 1,
+        content: r.content ?? "",
+      }));
+
+    const refCounts = countReferences(countSymbols, countChunks);
+
+    // Per (file, symbol-name) reference totals — used for owner-class lookups.
+    const refsByNameFile = new Map<string, number>();
+    for (let i = 0; i < candidates.length; i++) {
+      const c = candidates[i]!;
+      const cnt = refCounts.get(countSymbols[i]!.key) ?? 0;
+      const k = `${c.filePath} ${c.symbolName}`;
+      refsByNameFile.set(k, (refsByNameFile.get(k) ?? 0) + cnt);
+    }
+
+    const results: DeadCodeResult[] = [];
+    for (let i = 0; i < candidates.length; i++) {
+      const c = candidates[i]!;
+      const cnt = refCounts.get(countSymbols[i]!.key) ?? 0;
+      if (cnt > 0) continue; // referenced → not dead
+
+      const bare = c.symbolName.split(".").pop() ?? c.symbolName;
+      const isCommon = (nameCount.get(bare) ?? 0) > 3;
+      const ownerRef = c.symbolName.includes(".")
+        ? (refsByNameFile.get(`${c.filePath} ${c.symbolName.split(".")[0]}`) ?? 0) > 0
+        : false;
+
+      const scored = scoreDeadCode({
+        symbolName: c.symbolName,
+        symbolType: c.symbolType,
+        language: c.language,
+        content: c.content,
+        referenceCount: 0,
+        ownerClassReferenced: ownerRef,
+        isCommonName: isCommon,
+      });
+      if (scored.confidence < minConfidence) continue;
+
+      const res: DeadCodeResult = {
+        project: rec.name,
+        symbolName: c.symbolName,
+        symbolType: c.symbolType,
+        filePath: c.filePath,
+        relativePath: path.relative(rec.path, c.filePath),
+        startLine: c.declLine,
+        endLine: c.endLine,
+        referenceCount: 0,
+        signals: scored.signals,
+        confidence: scored.confidence,
+        category: scored.category,
+      };
+      if (c.language) res.language = c.language;
+      const sig = deriveSignature(c.content);
+      if (sig) res.signature = sig;
+      results.push(res);
+    }
+
+    results.sort((a, b) => b.confidence - a.confidence);
+    return {
+      project: rec.name,
+      results: results.slice(0, limit),
+      scannedSymbols,
+      scannedChunks: allRows.length,
+      truncated,
+    };
+  }
+
+  /** Resolves which project an absolute file belongs to (prefix match; most-specific wins). */
+  private resolveProjectForFile(abs: string, project?: string): IndexRecord {
+    if (project) {
+      const rec = this.registry.getIndex(project);
+      if (!rec) throw new Error(`Index not found: ${project}`);
+      return rec;
+    }
+    const matches = this.registry.listIndexes().filter((r) => {
+      const rel = path.relative(r.path, abs);
+      return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+    });
+    if (matches.length === 0) {
+      throw new Error(
+        `No indexed project contains '${abs}'. Pass --project <name> to disambiguate.`,
+      );
+    }
+    if (matches.length === 1) return matches[0]!;
+    // Most specific (longest path) wins; an exact tie is genuinely ambiguous.
+    matches.sort((a, b) => b.path.length - a.path.length);
+    if (matches[0]!.path.length === matches[1]!.path.length) {
+      throw new Error(
+        `'${abs}' belongs to multiple projects (${matches.map((m) => m.name).join(", ")}); pass --project.`,
+      );
+    }
+    return matches[0]!;
+  }
+
+  /**
+   * Builds (and caches) the project's import graph. The cache is keyed on the
+   * indexed-file set and per-file mtimes, so it rebuilds only when something
+   * changed — watcher edits surface on the next call without the engine touching
+   * the watcher. Imports are parsed in bounded parallelism; the shared tree-sitter
+   * parser stays safe because each setLanguage→parse is a synchronous, await-free
+   * critical section (the same invariant `chunkCode` relies on).
+   */
+  private async buildImportGraph(rec: IndexRecord): Promise<DepGraph> {
+    const indexedFiles = this.registry.listCachedFiles(rec.name);
+    const setKey = indexedFiles.join("\n");
+    const cached = this.depGraphCache.get(rec.name);
+    if (cached && cached.setKey === setKey) {
+      let stale = false;
+      for (const f of indexedFiles) {
+        try {
+          if (statSync(f).mtimeMs !== cached.graph.fileMtimes.get(f)) {
+            stale = true;
+            break;
+          }
+        } catch {
+          stale = true;
+          break;
+        }
+      }
+      if (!stale) return cached.graph;
+    }
+
+    const index = buildFileIndex(new Set(indexedFiles));
+    const fileMtimes = new Map<string, number>();
+    for (const f of indexedFiles) {
+      try {
+        fileMtimes.set(f, statSync(f).mtimeMs);
+      } catch {
+        // unreadable file → mtime unknown, but keep it so the graph still includes it
+      }
+    }
+
+    const forward = new Map<string, string[]>();
+    await mapWithConcurrency(indexedFiles, 8, async (f) => {
+      let content: string;
+      try {
+        content = await readFile(f, "utf-8");
+      } catch {
+        return;
+      }
+      const specs = await extractImports(f, content);
+      if (specs.length === 0) return;
+      const resolved = resolveImports(specs, rec.path, index, f);
+      const edges: string[] = [];
+      for (const r of resolved) {
+        if (r.status === "resolved" && r.resolvedPath) edges.push(r.resolvedPath);
+      }
+      if (edges.length > 0) forward.set(f, edges);
+    });
+
+    const reverse = new Map<string, string[]>();
+    for (const [importer, targets] of forward) {
+      for (const t of targets) {
+        let arr = reverse.get(t);
+        if (!arr) {
+          arr = [];
+          reverse.set(t, arr);
+        }
+        if (!arr.includes(importer)) arr.push(importer);
+      }
+    }
+
+    const graph: DepGraph = { forward, reverse, fileMtimes, scannedFiles: indexedFiles.length };
+    this.depGraphCache.set(rec.name, { setKey, graph });
+    return graph;
+  }
+
   /** Searches a table according to the chosen mode (hybrid/vector/text). */
   private async searchOnTable(
     table: string,
@@ -581,6 +1349,125 @@ export class IndexManager {
     }
     // hybrid/text → higher score first
     return rows.sort((a, b) => (b._score ?? 0) - (a._score ?? 0));
+  }
+
+  /** Cached result of the one-time reranker-model availability probe. */
+  private rerankAvailable: boolean | null = null;
+
+  /** Is second-stage reranking active for this call? (needs a configured model) */
+  private wantRerank(opts?: SearchOptions): boolean {
+    const flag = opts?.rerank;
+    const enabled = flag === true || (CONFIG.RERANK_ENABLED && flag !== false);
+    return enabled && CONFIG.RERANK_MODEL.length > 0;
+  }
+
+  /** Is MMR diversification active for this call? */
+  private wantMMR(opts?: SearchOptions): boolean {
+    const flag = opts?.mmr;
+    return flag === true || (CONFIG.MMR_ENABLED && flag !== false);
+  }
+
+  /**
+   * Probes once (cached) whether the configured reranker model exists in Ollama.
+   * Default-on reranking must not pay a per-search storm of failed calls when the
+   * model isn't installed, so reranking is disabled for the session if it's absent.
+   */
+  private async ensureRerankAvailable(): Promise<boolean> {
+    if (this.rerankAvailable !== null) return this.rerankAvailable;
+    if (!CONFIG.RERANK_MODEL) {
+      this.rerankAvailable = false;
+      return false;
+    }
+    try {
+      const resp = await fetch(`${CONFIG.OLLAMA_URL}/api/show`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: CONFIG.RERANK_MODEL }),
+      });
+      this.rerankAvailable = resp.ok;
+      if (!resp.ok) {
+        console.error(
+          `[manager] reranker model '${CONFIG.RERANK_MODEL}' not found in Ollama; ` +
+            `reranking disabled for this session (install it, or set search.rerank.enabled=false).`,
+        );
+      }
+    } catch (err) {
+      this.rerankAvailable = false;
+      console.error("[manager] reranker availability probe failed; reranking disabled:", err);
+    }
+    return this.rerankAvailable;
+  }
+
+  /**
+   * Refines the candidate pool and slices to `limit`:
+   *   1. (optional) rerank — re-score by the cross-encoder and sort by precision;
+   *   2. (optional) MMR — select a relevant-and-diverse subset.
+   * A step is skipped (transparently, with a plain slice) when it is off, when the
+   * pool is already ≤ `limit`, when the reranker model is absent, when vectors are
+   * missing, or on any error — rerank/MMR are refinements, never hard dependencies.
+   */
+  private async refineAndSlice<T extends SearchResult>(
+    rows: T[],
+    query: string,
+    limit: number,
+    mode: string,
+    rerankOn: boolean,
+    mmrOn: boolean,
+  ): Promise<T[]> {
+    if (!(rerankOn || mmrOn) || rows.length <= limit) return rows.slice(0, limit);
+    const candidates = rows.slice(0, Math.max(limit, CONFIG.RERANK_TOP_K, CONFIG.MMR_TOP_K));
+
+    // 1) Rerank for precision (re-score + sort by relevance).
+    if (rerankOn && (await this.ensureRerankAvailable())) {
+      try {
+        const scores = await rerankScores(query, candidates.map((r) => r.content ?? ""));
+        for (let i = 0; i < candidates.length; i++) {
+          const c = candidates[i];
+          if (c) c._rerankScore = scores[i] ?? 0.5;
+        }
+        candidates.sort((a, b) => (b._rerankScore ?? 0) - (a._rerankScore ?? 0));
+      } catch (err) {
+        // Whole-batch failure (e.g. Ollama unreachable) → keep pre-rerank order.
+        console.error("[manager] rerank failed; using pre-rerank order:", err);
+      }
+    }
+
+    // 2) MMR for diversity (selects `limit` from the pool; null ⇒ vectors missing).
+    if (mmrOn) {
+      const picked = this.selectDiverse(candidates.slice(0, CONFIG.MMR_TOP_K), mode, limit);
+      if (picked) return picked;
+    }
+
+    return candidates.slice(0, limit);
+  }
+
+  /**
+   * Maximal Marginal Relevance selection over `pool`. Returns a relevant-and-
+   * diverse subset of size `limit`, or null if any candidate lacks a vector (MMR
+   * is vector-based; the caller falls back to a plain slice in that case).
+   */
+  private selectDiverse<T extends SearchResult>(
+    pool: T[],
+    mode: string,
+    limit: number,
+  ): T[] | null {
+    if (pool.length === 0) return null;
+    const vectors = pool.map((r) => (Array.isArray(r.vector) ? r.vector : null));
+    if (vectors.some((v) => !v || v.length === 0)) return null;
+    const relevances = pool.map((r) =>
+      typeof r._rerankScore === "number"
+        ? r._rerankScore
+        : mode === "vector"
+          ? -(r._distance ?? 0)
+          : (r._score ?? 0),
+    );
+    const indices = selectMMR(
+      vectors as number[][],
+      relevances,
+      Math.min(limit, pool.length),
+      CONFIG.MMR_LAMBDA,
+    );
+    return indices.map((i) => pool[i]!);
   }
 
   /** Is the index compatible with the active embedding model? (compatible if no model recorded.) */

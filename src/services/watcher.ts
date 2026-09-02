@@ -14,7 +14,7 @@ export interface WatchOptions {
   isBusy?: (() => boolean) | undefined;
 }
 
-const IGNORE_RE = /(^|[/\\])(node_modules|\.git|\.lancedb|dist|build|out|target)([/\\]|$)/;
+const IGNORE_RE = /(^|[/\\])(node_modules|\.git|\.lancedb|dist|build|out|target|\.godot)([/\\]|$)/;
 
 type PendingAction = "index" | "remove";
 

@@ -25,6 +25,8 @@ export interface SearchResult extends CodeRecord {
   _distance?: number;
   /** BM25 / RRF combined relevance score (higher = more relevant). */
   _score?: number;
+  /** Second-stage reranker relevance (0–1, higher = more relevant). Present only when reranking ran. */
+  _rerankScore?: number;
 }
 
 /** Metadata filters that narrow search results. */
@@ -101,12 +103,22 @@ export function buildWhere(filters?: SearchFilters): string | undefined {
   if (filters.language) clauses.push(`language = '${sqlLit(filters.language)}'`);
   if (filters.symbolType) clauses.push(`symbolType = '${sqlLit(filters.symbolType)}'`);
   if (filters.pathGlob) {
-    // Simple glob → LIKE: '*' → '%'. With no wildcard, substring match (%...%).
+    // Simple glob → LIKE. Stored filePath values are ABSOLUTE and SQL '%' spans
+    // '/', so the anchor depends on the leading character:
+    //   starts with '/' → anchored at the absolute path start;
+    //   otherwise       → '%' prepended (project-relative usage, e.g. 'src/*'
+    //                     or 'docs/*', matches anywhere in the path).
+    // '*' → '%'; '**/' → '*' ('%' spans '/', so it covers zero-or-more dirs);
+    // '**' → '*'. With no wildcard, substring match (%...%) — the same with or
+    // without the anchor.
     // First escape LIKE meta characters (\ % _), THEN turn glob '*' into '%';
     // this way a literal '_'/'%' in the path doesn't cause a false match.
-    const g = filters.pathGlob;
-    const esc = g.replace(/[\\%_]/g, "\\$&");
-    const like = esc.includes("*") ? esc.replace(/\*/g, "%") : `%${esc}%`;
+    const anchored = filters.pathGlob.startsWith("/");
+    const collapsed = filters.pathGlob.replace(/\*\*\//g, "*").replace(/\*\*/g, "*");
+    const esc = collapsed.replace(/[\\%_]/g, "\\$&");
+    const hasWildcard = esc.includes("*");
+    const body = hasWildcard ? esc.replace(/\*/g, "%") : `%${esc}%`;
+    const like = hasWildcard && !anchored ? `%${body}` : body;
     clauses.push(`filePath LIKE '${sqlLit(like)}'${LIKE_ESCAPE}`);
   }
   return clauses.length > 0 ? clauses.join(" AND ") : undefined;
@@ -246,6 +258,33 @@ export async function tableMetadata(table: string, maxRows = 200000): Promise<Ch
     .select(["filePath", "language", "symbolName", "symbolType", "startLine", "endLine"])
     .limit(maxRows)
     .toArray()) as ChunkMeta[];
+  return rows;
+}
+
+/** Chunk metadata plus its full `content` (no vector). */
+export interface ChunkMetaWithContent extends ChunkMeta {
+  content?: string;
+}
+
+/**
+ * Like `tableMetadata` but keeps `content` (selects explicit columns so the
+ * large `vector` column is never pulled). The basis of dependency-graph and
+ * dead-code analysis, both of which read each chunk's text in one pass.
+ * `maxRows` caps memory on huge tables (and is surfaced as `truncated` upstream).
+ */
+export async function tableSymbolsWithContent(
+  table: string,
+  maxRows = 200000,
+): Promise<ChunkMetaWithContent[]> {
+  const conn = getDB();
+  const names = await conn.tableNames();
+  if (!names.includes(table)) return [];
+  const t = await conn.openTable(table);
+  const rows = (await t
+    .query()
+    .select(["filePath", "language", "symbolName", "symbolType", "startLine", "endLine", "content"])
+    .limit(maxRows)
+    .toArray()) as ChunkMetaWithContent[];
   return rows;
 }
 

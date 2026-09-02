@@ -12,7 +12,17 @@ import {
 import { CONFIG } from "../config";
 import { fileOutline } from "../chunking/chunker";
 import { TOOL_DEFINITIONS } from "./tool-defs";
-import { formatResults, formatOutline, formatReferences, formatOverview } from "./format";
+import {
+  formatResults,
+  formatBatchResults,
+  formatOutline,
+  formatReferences,
+  formatOverview,
+  formatDependencies,
+  formatDeadCode,
+  formatCallGraph,
+  formatCommits,
+} from "./format";
 import type { JobQueue } from "../core/job-queue";
 import type { IndexManager } from "../core/index-manager";
 
@@ -25,7 +35,7 @@ export interface McpDeps {
 /** Builds a configured MCP Server instance for each connection. */
 function buildServer(deps: McpDeps): Server {
   const server = new Server(
-    { name: "mcp-code-indexer", version: "2.1.0" },
+    { name: "mcp-code-indexer", version: "2.2.0" },
     { capabilities: { tools: {} } },
   );
 
@@ -46,6 +56,9 @@ function buildServer(deps: McpDeps): Server {
         symbolType?: string;
         pathGlob?: string;
         contextLines?: number;
+        rerank?: boolean;
+        mmr?: boolean;
+        maxChars?: number;
       };
       const limit = args.limit ?? 5;
       const opts = {
@@ -54,12 +67,60 @@ function buildServer(deps: McpDeps): Server {
         symbolType: args.symbolType,
         pathGlob: args.pathGlob,
         contextLines: args.contextLines,
+        rerank: args.rerank,
+        mmr: args.mmr,
+        maxChars: args.maxChars,
       };
       try {
         const results = args.project
           ? await deps.manager.searchIndex(args.project, args.query, limit, opts)
           : await deps.manager.searchAll(args.query, limit, opts);
         return { content: [{ type: "text", text: formatResults(results) }] };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text", text: `Search error: ${msg}` }], isError: true };
+      }
+    }
+
+    if (name === "search_codebase_batch") {
+      const args = rawArgs as {
+        queries?: unknown;
+        project?: string;
+        limit?: number;
+        mode?: "hybrid" | "vector" | "text";
+        language?: string;
+        symbolType?: string;
+        pathGlob?: string;
+        contextLines?: number;
+        rerank?: boolean;
+        mmr?: boolean;
+        maxChars?: number;
+      };
+      if (!Array.isArray(args.queries) || args.queries.length === 0) {
+        return {
+          content: [{ type: "text", text: "Search error: 'queries' must be a non-empty array of strings." }],
+          isError: true,
+        };
+      }
+      const limit = args.limit ?? 5;
+      const opts = {
+        mode: args.mode,
+        language: args.language,
+        symbolType: args.symbolType,
+        pathGlob: args.pathGlob,
+        contextLines: args.contextLines,
+        rerank: args.rerank,
+        mmr: args.mmr,
+        maxChars: args.maxChars,
+      };
+      try {
+        const groups = await deps.manager.searchBatch(
+          args.queries as string[],
+          args.project,
+          limit,
+          opts,
+        );
+        return { content: [{ type: "text", text: formatBatchResults(groups) }] };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text", text: `Search error: ${msg}` }], isError: true };
@@ -204,6 +265,133 @@ function buildServer(deps: McpDeps): Server {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text", text: `Overview error: ${msg}` }], isError: true };
+      }
+    }
+
+    if (name === "get_dependencies") {
+      const args = rawArgs as { path: string; project?: string; limit?: number };
+      if (!args.path) {
+        return { content: [{ type: "text", text: "'path' is required." }], isError: true };
+      }
+      try {
+        const opts = typeof args.limit === "number" ? { limit: args.limit } : undefined;
+        const dep = await deps.manager.getDependencies(args.path, args.project, opts);
+        return { content: [{ type: "text", text: formatDependencies(dep) }] };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text", text: `Dependency error: ${msg}` }], isError: true };
+      }
+    }
+
+    if (name === "get_call_graph") {
+      const args = rawArgs as {
+        symbol?: string;
+        path?: string;
+        project?: string;
+        direction?: "callers" | "callees" | "both";
+        depth?: number;
+        limit?: number;
+      };
+      if (!args.symbol && !args.path) {
+        return {
+          content: [{ type: "text", text: "Provide a 'symbol' name and/or a 'path' (at least one is required)." }],
+          isError: true,
+        };
+      }
+      try {
+        const opts: {
+          symbol?: string;
+          path?: string;
+          project?: string;
+          direction?: "callers" | "callees" | "both";
+          depth?: number;
+          limit?: number;
+        } = {};
+        if (typeof args.symbol === "string") opts.symbol = args.symbol;
+        if (typeof args.path === "string") opts.path = args.path;
+        if (typeof args.project === "string") opts.project = args.project;
+        if (args.direction === "callers" || args.direction === "callees" || args.direction === "both") {
+          opts.direction = args.direction;
+        }
+        if (typeof args.depth === "number") opts.depth = args.depth;
+        if (typeof args.limit === "number") opts.limit = args.limit;
+        const cg = await deps.manager.getCallGraph(opts);
+        return { content: [{ type: "text", text: formatCallGraph(cg) }] };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text", text: `Call graph error: ${msg}` }], isError: true };
+      }
+    }
+
+    if (name === "find_dead_code") {
+      const args = rawArgs as {
+        project: string;
+        language?: string;
+        symbolType?: string;
+        minConfidence?: number;
+        limit?: number;
+      };
+      if (!args.project) {
+        return { content: [{ type: "text", text: "'project' is required." }], isError: true };
+      }
+      const opts: {
+        language?: string;
+        symbolType?: string;
+        minConfidence?: number;
+        limit?: number;
+      } = {};
+      if (typeof args.language === "string") opts.language = args.language;
+      if (typeof args.symbolType === "string") opts.symbolType = args.symbolType;
+      if (typeof args.minConfidence === "number") opts.minConfidence = args.minConfidence;
+      if (typeof args.limit === "number") opts.limit = args.limit;
+      try {
+        const report = await deps.manager.findDeadCode(args.project, opts);
+        return { content: [{ type: "text", text: formatDeadCode(report) }] };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text", text: `Dead-code error: ${msg}` }], isError: true };
+      }
+    }
+
+    if (name === "search_commits") {
+      const args = rawArgs as {
+        project: string;
+        query?: string;
+        path?: string;
+        author?: string;
+        since?: string;
+        until?: string;
+        withFiles?: boolean;
+        limit?: number;
+      };
+      if (!args.project) {
+        return {
+          content: [{ type: "text", text: "'project' is required." }],
+          isError: true,
+        };
+      }
+      const opts: {
+        query?: string;
+        path?: string;
+        author?: string;
+        since?: string;
+        until?: string;
+        withFiles?: boolean;
+        limit?: number;
+      } = {};
+      if (typeof args.query === "string") opts.query = args.query;
+      if (typeof args.path === "string") opts.path = args.path;
+      if (typeof args.author === "string") opts.author = args.author;
+      if (typeof args.since === "string") opts.since = args.since;
+      if (typeof args.until === "string") opts.until = args.until;
+      if (typeof args.withFiles === "boolean") opts.withFiles = args.withFiles;
+      if (typeof args.limit === "number") opts.limit = args.limit;
+      try {
+        const cs = await deps.manager.searchCommits(args.project, opts);
+        return { content: [{ type: "text", text: formatCommits(cs) }] };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text", text: `Commit search error: ${msg}` }], isError: true };
       }
     }
 

@@ -190,7 +190,7 @@ async function cmdSearch(positionals: string[], flags: Record<string, string | b
   await requireDaemon();
   const query = positionals.join(" ");
   if (!query) {
-    console.error('Usage: cidx search "<query>" [--project x] [--limit n] [--mode hybrid|vector|text] [--language x] [--type x] [--path glob]');
+    console.error('Usage: cidx search "<query>" [--project x] [--limit n] [--mode hybrid|vector|text] [--language x] [--type x] [--path glob] [--rerank] [--mmr] [--max-chars n]');
     process.exit(1);
   }
   const body: {
@@ -202,6 +202,9 @@ async function cmdSearch(positionals: string[], flags: Record<string, string | b
     symbolType?: string;
     pathGlob?: string;
     contextLines?: number;
+    rerank?: boolean;
+    mmr?: boolean;
+    maxChars?: number;
   } = { query };
   if (typeof flags.project === "string") body.project = flags.project;
   if (typeof flags.limit === "string") body.limit = Number(flags.limit);
@@ -210,8 +213,67 @@ async function cmdSearch(positionals: string[], flags: Record<string, string | b
   if (typeof flags.type === "string") body.symbolType = flags.type;
   if (typeof flags.path === "string") body.pathGlob = flags.path;
   if (typeof flags.context === "string") body.contextLines = Number(flags.context);
+  // --rerank / --rerank true turns it on; --rerank false turns it off (default-on).
+  if (flags.rerank === true || flags.rerank === "true") body.rerank = true;
+  else if (flags.rerank === "false") body.rerank = false;
+  // --mmr / --mmr true turns diversification on; --mmr false turns it off (default-on).
+  if (flags.mmr === true || flags.mmr === "true") body.mmr = true;
+  else if (flags.mmr === "false") body.mmr = false;
+  // --max-chars caps the returned text (results dropped whole to fit; top-1 always kept).
+  if (typeof flags["max-chars"] === "string") body.maxChars = Number(flags["max-chars"]);
   const results = await api<any[]>("POST", "/search", body);
   printResults(results);
+}
+
+async function cmdBatch(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
+  await requireDaemon();
+  // Each positional is a separate query (quote multi-word queries).
+  const queries = positionals;
+  if (queries.length === 0) {
+    console.error('Usage: cidx batch "<q1>" "<q2>" ... [--project x] [--limit n] [--mode hybrid|vector|text] [--language x] [--type x] [--path glob] [--max-chars n]');
+    process.exit(1);
+  }
+  const body: {
+    queries: string[];
+    project?: string;
+    limit?: number;
+    mode?: string;
+    language?: string;
+    symbolType?: string;
+    pathGlob?: string;
+    contextLines?: number;
+    rerank?: boolean;
+    mmr?: boolean;
+    maxChars?: number;
+  } = { queries };
+  if (typeof flags.project === "string") body.project = flags.project;
+  if (typeof flags.limit === "string") body.limit = Number(flags.limit);
+  if (typeof flags.mode === "string") body.mode = flags.mode;
+  if (typeof flags.language === "string") body.language = flags.language;
+  if (typeof flags.type === "string") body.symbolType = flags.type;
+  if (typeof flags.path === "string") body.pathGlob = flags.path;
+  if (typeof flags.context === "string") body.contextLines = Number(flags.context);
+  if (flags.rerank === true || flags.rerank === "true") body.rerank = true;
+  else if (flags.rerank === "false") body.rerank = false;
+  if (flags.mmr === true || flags.mmr === "true") body.mmr = true;
+  else if (flags.mmr === "false") body.mmr = false;
+  if (typeof flags["max-chars"] === "string") body.maxChars = Number(flags["max-chars"]);
+  const groups = await api<any[]>("POST", "/search/batch", body);
+  printBatchResults(groups);
+}
+
+/** Prints batch (multi-query) search results grouped by query. */
+function printBatchResults(groups: any[]): void {
+  if (!Array.isArray(groups) || groups.length === 0) {
+    console.log("No results found for any query.");
+    return;
+  }
+  groups.forEach((g, i) => {
+    if (i > 0) console.log("");
+    const n = g.results?.length ?? 0;
+    console.log(`## Query: "${g.query}" (${n} result${n === 1 ? "" : "s"})`);
+    printResults(g.results ?? []);
+  });
 }
 
 async function cmdFind(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
@@ -329,6 +391,229 @@ async function cmdOverview(positionals: string[]): Promise<void> {
   }
 }
 
+async function cmdDeps(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
+  await requireDaemon();
+  const filePath = positionals[0];
+  if (!filePath) {
+    console.error("Usage: cidx deps <file> [--project x] [--limit n]");
+    process.exit(1);
+  }
+  const body: { path: string; project?: string; limit?: number } = { path: path.resolve(filePath) };
+  if (typeof flags.project === "string") body.project = flags.project;
+  if (typeof flags.limit === "string") body.limit = Number(flags.limit);
+  const r = await api<any>("POST", "/dependencies", body);
+  printDependencies(r);
+}
+
+/** Prints a dependency-graph result (CLI inline formatter). */
+function printDependencies(r: any): void {
+  console.log(`\nDependencies for '${r.relativeFile || r.file}' (project: ${r.project})`);
+  const imports: any[] = r.imports ?? [];
+  const resolved = imports.filter((e) => e.status === "resolved");
+  const external = imports.filter((e) => e.status === "external");
+  const unresolved = imports.filter((e) => e.status === "unresolved");
+  console.log(
+    `\nImports (${resolved.length} resolved, ${external.length} external${unresolved.length ? `, ${unresolved.length} unresolved` : ""}):`,
+  );
+  if (imports.length === 0) {
+    console.log("  (none — this file imports nothing)");
+  } else {
+    for (const e of resolved) console.log(`  → ${e.relativePath ?? e.path ?? e.raw}  (from "${e.raw}")`);
+    for (const e of external) console.log(`  ⊘ ${e.raw}  (external${e.reason ? `: ${e.reason}` : ""})`);
+    for (const e of unresolved) console.log(`  ? ${e.raw}  (unresolved${e.reason ? `: ${e.reason}` : ""})`);
+  }
+  const importedBy: string[] = r.importedBy ?? [];
+  console.log(`\nImported by (${importedBy.length}):`);
+  if (importedBy.length === 0) {
+    console.log("  (none — no indexed file imports this one)");
+  } else {
+    for (const f of importedBy) console.log(`  ${f}`);
+  }
+  console.log(`\n(reverse graph built from ${r.scannedFiles} indexed file(s))`);
+  if (r.truncated) console.log("⚠ reverse scan hit the file cap — pass a higher --limit for more.");
+}
+
+async function cmdCallGraph(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
+  await requireDaemon();
+  const arg = positionals[0];
+  if (!arg) {
+    console.error(
+      "Usage: cidx callgraph <symbol|file> [--project x] [--direction both|callers|callees] [--depth n] [--limit n]",
+    );
+    process.exit(1);
+  }
+  const body: {
+    symbol?: string;
+    path?: string;
+    project?: string;
+    direction?: "callers" | "callees" | "both";
+    depth?: number;
+    limit?: number;
+  } = {};
+  // A positional that points at a real file → module mode (all callables in it);
+  // otherwise treat it as a symbol name.
+  if (existsSync(arg)) body.path = path.resolve(arg);
+  else body.symbol = arg;
+  if (typeof flags.project === "string") body.project = flags.project;
+  if (typeof flags.direction === "string") body.direction = flags.direction as "callers" | "callees" | "both";
+  if (typeof flags.depth === "string") body.depth = Number(flags.depth);
+  if (typeof flags.limit === "string") body.limit = Number(flags.limit);
+  const r = await api<any>("POST", "/callgraph", body);
+  printCallGraph(r);
+}
+
+/** Prints a call-graph result (CLI inline formatter). */
+function printCallGraph(r: any): void {
+  const roots: any[] = r.roots ?? [];
+  const nodeLine = (n: any): string => {
+    const type = n.symbolType ? ` [${n.symbolType}]` : "";
+    const loc = n.startLine ? `  ${n.relativeFile || n.file}:${n.startLine}${n.endLine ? `-${n.endLine}` : ""}` : "";
+    const sig = n.signature ? ` — ${n.signature}` : "";
+    return `${n.symbol}${type}${loc}${sig}`;
+  };
+  const anchor =
+    roots.length === 1
+      ? nodeLine(roots[0])
+      : `${roots.length} symbol(s)${roots[0]?.file ? ` in ${roots[0].relativeFile || roots[0].file}` : ""}`;
+  console.log(`\nCall graph — project: ${r.project} · direction: ${r.direction} · depth: ${r.depth}`);
+  console.log(`Anchor: ${anchor}`);
+  const walk = (n: any, indent: number): void => {
+    const pad = "  ".repeat(indent);
+    const cyc = n.cyclic ? "  ↻ cycle" : "";
+    console.log(`${pad}${nodeLine(n)}${cyc}`);
+    for (const c of n.children ?? []) walk(c, indent + 1);
+  };
+  const callers: any[] = r.callers ?? [];
+  const callees: any[] = r.callees ?? [];
+  if (callers.length > 0) {
+    console.log("\n▲ Callers (who calls the anchor)");
+    for (const root of callers) walk(root, 0);
+  }
+  if (callees.length > 0) {
+    console.log("\n▼ Callees (what the anchor calls)");
+    for (const root of callees) walk(root, 0);
+  }
+  if (callers.length === 0 && callees.length === 0) {
+    console.log("\n(no in-index call edges found)");
+  }
+  console.log(`\n(scanned ${r.scannedSymbols} callable symbol(s))`);
+  if (r.truncated) console.log("⚠ node cap or table cap hit — the graph is partial; pass a higher --limit for more.");
+}
+
+async function cmdCommits(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
+  await requireDaemon();
+  const project = positionals[0];
+  if (!project) {
+    console.error(
+      "Usage: cidx commits <project> [query] [--path x] [--author x] [--since x] [--until x] [--limit n] [--files]",
+    );
+    process.exit(1);
+  }
+  const body: {
+    project: string;
+    query?: string;
+    path?: string;
+    author?: string;
+    since?: string;
+    until?: string;
+    withFiles?: boolean;
+    limit?: number;
+  } = { project };
+  // The message query is the 2nd positional (ergonomic) or the --query flag.
+  const query = typeof flags.query === "string" ? flags.query : positionals[1];
+  if (typeof query === "string" && query.length > 0) body.query = query;
+  if (typeof flags.path === "string") body.path = flags.path;
+  if (typeof flags.author === "string") body.author = flags.author;
+  if (typeof flags.since === "string") body.since = flags.since;
+  if (typeof flags.until === "string") body.until = flags.until;
+  if (flags.files === true) body.withFiles = true;
+  if (typeof flags.limit === "string") body.limit = Number(flags.limit);
+  const r = await api<any>("POST", "/commits", body);
+  printCommits(r);
+}
+
+/** Prints a commit-search result (CLI inline formatter). */
+function printCommits(r: any): void {
+  const commits: any[] = r.commits ?? [];
+  const scope = r.query ? ` · query: "${r.query}"` : "";
+  console.log(`\nCommit search — project: ${r.project}${scope} · ${r.count} match(es)`);
+  if (r.notARepo) {
+    console.log("\n(The project directory is not a git repository — no history to search.)");
+    return;
+  }
+  if (commits.length === 0) {
+    console.log("\n(no commits matched; broaden the query / filters, or check --since/--until)");
+    return;
+  }
+  const head = (c: any): string => {
+    const who = c.authorName ? `  ${c.authorName} <${c.authorEmail}>` : "";
+    const abbr = c.abbreviatedHash || String(c.hash ?? "").slice(0, 7);
+    return `${abbr}  ${c.date}${who}`;
+  };
+  for (const c of commits) {
+    console.log("");
+    console.log(head(c));
+    console.log(`    ${c.subject}`);
+    if (c.body) console.log(`    ${String(c.body).replace(/\n/g, "\n    ")}`);
+    if (Array.isArray(c.files) && c.files.length > 0) {
+      console.log(`    (${c.files.length} file${c.files.length === 1 ? "" : "s"} changed:)`);
+      for (const f of c.files) console.log(`      ${f}`);
+    }
+  }
+  if (r.truncated) console.log("\n⚠ commit limit hit — older matches exist; pass a higher --limit for more.");
+}
+
+async function cmdDeadcode(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
+  await requireDaemon();
+  const project = positionals[0];
+  if (!project) {
+    console.error("Usage: cidx deadcode <project> [--language x] [--type x] [--min-confidence n] [--limit n]");
+    process.exit(1);
+  }
+  const body: {
+    project: string;
+    language?: string;
+    symbolType?: string;
+    minConfidence?: number;
+    limit?: number;
+  } = { project };
+  if (typeof flags.language === "string") body.language = flags.language;
+  if (typeof flags.type === "string") body.symbolType = flags.type;
+  if (typeof flags["min-confidence"] === "string") body.minConfidence = Number(flags["min-confidence"]);
+  if (typeof flags.limit === "string") body.limit = Number(flags.limit);
+  const r = await api<any>("POST", "/deadcode", body);
+  printDeadCode(r);
+}
+
+/** Prints a dead-code report (CLI inline formatter). */
+function printDeadCode(r: any): void {
+  const results: any[] = r.results ?? [];
+  console.log(
+    `\nPotential dead code in '${r.project}' — ${results.length} candidate(s) (scanned ${r.scannedSymbols} symbols / ${r.scannedChunks} chunks)`,
+  );
+  if (r.truncated) {
+    console.log("⚠ the table exceeded the row cap — coverage is partial; reindex/raise the cap for full coverage.");
+  }
+  if (results.length === 0) {
+    console.log("\nNo dead-code candidates above the threshold.");
+    return;
+  }
+  for (const cat of ["likely dead", "uncertain", "review"]) {
+    const group = results.filter((x) => x.category === cat);
+    if (group.length === 0) continue;
+    console.log(`\n### ${cat} (${group.length})`);
+    for (const x of group) {
+      const signals = (x.signals ?? [])
+        .map((s: any) => s.signal + (s.detail ? ` (${s.detail})` : ""))
+        .join(", ");
+      console.log(`  [${String(x.confidence).padStart(3)}] ${x.symbolType}  ${x.symbolName}`);
+      console.log(`    ${x.relativePath}:${x.startLine}-${x.endLine}${x.language ? `  [${x.language}]` : ""}`);
+      if (signals) console.log(`    signals: ${signals}`);
+      if (x.signature) console.log(`    signature: ${x.signature}`);
+    }
+  }
+}
+
 async function cmdMcp(): Promise<void> {
   // Starts the stdio bridge, taking over stdio (MCP client ↔ bridge).
   const proc = Bun.spawn({
@@ -361,7 +646,7 @@ async function cmdConfig(positionals: string[]): Promise<void> {
   console.log(`\nEdit it and restart the daemon. For the path: indexer config path`);
 }
 
-const CLI_VERSION = "2.1.0";
+const CLI_VERSION = "2.2.0";
 
 /** Per-command detailed help catalog (`repodex help <command>` and `<command> --help`). */
 interface CmdDoc {
@@ -435,10 +720,13 @@ const COMMANDS: Record<string, CmdDoc> = {
       ["--project <name>", "Search only in this project (if not given, ALL projects)."],
       ["--limit <n>", "Maximum number of results (default: 5)."],
       ["--mode <m>", "hybrid (default) | vector (pure semantic) | text (pure BM25)."],
-      ["--language <lang>", "Filter by language (e.g. python, typescript)."],
+      ["--language <lang>", "Filter by language (e.g. python, typescript, gdscript)."],
       ["--type <type>", "Filter by symbol type (function, class, method, ...)."],
       ["--path <glob>", "File path pattern ('*' wildcard; e.g. 'src/*')."],
       ["--context <n>", "Include ±n surrounding lines (read live from the file) around each result."],
+      ["--rerank [bool]", "Second-stage reranker (on by default). --rerank true forces it on; --rerank false skips it for a faster lookup. Auto-disables if no reranker model is configured."],
+      ["--mmr [bool]", "MMR diversification (on by default). --mmr true forces it on; --mmr false keeps a pure relevance order. Drops near-duplicate chunks so the top results are distinct."],
+      ["--max-chars <n>", "Cap returned text to ~n chars: results are kept whole in ranked order while they fit (top-1 always returned). Pair with a higher --limit for recall without bloating output."],
     ],
     details: [
       "mode=text requires no model compatibility (uses no vectors); works on old/incompatible indexes.",
@@ -448,6 +736,28 @@ const COMMANDS: Record<string, CmdDoc> = {
       'cidx search "user authentication logic"',
       'cidx search "jwt token generation" --project api --limit 10',
       'cidx search "retry" --mode text --language go --path "src/*"',
+      'cidx search "retry backoff" --project api --limit 5 --rerank',
+    ],
+  },
+  batch: {
+    usage: 'batch "<q1>" "<q2>" ... [flags]',
+    summary: "Hybrid search for several queries in one round-trip; results grouped per query.",
+    flags: [
+      ["--project <name>", "Search only in this project (if not given, ALL projects)."],
+      ["--limit <n>", "Maximum results PER query (default: 5)."],
+      ["--mode <m>", "hybrid (default) | vector (pure semantic) | text (pure BM25)."],
+      ["--language <lang>", "Filter by language (e.g. python, typescript, gdscript)."],
+      ["--type <type>", "Filter by symbol type (function, class, method, ...)."],
+      ["--path <glob>", "File path pattern ('*' wildcard; e.g. 'src/*')."],
+      ["--context <n>", "Include ±n surrounding lines around each result."],
+      ["--rerank [bool]", "Second-stage reranker (on by default). --rerank false skips it."],
+      ["--mmr [bool]", "MMR diversification (on by default). --mmr false keeps pure relevance."],
+      ["--max-chars <n>", "Character budget applied PER QUERY; results kept whole while they fit."],
+    ],
+    details: ["Each argument is a separate query; quote multi-word queries. Duplicate queries are de-duped."],
+    examples: [
+      'cidx batch "user login" "password reset" --project api',
+      'cidx batch "jwt" "session" "cookie" --limit 3',
     ],
   },
   find: {
@@ -486,6 +796,80 @@ const COMMANDS: Record<string, CmdDoc> = {
     ],
     examples: ["cidx overview api"],
   },
+  deps: {
+    usage: "deps <file> [flags]",
+    summary: "Import graph of a file: what it imports + which indexed files import it.",
+    aliases: ["dependencies"],
+    flags: [
+      ["--project <name>", "Restrict to this project (inferred from the path if not given)."],
+      ["--limit <n>", "Cap on 'imported-by' files returned (default: 200)."],
+    ],
+    details: [
+      "Forward edges are parsed from the file's AST and resolved against the indexed set.",
+      "Reverse edges come from an on-demand graph cached by file mtime (the first call scans all imports).",
+    ],
+    examples: ["cidx deps src/core/index-manager.ts", "cidx deps src/server/mcp.ts --project repodex"],
+  },
+  callgraph: {
+    usage: "callgraph <symbol|file> [flags]",
+    summary: "Call graph: who calls a symbol and what it calls (bounded, cycle-safe trees).",
+    aliases: ["call-graph"],
+    flags: [
+      ["--project <name>", "Restrict to this project (inferred from the path, or the single indexed project)."],
+      ["--direction <d>", "both | callers | callees (default: both)."],
+      ["--depth <n>", "Maximum traversal depth, 0 = anchor only (default: 3)."],
+      ["--limit <n>", "Cap on nodes per direction (default: 100)."],
+    ],
+    details: [
+      "A file argument centers the graph on every callable symbol in it; any other argument is a symbol name.",
+      "Edges come from whole-identifier matching over indexed content (a navigation aid, not full LSP).",
+    ],
+    examples: [
+      "cidx callgraph handleRequest --project repodex",
+      "cidx callgraph src/core/index-manager.ts --direction callees --depth 2",
+    ],
+  },
+  commits: {
+    usage: "commits <project> [query] [flags]",
+    summary: "Git-history / commit-message search: when/why a feature was added, who changed a file.",
+    aliases: ["git-log", "gitlog"],
+    flags: [
+      ["--query <text>", "Case-insensitive regex on the commit message (or pass it as the 2nd positional)."],
+      ["--path <p>", "Only commits that touched this file/path/glob."],
+      ["--author <name>", "Case-insensitive regex on the author name/email."],
+      ["--since <date>", "git date, e.g. '2 weeks ago' or '2024-01-01'."],
+      ["--until <date>", "git date."],
+      ["--files", "Also list the changed files per commit."],
+      ["--limit <n>", "Maximum commits (default: 50)."],
+    ],
+    details: [
+      "Runs `git log` live in the project directory — no indexing, no embedding, no reindex.",
+      "With no query/filters it returns the most recent commits.",
+    ],
+    examples: [
+      'cidx commits repodex "dependency graph"',
+      "cidx commits api --path src/auth --since '2 weeks ago' --files",
+      "cidx commits api --author alice --limit 20",
+    ],
+  },
+  deadcode: {
+    usage: "deadcode <project> [flags]",
+    summary: "Potential dead code: zero-reference symbols, scored conservatively (candidates to verify).",
+    flags: [
+      ["--language <lang>", "Only this language."],
+      ["--type <type>", "Only this symbol type (function, method, class, ...)."],
+      ["--min-confidence <n>", "Minimum confidence 0-100 to report (default: 0)."],
+      ["--limit <n>", "Maximum candidates (default: 200)."],
+    ],
+    details: [
+      "Labels: 'likely dead' (>=70), 'uncertain' (40-69), 'review' (<40).",
+      "Test files and entry points are excluded; exported/polymorphic/dynamic names are demoted.",
+    ],
+    examples: [
+      "cidx deadcode repodex --language typescript --min-confidence 70",
+      "cidx deadcode api --type function",
+    ],
+  },
   config: {
     usage: "config [path]",
     summary: "Shows the active YAML configuration as JSON; 'path' prints only the file path.",
@@ -519,12 +903,21 @@ const COMMANDS: Record<string, CmdDoc> = {
 
 const HELP_ORDER = [
   "start", "index", "list", "status", "reindex", "sync", "remove",
-  "search", "find", "refs", "overview", "config", "mcp", "stop", "version", "help",
+  "search", "batch", "find", "refs", "overview", "deps", "deadcode", "callgraph", "commits", "config", "mcp", "stop", "version", "help",
 ];
 
 /** Detailed help for a single command. */
 function printCommandHelp(name: string): void {
-  const key = name === "ls" ? "list" : name === "rm" ? "remove" : name === "stdio" ? "mcp" : name === "references" ? "refs" : name;
+  const key =
+    name === "ls" ? "list"
+    : name === "rm" ? "remove"
+    : name === "stdio" ? "mcp"
+    : name === "references" ? "refs"
+    : name === "dependencies" ? "deps"
+    : name === "dead-code" ? "deadcode"
+    : name === "call-graph" ? "callgraph"
+    : name === "git-log" || name === "gitlog" ? "commits"
+    : name;
   const doc = COMMANDS[key];
   if (!doc) {
     console.error(`Unknown command: ${name}\n`);
@@ -574,7 +967,7 @@ function printHelp(): void {
   lines.push("  text     BM25/exact term only. For rare tokens / exact symbol names; requires no model.");
   lines.push("");
   lines.push("FILTERS (search & find)");
-  lines.push("  --language <lang>  e.g. python, typescript, go, rust ...");
+  lines.push("  --language <lang>  e.g. python, typescript, go, rust, gdscript ...");
   lines.push("  --type <type>      function | class | method | interface | enum | struct | ...");
   lines.push("  --path <glob>      file path pattern; '*' wildcard (search only)");
   lines.push("");
@@ -586,6 +979,10 @@ function printHelp(): void {
   lines.push('  cidx find loginUser');
   lines.push('  cidx refs loginUser              # where is it used (call sites)');
   lines.push('  cidx overview api                # project onboarding summary');
+  lines.push('  cidx deps src/server/mcp.ts      # import graph of a file');
+  lines.push('  cidx callgraph handleRequest     # caller/callee trees for a function');
+  lines.push('  cidx commits api "login flow"     # git-history / commit-message search');
+  lines.push('  cidx deadcode api --min-confidence 70  # potential dead code');
   lines.push('  cidx sync api          # fast incremental update');
   lines.push("");
   lines.push("CONNECTING TO AN AI AGENT (MCP)");
@@ -593,8 +990,9 @@ function printHelp(): void {
   lines.push(`  SSE (legacy):                http://${CONFIG.HOST}:${CONFIG.MCP_PORT}/sse`);
   lines.push(`  Health + progress:           http://${CONFIG.HOST}:${CONFIG.MCP_PORT}/health`);
   lines.push("  Stdio-expecting clients (Claude Desktop): cidx mcp");
-  lines.push("  Tools: search_codebase, find_symbol, find_references, get_repo_overview,");
-  lines.push("            list_indexes, get_index_status, index_project, get_file_outline");
+  lines.push("  Tools: search_codebase, find_symbol, find_references, get_dependencies,");
+  lines.push("            find_dead_code, get_call_graph, search_commits, get_repo_overview, list_indexes,");
+  lines.push("            get_index_status, index_project, get_file_outline");
   lines.push("");
   lines.push("CONFIGURATION");
   lines.push(`  Active file: ${CONFIG_SOURCE ?? "(none — defaults)"}`);
@@ -617,7 +1015,7 @@ function printHelp(): void {
   lines.push(`  MCP (AI agent):  http://${CONFIG.HOST}:${CONFIG.MCP_PORT}`);
   lines.push(`  Control (CLI):   http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}   (127.0.0.1 only)`);
   lines.push("");
-  lines.push("Detailed architecture and roadmap: DESIGN.md");
+  lines.push("Detailed architecture and roadmap: see the docs/ folder");
   console.log(lines.join("\n"));
 }
 
@@ -655,9 +1053,14 @@ async function main(): Promise<void> {
     case "sync": await cmdSync(positionals); break;
     case "remove": case "rm": await cmdRemove(positionals); break;
     case "search": await cmdSearch(positionals, flags); break;
+    case "batch": await cmdBatch(positionals, flags); break;
     case "find": await cmdFind(positionals, flags); break;
     case "refs": case "references": await cmdRefs(positionals, flags); break;
     case "overview": await cmdOverview(positionals); break;
+    case "deps": case "dependencies": await cmdDeps(positionals, flags); break;
+    case "deadcode": case "dead-code": await cmdDeadcode(positionals, flags); break;
+    case "callgraph": case "call-graph": await cmdCallGraph(positionals, flags); break;
+    case "commits": case "git-log": case "gitlog": await cmdCommits(positionals, flags); break;
     case "config": await cmdConfig(positionals); break;
     case "mcp": case "stdio": await cmdMcp(); break;
     case "stop": await cmdStop(); break;

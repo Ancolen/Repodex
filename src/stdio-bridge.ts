@@ -24,7 +24,17 @@ import {
 import { CONFIG } from "./config";
 import { daemonCommand } from "./runtime";
 import { TOOL_DEFINITIONS } from "./server/tool-defs";
-import { formatResults, formatOutline, formatReferences, formatOverview } from "./server/format";
+import {
+  formatResults,
+  formatBatchResults,
+  formatOutline,
+  formatReferences,
+  formatOverview,
+  formatDependencies,
+  formatDeadCode,
+  formatCallGraph,
+  formatCommits,
+} from "./server/format";
 
 const BASE = `http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}`;
 
@@ -125,7 +135,7 @@ async function main(): Promise<void> {
   await ensureDaemon();
 
   const server = new Server(
-    { name: "mcp-code-indexer (stdio bridge)", version: "2.1.0" },
+    { name: "mcp-code-indexer (stdio bridge)", version: "2.2.0" },
     { capabilities: { tools: {} } },
   );
 
@@ -146,8 +156,27 @@ async function main(): Promise<void> {
             symbolType: args.symbolType,
             pathGlob: args.pathGlob,
             contextLines: args.contextLines,
+            rerank: args.rerank,
+            mmr: args.mmr,
+            maxChars: args.maxChars,
           });
           return ok(formatResults(results));
+        }
+        case "search_codebase_batch": {
+          const groups = await api<Parameters<typeof formatBatchResults>[0]>("POST", "/search/batch", {
+            queries: args.queries,
+            project: args.project,
+            limit: args.limit,
+            mode: args.mode,
+            language: args.language,
+            symbolType: args.symbolType,
+            pathGlob: args.pathGlob,
+            contextLines: args.contextLines,
+            rerank: args.rerank,
+            mmr: args.mmr,
+            maxChars: args.maxChars,
+          });
+          return ok(formatBatchResults(groups));
         }
         case "find_symbol": {
           const results = await api<Parameters<typeof formatResults>[0]>("POST", "/find", {
@@ -201,6 +230,48 @@ async function main(): Promise<void> {
             name: args.project,
           });
           return ok(formatOverview(overview));
+        }
+        case "get_dependencies": {
+          const dep = await api<Parameters<typeof formatDependencies>[0]>("POST", "/dependencies", {
+            path: args.path,
+            project: args.project,
+            limit: args.limit,
+          });
+          return ok(formatDependencies(dep));
+        }
+        case "get_call_graph": {
+          const cg = await api<Parameters<typeof formatCallGraph>[0]>("POST", "/callgraph", {
+            symbol: args.symbol,
+            path: args.path,
+            project: args.project,
+            direction: args.direction,
+            depth: args.depth,
+            limit: args.limit,
+          });
+          return ok(formatCallGraph(cg));
+        }
+        case "find_dead_code": {
+          const report = await api<Parameters<typeof formatDeadCode>[0]>("POST", "/deadcode", {
+            project: args.project,
+            language: args.language,
+            symbolType: args.symbolType,
+            minConfidence: args.minConfidence,
+            limit: args.limit,
+          });
+          return ok(formatDeadCode(report));
+        }
+        case "search_commits": {
+          const cs = await api<Parameters<typeof formatCommits>[0]>("POST", "/commits", {
+            project: args.project,
+            query: args.query,
+            path: args.path,
+            author: args.author,
+            since: args.since,
+            until: args.until,
+            withFiles: args.withFiles,
+            limit: args.limit,
+          });
+          return ok(formatCommits(cs));
         }
         default:
           return fail(`Unknown tool: ${name}`);

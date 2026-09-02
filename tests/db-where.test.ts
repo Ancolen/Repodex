@@ -9,7 +9,7 @@ describe("buildWhere — combined filters", () => {
   test("language + symbolType + pathGlob all combine with AND", () => {
     const w = buildWhere({ language: "go", symbolType: "method", pathGlob: "src/*" });
     expect(w).toBe(
-      "language = 'go' AND symbolType = 'method' AND filePath LIKE 'src/%' ESCAPE '\\'",
+      "language = 'go' AND symbolType = 'method' AND filePath LIKE '%src/%' ESCAPE '\\'",
     );
   });
 
@@ -19,14 +19,28 @@ describe("buildWhere — combined filters", () => {
 
   test("only pathGlob, wildcard in the middle", () => {
     expect(buildWhere({ pathGlob: "src/*/handler" })).toBe(
-      "filePath LIKE 'src/%/handler' ESCAPE '\\'",
+      "filePath LIKE '%src/%/handler' ESCAPE '\\'",
+    );
+  });
+
+  test("pathGlob: leading '/' anchors the absolute path start", () => {
+    // Stored filePath values are absolute; a leading '/' means the user wants
+    // start-anchored matching instead of project-relative anywhere-matching.
+    expect(buildWhere({ pathGlob: "/repo/src/*" })).toBe(
+      "filePath LIKE '/repo/src/%' ESCAPE '\\'",
+    );
+  });
+
+  test("pathGlob: '**' collapses to a wildcard like '*'", () => {
+    expect(buildWhere({ pathGlob: "docs/**/*.xml" })).toBe(
+      "filePath LIKE '%docs/%.xml' ESCAPE '\\'",
     );
   });
 
   test("pathGlob: both literal '_' and wildcard '*' — '_' is escaped, '*' → '%'", () => {
     // 'my_dir/*' → '_' is literal (\_), '*' is wildcard (%).
     expect(buildWhere({ pathGlob: "my_dir/*" })).toBe(
-      "filePath LIKE 'my\\_dir/%' ESCAPE '\\'",
+      "filePath LIKE '%my\\_dir/%' ESCAPE '\\'",
     );
   });
 

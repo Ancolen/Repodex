@@ -54,7 +54,7 @@ export function startControlApi(
   app.use(express.json());
 
   app.get("/ping", (_req, res) => {
-    res.json({ ok: true, version: "2.1.0", pid: process.pid });
+    res.json({ ok: true, version: "2.2.0", pid: process.pid });
   });
 
   app.get("/indexes", (_req, res) => {
@@ -126,8 +126,19 @@ export function startControlApi(
   });
 
   app.post("/search", async (req, res) => {
-    const { query, project, limit, mode, language, symbolType, pathGlob, contextLines } = (req.body ??
-      {}) as {
+    const {
+      query,
+      project,
+      limit,
+      mode,
+      language,
+      symbolType,
+      pathGlob,
+      contextLines,
+      rerank,
+      mmr,
+      maxChars,
+    } = (req.body ?? {}) as {
       query?: string;
       project?: string;
       limit?: number;
@@ -136,17 +147,59 @@ export function startControlApi(
       symbolType?: string;
       pathGlob?: string;
       contextLines?: number;
+      rerank?: boolean;
+      mmr?: boolean;
+      maxChars?: number;
     };
     if (!query) {
       res.status(400).json({ error: "'query' is required" });
       return;
     }
-    const opts = { mode, language, symbolType, pathGlob, contextLines };
+    const opts = { mode, language, symbolType, pathGlob, contextLines, rerank, mmr, maxChars };
     try {
       const results = project
         ? await deps.manager.searchIndex(project, query, limit ?? 5, opts)
         : await deps.manager.searchAll(query, limit ?? 5, opts);
       res.json(results);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post("/search/batch", async (req, res) => {
+    const {
+      queries,
+      project,
+      limit,
+      mode,
+      language,
+      symbolType,
+      pathGlob,
+      contextLines,
+      rerank,
+      mmr,
+      maxChars,
+    } = (req.body ?? {}) as {
+      queries?: unknown;
+      project?: string;
+      limit?: number;
+      mode?: "hybrid" | "vector" | "text";
+      language?: string;
+      symbolType?: string;
+      pathGlob?: string;
+      contextLines?: number;
+      rerank?: boolean;
+      mmr?: boolean;
+      maxChars?: number;
+    };
+    if (!Array.isArray(queries) || queries.length === 0 || !queries.every((q) => typeof q === "string")) {
+      res.status(400).json({ error: "'queries' must be a non-empty array of strings" });
+      return;
+    }
+    const opts = { mode, language, symbolType, pathGlob, contextLines, rerank, mmr, maxChars };
+    try {
+      const groups = await deps.manager.searchBatch(queries as string[], project, limit ?? 5, opts);
+      res.json(groups);
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -226,6 +279,137 @@ export function startControlApi(
     try {
       const overview = await deps.manager.repoOverview(name);
       res.json(overview);
+    } catch (err) {
+      res.status(404).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post("/dependencies", async (req, res) => {
+    const { path: filePath, project, limit } = (req.body ?? {}) as {
+      path?: string;
+      project?: string;
+      limit?: number;
+    };
+    if (!filePath) {
+      res.status(400).json({ error: "'path' is required" });
+      return;
+    }
+    if (!existsSync(filePath) || !statSync(filePath).isFile()) {
+      res.status(400).json({ error: `File not found: ${filePath}` });
+      return;
+    }
+    const opts = typeof limit === "number" ? { limit } : undefined;
+    try {
+      const result = await deps.manager.getDependencies(filePath, project, opts);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post("/callgraph", async (req, res) => {
+    const { symbol, path: filePath, project, direction, depth, limit } = (req.body ?? {}) as {
+      symbol?: string;
+      path?: string;
+      project?: string;
+      direction?: "callers" | "callees" | "both";
+      depth?: number;
+      limit?: number;
+    };
+    if (!symbol && !filePath) {
+      res.status(400).json({ error: "Provide a 'symbol' name and/or a 'path' (at least one is required)." });
+      return;
+    }
+    if (filePath && (!existsSync(filePath) || !statSync(filePath).isFile())) {
+      res.status(400).json({ error: `File not found: ${filePath}` });
+      return;
+    }
+    const opts: {
+      symbol?: string;
+      path?: string;
+      project?: string;
+      direction?: "callers" | "callees" | "both";
+      depth?: number;
+      limit?: number;
+    } = {};
+    if (typeof symbol === "string") opts.symbol = symbol;
+    if (typeof filePath === "string") opts.path = filePath;
+    if (typeof project === "string") opts.project = project;
+    if (direction === "callers" || direction === "callees" || direction === "both") opts.direction = direction;
+    if (typeof depth === "number") opts.depth = depth;
+    if (typeof limit === "number") opts.limit = limit;
+    try {
+      const result = await deps.manager.getCallGraph(opts);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post("/commits", async (req, res) => {
+    const { project, query, path: filePath, author, since, until, withFiles, limit } = (req.body ?? {}) as {
+      project?: string;
+      query?: string;
+      path?: string;
+      author?: string;
+      since?: string;
+      until?: string;
+      withFiles?: boolean;
+      limit?: number;
+    };
+    if (!project) {
+      res.status(400).json({ error: "'project' is required." });
+      return;
+    }
+    const opts: {
+      query?: string;
+      path?: string;
+      author?: string;
+      since?: string;
+      until?: string;
+      withFiles?: boolean;
+      limit?: number;
+    } = {};
+    if (typeof query === "string") opts.query = query;
+    if (typeof filePath === "string") opts.path = filePath;
+    if (typeof author === "string") opts.author = author;
+    if (typeof since === "string") opts.since = since;
+    if (typeof until === "string") opts.until = until;
+    if (typeof withFiles === "boolean") opts.withFiles = withFiles;
+    if (typeof limit === "number") opts.limit = limit;
+    try {
+      const result = await deps.manager.searchCommits(project, opts);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post("/deadcode", async (req, res) => {
+    const { project, language, symbolType, minConfidence, limit } = (req.body ?? {}) as {
+      project?: string;
+      language?: string;
+      symbolType?: string;
+      minConfidence?: number;
+      limit?: number;
+    };
+    if (!project) {
+      res.status(400).json({ error: "'project' is required" });
+      return;
+    }
+    const opts: {
+      language?: string;
+      symbolType?: string;
+      minConfidence?: number;
+      limit?: number;
+    } = {};
+    if (typeof language === "string") opts.language = language;
+    if (typeof symbolType === "string") opts.symbolType = symbolType;
+    if (typeof minConfidence === "number") opts.minConfidence = minConfidence;
+    if (typeof limit === "number") opts.limit = limit;
+    try {
+      const report = await deps.manager.findDeadCode(project, opts);
+      res.json(report);
     } catch (err) {
       res.status(404).json({ error: err instanceof Error ? err.message : String(err) });
     }
