@@ -229,7 +229,7 @@ fi
 
 # ----------------------------------------------------- 6) health check
 info "Daemon health check..."
-CONTROL_PORT="${CONTROL_PORT:-3002}"
+CONTROL_PORT="${CONTROL_PORT:-9372}"
 HOST="${HOST:-127.0.0.1}"
 
 # If the service was not installed, start manually.
