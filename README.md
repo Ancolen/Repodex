@@ -221,6 +221,15 @@ cidx search "config" --path "src/*"                      # file path pattern
 - **`--max-chars <n>`**: cap the returned text to ~n characters — results are kept whole in ranked order while they fit (top-1 always returned), so you can raise `--limit` for recall without bloating output.
 - The **`--language`**, **`--type`**, **`--path`** filters work with `search`; `--language`/`--type` can also be used with `find`.
 
+Open a result directly in your editor (`open` — searches, prints the result list, then launches `$VISUAL`/`$EDITOR` at the matching line; `--pick n` selects the n-th result, default 1):
+
+```bash
+cidx open "retry backoff logic" --project backend   # open the top result
+cidx open "IndexManager" --pick 2 --mode text       # open the 2nd result
+```
+
+Editor resolution: `$VISUAL` → `$EDITOR` → `vi`. Line positioning uses `+<line>` for terminal editors (vim/nano/emacs…), `--goto <file>:<line>` for the VS Code family, `<file>:<line>` for Helix. For a GUI editor that should block until closed, set e.g. `VISUAL='code -w'`.
+
 Several queries in one round-trip (`batch` — results grouped per query; same flags as `search`):
 
 ```bash

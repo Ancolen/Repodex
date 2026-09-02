@@ -26,6 +26,7 @@ What the tool **does today** (version 2.2.0). For what's planned, see [`status.m
 - **Query embedding cache** — the query is embedded through the content-hash cache shared with indexing, so repeated searches skip the Ollama round-trip (and a query matching an indexed chunk is free). Transparent; no configuration.
 - **`maxChars` budget** — per-call `maxChars` caps the returned text: results are kept whole in ranked order while they fit (never truncated mid-chunk), so a higher `limit` gives recall without context bloat. Top result always returned. `maxChars` on `search_codebase` / `--max-chars` on the CLI.
 - **Batch search** (`search_codebase_batch` / `cidx batch`) — run several queries in one round-trip; results grouped per query. Each query gets the full rerank/MMR/maxChars pipeline and the shared query cache.
+- **Search → editor handoff** (`cidx open`) — searches, prints the result list, then launches `$VISUAL`/`$EDITOR` (fallback `vi`) on the picked result (`--pick n`, default 1) at its start line. Line-position conventions per editor: `+<line>` (vim/nano/emacs, the default), `--goto <file>:<line>` (VS Code family), `<file>:<line>` (Helix); `VISUAL='code -w'` makes a GUI editor block. Exits with the editor's exit code.
 
 ## Code intelligence
 
@@ -128,6 +129,6 @@ What the tool **does today** (version 2.2.0). For what's planned, see [`status.m
 ## CLI commands (summary)
 
 `start [dir]` · `index <dir> [--name x]` · `list` · `status [name]` · `reindex <name>` · `sync <name>` · `remove <name>` ·
-`search "<query>" [flags]` · `batch "<q1>" "<q2>" ...` · `find <name> [flags]` · `refs <name> [flags]` · `deps <file> [flags]` · `callgraph <symbol|file> [flags]` · `commits <project> [query] [flags]` · `deadcode <name> [flags]` · `overview <name>` · `mcp` · `config [path]` · `stop` · `version` · `help [cmd]`
+`search "<query>" [flags]` · `open "<query>" [flags]` · `batch "<q1>" "<q2>" ...` · `find <name> [flags]` · `refs <name> [flags]` · `deps <file> [flags]` · `callgraph <symbol|file> [flags]` · `commits <project> [query] [flags]` · `deadcode <name> [flags]` · `overview <name>` · `mcp` · `config [path]` · `stop` · `version` · `help [cmd]`
 
 > Full details: `cidx help` / `cidx help <command>`.

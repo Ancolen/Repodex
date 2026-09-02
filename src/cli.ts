@@ -1,8 +1,10 @@
 #!/usr/bin/env bun
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, openSync } from "node:fs";
 import { CONFIG, RESOLVED, CONFIG_SOURCE, resolveConfigPath } from "./config";
 import { daemonCommand, bridgeCommand } from "./runtime";
+import { resolveEditor, buildEditorArgs } from "./utils/editor";
 
 const BASE = `http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}`;
 
@@ -223,6 +225,68 @@ async function cmdSearch(positionals: string[], flags: Record<string, string | b
   if (typeof flags["max-chars"] === "string") body.maxChars = Number(flags["max-chars"]);
   const results = await api<any[]>("POST", "/search", body);
   printResults(results);
+}
+
+async function cmdOpen(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
+  await requireDaemon();
+  const query = positionals.join(" ");
+  if (!query) {
+    console.error('Usage: cidx open "<query>" [--pick n] [--project x] [--mode hybrid|vector|text] [--limit n] [--language x] [--type x] [--path glob] [--rerank] [--mmr]');
+    console.error("\nSearches, prints the results, and opens the selected one in $VISUAL/$EDITOR at the matching line.");
+    process.exit(1);
+  }
+  const body: {
+    query: string;
+    project?: string;
+    limit?: number;
+    mode?: string;
+    language?: string;
+    symbolType?: string;
+    pathGlob?: string;
+    rerank?: boolean;
+    mmr?: boolean;
+  } = { query, limit: 10 }; // a list worth picking from, unless --limit says otherwise
+  if (typeof flags.project === "string") body.project = flags.project;
+  if (typeof flags.limit === "string") body.limit = Number(flags.limit);
+  if (typeof flags.mode === "string") body.mode = flags.mode;
+  if (typeof flags.language === "string") body.language = flags.language;
+  if (typeof flags.type === "string") body.symbolType = flags.type;
+  if (typeof flags.path === "string") body.pathGlob = flags.path;
+  if (flags.rerank === true || flags.rerank === "true") body.rerank = true;
+  else if (flags.rerank === "false") body.rerank = false;
+  if (flags.mmr === true || flags.mmr === "true") body.mmr = true;
+  else if (flags.mmr === "false") body.mmr = false;
+
+  const results = await api<any[]>("POST", "/search", body);
+  if (results.length === 0) {
+    console.log("No results found.");
+    return;
+  }
+  printResults(results);
+
+  const pick = flags.pick !== undefined ? Number(flags.pick) : 1;
+  const r = results[pick - 1];
+  if (!r || !Number.isInteger(pick) || pick < 1) {
+    console.error(`--pick ${flags.pick ?? 1} is out of range (1-${results.length})`);
+    process.exit(1);
+  }
+  const filePath: string = r.filePath;
+  if (!filePath || !existsSync(filePath)) {
+    console.error(`File no longer exists on disk: ${filePath ?? "(no path in result)"} — run 'cidx sync' and retry.`);
+    process.exit(1);
+  }
+  const line = typeof r.startLine === "number" && r.startLine >= 1 ? r.startLine : 1;
+  const editor = resolveEditor(process.env);
+  const args = buildEditorArgs(editor, filePath, line);
+  console.log(`\nOpening #${pick} in ${editor}: ${filePath}:${line}`);
+  const spawned = spawnSync(editor, args, { stdio: "inherit" });
+  if (spawned.error) {
+    console.error(`Failed to launch editor '${editor}': ${spawned.error.message}`);
+    process.exit(1);
+  }
+  if (spawned.status !== 0 && spawned.status !== null) {
+    process.exit(spawned.status);
+  }
 }
 
 async function cmdBatch(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
@@ -739,6 +803,31 @@ const COMMANDS: Record<string, CmdDoc> = {
       'cidx search "retry backoff" --project api --limit 5 --rerank',
     ],
   },
+  open: {
+    usage: 'open "<query>" [flags]',
+    summary: "Search, then open the chosen result in $VISUAL/$EDITOR at the matching line.",
+    flags: [
+      ["--pick <n>", "Which result to open, 1-based (default: 1). The full result list is printed first."],
+      ["--project <name>", "Search only in this project (if not given, ALL projects)."],
+      ["--limit <n>", "Maximum results shown/picked from (default: 10)."],
+      ["--mode <m>", "hybrid (default) | vector | text."],
+      ["--language <lang>", "Filter by language."],
+      ["--type <type>", "Filter by symbol type."],
+      ["--path <glob>", "File path pattern ('*' wildcard)."],
+      ["--rerank [bool]", "Reranker (on by default). --rerank false skips it."],
+      ["--mmr [bool]", "MMR diversification (on by default). --mmr false skips it."],
+    ],
+    details: [
+      "Editor is $VISUAL, then $EDITOR, then vi. Line positioning: +<line> for terminal editors",
+      "(vim/nano/emacs...), --goto <file>:<line> for the VS Code family, <file>:<line> for Helix.",
+      "Set VISUAL='code -w' (or EDITOR='code -w') if you want the CLI to wait for a GUI editor.",
+      "Prints the result list, opens the picked one, and exits with the editor's exit code.",
+    ],
+    examples: [
+      'cidx open "retry backoff logic" --project api',
+      'cidx open "IndexManager" --pick 2 --mode text',
+    ],
+  },
   batch: {
     usage: 'batch "<q1>" "<q2>" ... [flags]',
     summary: "Hybrid search for several queries in one round-trip; results grouped per query.",
@@ -903,7 +992,7 @@ const COMMANDS: Record<string, CmdDoc> = {
 
 const HELP_ORDER = [
   "start", "index", "list", "status", "reindex", "sync", "remove",
-  "search", "batch", "find", "refs", "overview", "deps", "deadcode", "callgraph", "commits", "config", "mcp", "stop", "version", "help",
+  "search", "open", "batch", "find", "refs", "overview", "deps", "deadcode", "callgraph", "commits", "config", "mcp", "stop", "version", "help",
 ];
 
 /** Detailed help for a single command. */
@@ -975,6 +1064,7 @@ function printHelp(): void {
   lines.push('  cidx index ~/projects/api --name api');
   lines.push('  cidx status api');
   lines.push('  cidx search "payment flow validation" --project api --limit 10');
+  lines.push('  cidx open "payment flow validation" --project api   # search, then open in $EDITOR');
   lines.push('  cidx search "RetryPolicy" --mode text --type class');
   lines.push('  cidx find loginUser');
   lines.push('  cidx refs loginUser              # where is it used (call sites)');
@@ -1055,6 +1145,7 @@ async function main(): Promise<void> {
     case "sync": await cmdSync(positionals); break;
     case "remove": case "rm": await cmdRemove(positionals); break;
     case "search": await cmdSearch(positionals, flags); break;
+    case "open": await cmdOpen(positionals, flags); break;
     case "batch": await cmdBatch(positionals, flags); break;
     case "find": await cmdFind(positionals, flags); break;
     case "refs": case "references": await cmdRefs(positionals, flags); break;

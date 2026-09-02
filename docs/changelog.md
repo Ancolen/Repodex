@@ -8,6 +8,14 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ## Unreleased
 
+### `cidx open` — search, then open the result in your editor
+
+The "search found it, now jump into it" step, end-to-end from the shell:
+
+- `cidx open "<query>" [flags]` runs the same search pipeline as `search` (project/mode/language/type/path/rerank/mmr flags; default `--limit 10` so there's a list worth picking from), prints the full result list, then opens the picked result (`--pick n`, 1-based, default 1) in `$VISUAL` → `$EDITOR` → `vi` at the chunk's start line.
+- **Per-editor line conventions** (`src/utils/editor.ts → buildEditorArgs`): `+<line>` for terminal editors (vim/nvim/nano/emacs and the POSIX default), `--goto <file>:<line>` for the VS Code family (`code`/`code-insiders`/`codium`/`code-oss`), `<file>:<line>` for Helix (`hx`). `$VISUAL` may carry its own flags (`VISUAL='code -w'`).
+- Guardrails: the file must still exist on disk (stale index → `cidx sync` hint), an out-of-range `--pick` errors with the valid range, and the CLI exits with the editor's exit code. Tests: 8 new (`tests/editor.test.ts`) → **287/287** (763 expect).
+
 ### Per-project configuration (`.cidx.json`)
 
 A project root can carry a **`.cidx.json`** — the per-project counterpart to the global config — with three independently-validated optional fields:

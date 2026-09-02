@@ -95,7 +95,7 @@
 
 ## 🚧 In progress
 
-- Per-project config (`.cidx.json`) — implemented (code + tests + docs); pending release.
+_(Nothing actively in flight — per-project config (`.cidx.json`) and `cidx open` are implemented, pending release.)_
 
 ---
 
@@ -108,13 +108,11 @@
 |----------|-------------|--------|--------|
 | **Embed docstring / comment separately** | Separate vector for a function's docstring; better on "how to do X" intent queries. | Medium-High | Medium |
 | **Recency signal** | Slight boost for recently changed code (git mtime). | Medium | Low-Medium |
-| **`cidx open <result>`** | Open a result in `$EDITOR` at the right line. | Low | Low |
 | **`maxFileSizeBytes` guard** | Skip oversized data files without relying solely on `.cidxignore`. | Low-Medium | Low |
 | **Combined `search + outline`** | Return a hit's file outline in the same call; saves a turn. | Low-Medium | Low |
 
 ### Suggested order
-1. `cidx open` (maturation; per-project config is already in flight).
-2. Docstring embedding, recency (depth).
+1. Docstring embedding, recency (depth).
 
 ---
 
