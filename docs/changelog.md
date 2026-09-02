@@ -6,7 +6,11 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ---
 
-## Unreleased — doc-format indexing (XML / reST)
+## 2.2.0 — Godot / GDScript + doc-format indexing
+
+Full Godot support at the same depth as the other languages: AST chunking, dependency graph, dead-code scoring, config, docs, and a new grammar-acceptance test suite. Version bumped 2.1.0 → **2.2.0**; `bun run typecheck` clean, `bun test` **260/260** (700 expect).
+
+### Doc-format indexing (XML / reST) + pathGlob fix
 
 Motivated by a Godot game project: index a version-matched engine class reference (`godot --doctool` dumps per-class `.xml`) next to the game code so API questions ("does this method exist in 4.7? what are the params?") are answerable by hybrid search without leaving the machine. `bun run typecheck` clean; `bun test` green (chunker + config suites extended).
 
@@ -15,13 +19,9 @@ Motivated by a Godot game project: index a version-matched engine class referenc
 - No grammar added by design: per `CLAUDE.md`, any new grammar must pass the interleaved-determinism suite, and docs need search, not symbols — character fallback plus a label is the right weight here. Consequence: `find_symbol`/outline/deps return nothing for these files (expected).
 - Tests: `tests/chunker.test.ts` gains a "doc formats (xml/rst)" describe (fallback chunking + label propagation via `buildMeta`, Godot class-XML fixture, `.rst` fixture, `.md` retro-label); `tests/config.test.ts` asserts the new extensions.
 
-### pathGlob: project-relative patterns actually match now
+#### pathGlob: project-relative patterns actually match now
 
 `buildWhere`'s glob→LIKE conversion start-anchored every wildcard pattern (`src/*` → `LIKE 'src/%'`), but indexed `filePath` values are **absolute** — so the documented project-relative usage (`src/*`, and the new docs-driven `docs/*`) could never match anything. Now: patterns starting with `/` stay absolutely anchored; anything else gets a leading `%` (match anywhere); `**` collapses to `*` (`%` spans `/`, so this is purely cosmetic). No schema/reindex impact — pure query-time. Assertions updated in `tests/db-where.test.ts` + `tests/hybrid.test.ts`; new anchor + `**` cases added.
-
-## 2.2.0 — Godot / GDScript
-
-Full Godot support at the same depth as the other languages: AST chunking, dependency graph, dead-code scoring, config, docs, and a new grammar-acceptance test suite. Version bumped 2.1.0 → **2.2.0**; `bun run typecheck` clean, `bun test` **260/260** (700 expect).
 
 ### Vendored grammar wasm (the enabler)
 
@@ -61,7 +61,7 @@ The "when / why was feature X added" and "who changed this file, and when" quest
 - **Unambiguous format.** `COMMIT_FORMAT` separates the 8 fields (hash, abbreviated, author name/email, ISO date, epoch-seconds date, subject, body) with the unit separator `\x1f`; `-z` makes the inter-commit and inter-filename separator a NUL. A commit header ALWAYS begins with a 40-hex SHA followed by `\x1f`, so a changed-file name (which never contains `\x1f`) can't be mistaken for a new commit — that anchor is what lets `--name-only` files be told apart from headers in one split pass, and it survives a multi-line commit body.
 - **Engine + surfaces.** `IndexManager.searchCommits(project, opts)` resolves the project (throws if unknown, like `findDeadCode`), checks `isGitRepo`, runs the log, and wraps a `CommitSearchResult` (`project`, echoed `query`, `count`, `commits[]`, `truncated`, `notARepo`). Filters: message `query` (case-insensitive regex), `path` (file / dir / glob history), `author`, `since` / `until` (git date syntax), `limit` (default 50), `withFiles` (changed files per commit). No filters → the most recent commits (a free "recent history").
 - **Surfaces.** Tool `search_commits` (`tool-defs`), `POST /commits` (control API, `project` required), stdio bridge case, CLI `cidx commits <project> [query] [--path|--author|--since|--until|--limit|--files]` (aliases `git-log` / `gitlog`); `formatCommits` (header + one block per commit: abbreviated hash · date · author · subject, optional indented body, optional changed-files list, a `⚠` truncation line).
-- **Verification.** `bun run typecheck` clean, `bun test` **241/241** (624 expect); new suite `tests/commits.test.ts` (pure `parseCommitLog`: field/record separators, the 40-hex+SEP anchor vs a 40-hex *filename*, multi-line body, withFiles interleaving, empty / trailing-NUL, non-numeric timestamp). The git↔parser contract was also smoke-tested live against this repo's own history (`query=callgraph` → the `b184b69` commit with its 14 changed files). See [`status.md`](./status.md) → *Search*.
+- **Verification.** `bun run typecheck` clean, `bun test` **241/241** (624 expect); new suite `tests/commits.test.ts` (pure `parseCommitLog`: field/record separators, the 40-hex+SEP anchor vs a 40-hex *filename*, multi-line body, withFiles interleaving, empty / trailing-NUL, non-numeric timestamp). The git↔parser contract was also smoke-tested live against this repo's own history (a `query=callgraph` search returned the code-intelligence feature commit with its 14 changed files). See [`status.md`](./status.md) → *Search*.
 
 #### Code intelligence — import/dependency graph + dead-code detection
 

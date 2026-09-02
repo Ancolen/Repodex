@@ -7,6 +7,27 @@
   "description": "Bun-based, multi-project, asynchronous MCP code indexing daemon",
   "license": "Apache-2.0",
   "author": "Ancolen",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ancolen/repodex.git"
+  },
+  "homepage": "https://github.com/Ancolen/repodex#readme",
+  "bugs": "https://github.com/Ancolen/repodex/issues",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "code-search",
+    "code-index",
+    "semantic-search",
+    "hybrid-search",
+    "vector-search",
+    "embeddings",
+    "tree-sitter",
+    "lancedb",
+    "ollama",
+    "bm25",
+    "code-intelligence"
+  ],
   "bin": {
     "cidx": "src/cli.ts",
     "repodex": "src/cli.ts",

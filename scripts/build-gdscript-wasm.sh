@@ -56,9 +56,15 @@ if (!pkg["tree-sitter"]) {
 ' "$GR/package.json"
 
 echo "==> building wasm in docker (emcc via ${EMSDK_IMAGE}, tree-sitter-cli@${TS_CLI_VERSION})"
-# --network host: the docker bridge network's DNS is broken on this WSL2 host
-# (getent EAI_AGAIN for registry.npmjs.org); host networking resolves fine.
-docker run --rm --network host -v "$GR":/work -w /work "$EMSDK_IMAGE" \
+# Use host networking on Linux only: some WSL2 setups have broken DNS on the
+# docker bridge (getent EAI_AGAIN for registry.npmjs.org) where host networking
+# resolves fine. Docker Desktop (macOS/Windows) doesn't support --network host,
+# so fall back to the default bridge there.
+NETWORK_ARGS=""
+if [[ "$(uname -s)" == "Linux" ]]; then
+	NETWORK_ARGS="--network host"
+fi
+docker run --rm $NETWORK_ARGS -v "$GR":/work -w /work "$EMSDK_IMAGE" \
 	sh -lc "npm install -g tree-sitter-cli@${TS_CLI_VERSION} && tree-sitter build-wasm"
 
 BUILT="$(find "$GR" -maxdepth 1 -name '*.wasm' | head -1)"

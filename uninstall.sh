@@ -32,8 +32,9 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 
 # If there is no service, the daemon may still be running — stop it gracefully.
-if [ -x "$REPO_DIR/src/cli.ts" ] || command -v bun >/dev/null 2>&1; then
-  bun run "$REPO_DIR/src/cli.ts" stop 2>/dev/null || true
+if [ -f "$REPO_DIR/src/cli.ts" ] || command -v cidx >/dev/null 2>&1; then
+  "$REPO_DIR/src/cli.ts" stop 2>/dev/null || cidx stop 2>/dev/null || \
+    { command -v bun >/dev/null 2>&1 && bun run "$REPO_DIR/src/cli.ts" stop 2>/dev/null; } || true
 fi
 
 # 2) wrappers

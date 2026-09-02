@@ -1,26 +1,29 @@
-# Ollama CPU-Only Çalıştırma Notları
+# Running Ollama CPU-Only
 
-## Yöntem 1: CUDA_VISIBLE_DEVICES — En güvenilir (tüm modeller CPU'da)
+If your machine has no usable GPU (or you want to keep the GPU free), Ollama can
+be forced to run the embedding model on the CPU. Two reliable methods:
+
+## Method 1: `CUDA_VISIBLE_DEVICES` — most reliable (all models on CPU)
 
 ```bash
-# 1. Systemd serve'i durdur (sudo gerekli)
+# 1. Stop the systemd service (needs sudo)
 sudo systemctl stop ollama
 
-# 2. CPU-only olarak elle başlat
+# 2. Start Ollama manually, CPU-only
 CUDA_VISIBLE_DEVICES="" ollama serve &
 
-# 3. Repodex'i başlat (model adı aynı kalır, reindex gerekmez)
-cd ~/repodex && bun run src/cli.ts start
+# 3. Start the cidx daemon (model name stays the same → no reindex needed)
+cidx start
 
-# 4. İş bitince GPU'ya dönmek için:
-kill %1                          # elle başlatılan serve'i durdur
-sudo systemctl start ollama     # GPU'lu serve'i geri getir
+# 4. To go back to the GPU when done:
+kill %1                          # stop the manually started serve
+sudo systemctl start ollama     # bring back the GPU-backed service
 ```
 
-## Yöntem 2: Modelfile ile num_gpu 0 — Model bazlı (sadece o model CPU'da)
+## Method 2: Modelfile with `num_gpu 0` — per-model (only this model on CPU)
 
 ```bash
-# CPU-only model oluştur
+# Create a CPU-only variant of the embedding model
 mkdir -p ~/.mcp-indexer/models
 cat > ~/.mcp-indexer/models/qwen3-embedding-cpu.Modelfile <<'EOF'
 FROM qwen3-embedding
@@ -29,32 +32,35 @@ EOF
 
 ollama create qwen3-embedding-cpu -f ~/.mcp-indexer/models/qwen3-embedding-cpu.Modelfile
 
-# Repodex config'de model: qwen3-embedding-cpu yap
-# DİKKAT: Model adı değiştiği için full reindex başlar!
+# Point cidx at it: set model: qwen3-embedding-cpu in config.yml
+# CAUTION: the model name changes → cidx requires a full reindex
+# (an index built with model X is incompatible with model Y for vector search).
 
-# Geri dönmek için:
-#   1. config.yml'de model: qwen3-embedding yap
+# To switch back:
+#   1. set model: qwen3-embedding in config.yml
 #   2. ollama rm qwen3-embedding-cpu
-#   3. Repodex restart + reindex
+#   3. restart the daemon + reindex
 ```
 
-## Önemli Notlar
+## Important notes
 
-- `OLLAMA_NUM_GPU` ve `OLLAMA_GPU_LAYERS` ortam değişkenleri **çalışmıyor** (Ollama geliştiricisi tarafından onaylanmadı).
-- `CUDA_VISIBLE_DEVICES=""` tüm GPU'ları gizler — sadece belirli bir modeli değil, hepsini CPU'ya zorlar.
-- Modelfile `num_gpu 0` yaklaşımında model adı değiştiği için repodex full reindex yapar.
-- Model adı aynı kalırsa (Yöntem 1) reindex gerekmez.
+- The `OLLAMA_NUM_GPU` and `OLLAMA_GPU_LAYERS` environment variables **do not
+  work** (confirmed by the Ollama developers).
+- `CUDA_VISIBLE_DEVICES=""` hides ALL GPUs — it forces every loaded model onto
+  the CPU, not just one.
+- With the Modelfile `num_gpu 0` approach the model name changes, so cidx needs
+  a full reindex (see the model-compatibility rule in `docs/architecture.md`).
+- With Method 1 the model name stays the same → no reindex needed.
 
-## Repodex Yönetim Komutları
+## cidx management commands
 
 ```bash
-cd ~/repodex
-bun run src/cli.ts start                # daemon başlat
-bun run src/cli.ts stop                 # daemon durdur
-bun run src/cli.ts list                  # projeleri listele
-bun run src/cli.ts status <name>         # proje durumu
-bun run src/cli.ts reindex <name>        # full reindex
-bun run src/cli.ts sync <name>           # artımlı senkronizasyon
-bun run src/cli.ts remove <name>          # projeyi ve indeksi sil
-bun run src/cli.ts config                # aktif config'i göster
+cidx start                # start the daemon (optionally: cidx start /path/project)
+cidx stop                 # stop the daemon
+cidx list                 # list projects
+cidx status <name>        # project status / progress
+cidx reindex <name>       # full reindex
+cidx sync <name>          # incremental sync
+cidx remove <name>        # remove a project and its index
+cidx config               # show the active configuration
 ```

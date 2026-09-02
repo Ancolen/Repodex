@@ -17,7 +17,7 @@
 # A running Ollama is still required as an embedding provider.
 #
 # Behavior via environment variables:
-#   REPODEX_VERSION=v2.0.0  -> install a specific version (default: latest)
+#   REPODEX_VERSION=v2.2.0  -> install a specific version (default: latest)
 #   BIN_DIR=~/bin           -> directory where cidx/repodex are placed
 #   NO_SERVICE=1            -> do not install the systemd service (only manual `cidx start`)
 #   ASSUME_YES=1           -> automatically answer "yes" to interactive prompts

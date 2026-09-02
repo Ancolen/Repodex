@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`mcp-code-indexer` (binary name **`cidx`**, alias **`repodex`**) — a Bun daemon that vectorizes codebases with a local Ollama (`qwen3-embedding`) and exposes hybrid (semantic + BM25) code search over MCP. One long-lived daemon manages **multiple projects**; a thin CLI sends commands to it; AI agents connect over HTTP/stdio. `README.md` is the user-facing doc (bilingual EN/TR); the `docs/` folder holds the authoritative design, features, status, and changelog (`architecture.md`, `features.md`, `status.md`, `changelog.md`, `cpu-only-ops.md`); this `CLAUDE.md` is the AI-agent operating contract.
+`mcp-code-indexer` (binary name **`cidx`**, alias **`repodex`**) — a Bun daemon that vectorizes codebases with a local Ollama (`qwen3-embedding`) and exposes hybrid (semantic + BM25) code search over MCP. One long-lived daemon manages **multiple projects**; a thin CLI sends commands to it; AI agents connect over HTTP/stdio. `README.md` is the user-facing doc (English); the `docs/` folder holds the authoritative design, features, status, and changelog (`architecture.md`, `features.md`, `status.md`, `changelog.md`, `cpu-only-ops.md`); this `CLAUDE.md` is the AI-agent operating contract.
 
 ## Commands
 
@@ -30,7 +30,7 @@ Daemon data lives in `~/.mcp-indexer/` (`config.yml`, `db/` LanceDB tables, `met
 
 **The daemon (`src/index.ts`).** Boots `Registry` (sqlite) → `JobQueue` (worker pool, size `jobConcurrency`) → `IndexManager` (the hub). It opens **two localhost-only HTTP servers before any indexing happens**, then `restore()`s watchers and re-enqueues half-finished projects. Servers:
 - **MCP server** (`src/server/mcp.ts`, port 9371): `POST /mcp` Streamable HTTP (stateless), `GET /sse` legacy, `GET /health`. For AI agents.
-- **Control API** (`src/server/control-api.ts`, port 9372): JSON endpoints the CLI calls (`/ping /indexes /index /search /find /references /overview /sync /reindex /shutdown`).
+- **Control API** (`src/server/control-api.ts`, port 9372): JSON endpoints the CLI calls (`/ping /indexes /index /search /search/batch /find /references /outline /overview /dependencies /callgraph /deadcode /commits /sync /reindex /shutdown`).
 - **stdio bridge** (`cidx mcp`, `src/stdio-bridge.ts`): speaks MCP over stdin/stdout, forwards to the Control API, and **auto-starts the daemon if down**. Never logs to stdout (it's the JSON-RPC channel).
 
 **Hub: `IndexManager` (`src/core/index-manager.ts`).** Owns per-project `chokidar` watchers + a `.git/HEAD` branch watcher (auto-syncs on checkout). All mutations go through it: `createIndex`/`reindex`/`syncIndex` **enqueue an async job and return immediately** — search keeps serving while indexing runs. It also implements `searchIndex`/`searchAll`/`searchBatch` (multi-query fan-out over `searchIndex`/`searchAll`, results grouped per query)/`findSymbol`/`findReferences`/`repoOverview` and result enrichment (signature + `indexedAt` + ±N context lines read live from disk). New job types are added via `JobQueue.registerHandler(type, fn)` (see `core/types.ts`); `index` is the only registered type today.
@@ -69,7 +69,7 @@ Daemon data lives in `~/.mcp-indexer/` (`config.yml`, `db/` LanceDB tables, `met
 
 ## Version string is duplicated
 
-The version appears in **four** places that must be bumped together on release: `package.json`, `src/server/mcp.ts` (`Server` info), `src/server/control-api.ts` (`/ping`), and `src/stdio-bridge.ts`. The `web-install.sh` / Release workflow only fires on a pushed `v*` git tag.
+The version appears in **five** places that must be bumped together on release: `package.json`, `src/server/mcp.ts` (`Server` info), `src/server/control-api.ts` (`/ping`), `src/stdio-bridge.ts`, and `src/cli.ts` (`CLI_VERSION`). The `web-install.sh` / Release workflow only fires on a pushed `v*` git tag.
 
 ## Index freshness (when this tool searches its own repo)
 

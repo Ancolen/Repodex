@@ -16,6 +16,7 @@ A single long-lived daemon manages **multiple projects**. By sending commands to
 - 🎯 **`find_symbol`** — finds a symbol directly by its name (exact + prefix); requires no vector, fully precise.
 - 🔗 **`find_references`** — finds where a symbol is **used** (call sites + definition) as `file:line` occurrences; complements `find_symbol` for impact/refactor analysis.
 - 🧭 **`get_repo_overview`** — a structural onboarding summary of a project (language distribution, symbol-type breakdown, top-level directories, likely entry points, largest files); aggregated from the index with no LLM.
+- 🧠 **Code intelligence** — `get_dependencies` (a file's import graph: what it imports + who imports it), `get_call_graph` (who calls a symbol and what it calls, as bounded trees), `find_dead_code` (potential dead symbols, scored conservatively), and `search_commits` (git-history / commit-message search — "when/why was X added", file history). All are derived from the existing index or run `git log` live — **no reindex, no schema change**.
 - 🪟 **Rich results** — each search result carries a derived `signature`, the `indexedAt` freshness stamp, and an optional `--context N` window of surrounding lines read live from the file.
 - 🌳 **Smart chunking** — splitting at function/class/method boundaries with `web-tree-sitter` (AST); grammars for 16 languages (JS/TS/TSX, Python, Go, Rust, Java, C, C++, C#, PHP, Ruby, Kotlin, Swift, Scala, GDScript) embedded in the binary. By **descending into namespace/module/mod**, symbols (function/class/struct/interface/enum/record/trait) are extracted correctly in each language. Character-based fallback for languages without a grammar. Results are returned with a `file:line` range.
 - 🎮 **Godot support** — GDScript (`.gd`) gets full AST chunking (`class_name`, inner classes, `signal`, `enum`, `func`/`_init`), `extends "res://…"` + `preload`/`load` dependency resolution against the project root, and dead-code scoring that understands engine virtuals (`_ready`, `_process`, …) and editor-connected `_on_*` handlers. Godot text formats — `.gdshader`, `.tscn`, `.tres`, `project.godot` — are indexed with character-based chunking (searchable text, no symbols); the `.godot/` cache directory is ignored.
@@ -25,7 +26,7 @@ A single long-lived daemon manages **multiple projects**. By sending commands to
 - 🌿 **Git awareness** — respects `.gitignore`, optional git-tracked-only files, automatic incremental sync on branch change.
 - 💾 **Persistent state** — registry, file cache and job state with `bun:sqlite`; resumes where it left off even if the daemon restarts.
 - 🔌 **Multiple transports** — **Streamable HTTP** (`/mcp`, recommended) + **SSE** (`/sse`, legacy) for AI agents; a **stdio bridge** (`cidx mcp`) for clients that expect stdio like Claude Desktop.
-- 🔒 **Secure** — all servers listen only on `127.0.0.1`; CORS restricted to localhost + DNS-rebinding protection.
+- 🔒 **Secure** — both servers listen only on `127.0.0.1`; CORS restricted to localhost + Host-header (DNS-rebinding) protection on every endpoint.
 - 📦 **Single binary** — standalone executable via `bun build --compile` (`dist/cidx`); grammars embedded.
 
 ## Requirements
@@ -75,7 +76,7 @@ BIN_DIR=~/bin ... | bash   # choose the directory where cidx/repodex go
 ### Install from source (with the script)
 
 ```bash
-git clone <repo-url> mcp-code-indexer
+git clone https://github.com/Ancolen/repodex.git mcp-code-indexer
 cd mcp-code-indexer
 ./install.sh          # or: bun run setup
 ```
@@ -159,6 +160,10 @@ PURGE_DATA=1 ./uninstall.sh   # also deletes the ~/.mcp-indexer data
 | `find <symbolName> [flags]` | Finds a symbol directly by name (exact + prefix) |
 | `refs <symbolName> [flags]` | Finds where a symbol is used (call sites + definition) |
 | `overview <name>` | Structural onboarding summary of a project |
+| `deps <file> [flags]` | Import graph of a file: what it imports + which indexed files import it |
+| `callgraph <symbol\|file> [flags]` | Call graph: who calls a symbol and what it calls (bounded, cycle-safe trees) |
+| `deadcode <project> [flags]` | Potential dead code: zero-reference symbols, scored conservatively |
+| `commits <project> [query] [flags]` | Git-history / commit-message search (when/why a feature was added, file history) |
 | `config [path]` | Shows the active YAML configuration (or its path) |
 | `mcp` (`stdio`) | Starts the stdio MCP bridge (Claude Desktop etc.) |
 | `stop` | Stops the daemon |
@@ -236,6 +241,19 @@ cidx overview backend                    # languages, symbol types, dirs, entry 
 cidx search "retry" --context 3          # ±3 surrounding lines on each result
 ```
 
+#### Code intelligence (index-derived — no reindex, no schema change)
+
+```bash
+cidx deps src/core/index-manager.ts        # import graph: what it imports + who imports it
+cidx callgraph searchIndex                 # callers/callees of a function (bounded trees)
+cidx callgraph src/core/index-manager.ts --direction callees --depth 2
+cidx deadcode backend --min-confidence 70  # potential dead code candidates (verify before deleting)
+cidx commits backend "login flow"          # when/why was this feature added
+cidx commits backend --path src/auth --since '2 weeks ago' --files   # file history + changed files
+```
+
+All of these work against the existing index (`commits` runs `git log` live in the project directory); test files and entry points are excluded from dead-code analysis, and results are labeled `likely dead` / `uncertain` / `review` with the signals that drove the score.
+
 ### 5) Incremental sync / reindex / remove
 
 ```bash
@@ -301,6 +319,10 @@ For clients that support Streamable HTTP:
 - `get_index_status(project?)` — indexing status and live progress (% / file).
 - `index_project(path, name?)` — the agent itself starts indexing a new directory (in the background).
 - `get_file_outline(path)` — the symbol map of a file (function/class/method + line ranges).
+- `get_dependencies(path, project?, limit?)` — a file's import graph: what it imports (resolved against the index) + which indexed files import it (reverse). `project` is inferred from the path; import edges are parsed from the file's AST.
+- `get_call_graph(symbol?, path?, project?, direction?, depth?, limit?)` — who calls a symbol and what it calls, as bounded, cycle-safe trees; centers on a symbol name and/or every callable in a file.
+- `find_dead_code(project, language?, symbolType?, minConfidence?, limit?)` — potential dead code: zero-reference symbols scored conservatively, labeled `likely dead` / `uncertain` / `review`; test files and entry points excluded.
+- `search_commits(project, query?, path?, author?, since?, until?, withFiles?, limit?)` — git-history / commit-message search; runs `git log` live in the project directory (no indexing, no embedding).
 
 ### Index freshness (important for agents)
 
@@ -336,6 +358,10 @@ server:
   host: 127.0.0.1             # localhost only is recommended
   mcpPort: 9371               # AI agent (MCP/SSE/Streamable HTTP)
   controlPort: 9372           # CLI control API
+
+# ⚠️ SECURITY: keep host on 127.0.0.1. The daemon serves NO authentication —
+# changing host (e.g. 0.0.0.0) exposes an API that can read your indexed code,
+# index any directory on disk, and shut the daemon down, to your whole network.
 
 ollama:
   url: http://127.0.0.1:11434
@@ -404,6 +430,7 @@ For detailed architecture, decisions, features, and roadmap, see the [`docs/`](.
 - [`docs/features.md`](./docs/features.md) — capability catalog (what the tool does)
 - [`docs/status.md`](./docs/status.md) — ✅ done / 💡 proposed / ⏸️ deferred roadmap
 - [`docs/changelog.md`](./docs/changelog.md) — version history (v1 → v4)
+- [`docs/cpu-only-ops.md`](./docs/cpu-only-ops.md) — running Ollama + cidx on a CPU-only machine
 
 ```
 CLI client ──HTTP──▶ Control API (127.0.0.1:9372) ─┐
@@ -443,8 +470,8 @@ There are two GitHub Actions workflows:
 
 ```bash
 # update the version in package.json, then:
-git tag v2.0.1
-git push origin v2.0.1      # triggers the Release workflow
+git tag v2.2.0
+git push origin v2.2.0      # triggers the Release workflow
 ```
 
 When the tag is pushed, binaries for four platforms are built and automatically added to the Release; after that the `curl … | web-install.sh | bash` one-liner becomes usable.

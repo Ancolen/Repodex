@@ -2,7 +2,7 @@
 
 > The living tracker. **When you finish, start, or decide on something, edit this file.** Pair each change with an entry in [`changelog.md`](./changelog.md) and (for behavior) [`features.md`](./features.md).
 >
-> Current release: **2.2.0** (Godot wave). Test suite: **260/260** passing (700 expectations).
+> Current release: **2.2.0** (Godot wave + doc-format indexing). Test suite: **265/265** passing (713 expectations).
 
 ## Legend
 
@@ -24,7 +24,8 @@
 
 ### Search
 - ✅ Hybrid search (vector + BM25 + RRF, k=60); `hybrid` / `vector` / `text` modes.
-- ✅ Filters: `language` / `symbolType` / `pathGlob`.
+- ✅ Filters: `language` / `symbolType` / `pathGlob` (project-relative globs match anywhere in the absolute stored path).
+- ✅ `search_codebase_batch` — several queries in one round-trip, results grouped per query.
 - ✅ `find_symbol` (exact + prefix, model-independent).
 - ✅ `find_references` (call sites + definition, whole-identifier match).
 - ✅ `get_repo_overview` (structural, no LLM).
@@ -42,6 +43,7 @@
 - ✅ **Godot / GDScript** (2.2.0) — `.gd` with full AST chunking (`class_name`, inner classes, `signal` as its own symbol type, `enum`, `func`, the nameless `_init` constructor); `extends "res://…"` / `preload` / `load` extraction with project-root resolution (extension may be omitted, `uid://` skipped); dead-code scoring knows Godot's engine virtuals (`_ready`/`_init`/`_process`/… — never dead on 0 refs) and demotes `_on_*` handlers wired via the editor; `class_name` counts as exported. Godot text formats (`.gdshader`/`.tscn`/`.tres`/`project.godot`) index via character fallback; `.godot/` cache dir ignored. The grammar wasm is **vendored** (built by `scripts/build-gdscript-wasm.sh`, ABI-guarded) because `tree-sitter-wasms@0.1.13` has no gdscript — see [`architecture.md`](./architecture.md).
 - ✅ **Interleaved-grammar determinism suite** (2.2.0) — codifies the Lua lesson as a test: a GDScript outline must stay byte-stable across 5 rounds of TS/Python/Go/Rust/Ruby parses on the shared parser, and vice versa (no reverse corruption). Runs with every `bun test`.
 - ✅ Character-based fallback for unknown extensions.
+- ✅ **Doc formats with language labels** — `.xml` / `.rst` (plus `.json` / `.md`) indexed via the character fallback with a `language` label so the `language` filter works on doc corpora (e.g. `godot --doctool` class-reference dumps).
 - ✅ **Token-based chunk-boundary guard** — the chunk window also respects an approximate token budget (`effectiveChunkChars = min(maxChunkSize, maxChunkTokens·charsPerToken)`), so a large `maxChunkSize` can't silently overflow the embedding model's token window. Approximate (chars/4, no tokenizer bundled); **char-limit-binding by default** (`maxChunkTokens=512` · 4 = 2048 > default `maxChunkSize` 1500), so existing indexes are unchanged unless you raise `maxChunkSize` or lower the cap. Tunable via `indexing.maxChunkTokens` / `MAX_CHUNK_TOKENS`; apply to existing projects with a reindex.
 
 ### Efficiency
@@ -93,13 +95,13 @@
 
 ## 🚧 In progress
 
-_(Nothing actively in flight — the codebase is stable at 2.2.0. Add your current work here.)_
+_(Nothing actively in flight — the codebase is stable at 2.2.0.)_
 
 ---
 
 ## 💡 Proposed (not yet built)
 
-> Impact / effort are rough, relative estimates. The items "dead-code detection", "call graph / stack tree", and "function roadmap" were folded in from the old scratch `features.md` — the call graph and dead-code proposals have since shipped (see Code intelligence above).
+> Impact / effort are rough, relative estimates. The "dead-code detection" and "call graph" proposals have since shipped (see Code intelligence in [`features.md`](./features.md)).
 
 ### New capabilities
 | Proposal | Description | Impact | Effort |

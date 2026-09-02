@@ -990,9 +990,9 @@ function printHelp(): void {
   lines.push(`  SSE (legacy):                http://${CONFIG.HOST}:${CONFIG.MCP_PORT}/sse`);
   lines.push(`  Health + progress:           http://${CONFIG.HOST}:${CONFIG.MCP_PORT}/health`);
   lines.push("  Stdio-expecting clients (Claude Desktop): cidx mcp");
-  lines.push("  Tools: search_codebase, find_symbol, find_references, get_dependencies,");
-  lines.push("            find_dead_code, get_call_graph, search_commits, get_repo_overview, list_indexes,");
-  lines.push("            get_index_status, index_project, get_file_outline");
+  lines.push("  Tools: search_codebase, search_codebase_batch, find_symbol, find_references,");
+  lines.push("            get_file_outline, get_dependencies, get_call_graph, find_dead_code, search_commits,");
+  lines.push("            get_repo_overview, list_indexes, get_index_status, index_project");
   lines.push("");
   lines.push("CONFIGURATION");
   lines.push(`  Active file: ${CONFIG_SOURCE ?? "(none — defaults)"}`);
@@ -1003,7 +1003,9 @@ function printHelp(): void {
   lines.push("");
   lines.push("ENVIRONMENT VARIABLES (temporary override)");
   lines.push("  MCP_INDEXER_HOME, OLLAMA_URL, OLLAMA_MODEL, MCP_PORT, CONTROL_PORT,");
-  lines.push("  EMBED_BATCH_SIZE, EMBED_CONCURRENCY, EMBED_CACHE_MAX, VECTOR_INDEX_THRESHOLD");
+  lines.push("  EMBED_BATCH_SIZE, EMBED_CONCURRENCY, EMBED_CACHE_MAX, MAX_CHUNK_TOKENS,");
+  lines.push("  VECTOR_INDEX_THRESHOLD, JOB_CONCURRENCY, RERANK_MODEL, RERANK_TOP_K,");
+  lines.push("  RERANK_CONCURRENCY, MMR_LAMBDA, MMR_TOP_K");
   lines.push("");
   lines.push("DATA LOCATION");
   lines.push(`  Root:    ${CONFIG.ROOT_DIR}`);
@@ -1013,7 +1015,7 @@ function printHelp(): void {
   lines.push("");
   lines.push("SERVERS");
   lines.push(`  MCP (AI agent):  http://${CONFIG.HOST}:${CONFIG.MCP_PORT}`);
-  lines.push(`  Control (CLI):   http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}   (127.0.0.1 only)`);
+  lines.push(`  Control (CLI):   http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}`);
   lines.push("");
   lines.push("Detailed architecture and roadmap: see the docs/ folder");
   console.log(lines.join("\n"));

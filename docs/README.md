@@ -8,7 +8,7 @@ This folder is the **canonical, living documentation** for the project. The root
 
 - **Current version:** `2.2.0` (Godot / GDScript wave)
 - **Status:** core architecture, hybrid search, multi-language chunking (incl. Godot), and all robustness/security fixes are **complete and stable**. See [`status.md`](./status.md) for the full done / not-done breakdown.
-- **Test suite:** `bun test` — 260/260 passing (700 expectations).
+- **Test suite:** `bun test` — 265/265 passing (713 expectations).
 
 ## Documentation map
 
@@ -18,7 +18,7 @@ This folder is the **canonical, living documentation** for the project. The root
 | [features.md](./features.md) | Capability catalog — what the tool *does* today, organized by area | A feature is added or changes behavior |
 | [status.md](./status.md) | ✅ **Done** / 🚧 **In progress** / 💡 **Proposed** / ⏸️ **Deferred** — the roadmap tracker | You finish something, start something, or decide on a proposal |
 | [changelog.md](./changelog.md) | Version-by-version implementation history (v1 → v4), newest first | You cut a release or finish a versioned milestone |
-| [cpu-only-ops.md](./cpu-only-ops.md) | Run Ollama CPU-only (TR) — operational notes | The CPU-mode workaround changes |
+| [cpu-only-ops.md](./cpu-only-ops.md) | Running Ollama CPU-only — operational notes | The CPU-mode workaround changes |
 
 ## How to use these docs
 

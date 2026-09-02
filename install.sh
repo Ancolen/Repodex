@@ -181,7 +181,7 @@ setup_systemd() {
   cat > "$unit" <<EOF
 [Unit]
 Description=MCP Code Indexer Daemon
-Documentation=https://github.com/  (mcp-code-indexer)
+Documentation=https://github.com/Ancolen/repodex
 After=network-online.target
 Wants=network-online.target
 
