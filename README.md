@@ -4,7 +4,7 @@
 [![Release](https://github.com/Ancolen/repodex/actions/workflows/release.yml/badge.svg)](https://github.com/Ancolen/repodex/actions/workflows/release.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](./LICENSE)
 
-A **Bun**-based daemon that vectorizes codebases with a local **Ollama** (`qwen3-embedding`) and exposes them so your AI agents can perform **hybrid (semantic + exact-term) search** over the **Model Context Protocol (MCP)**.
+A **Bun**-based daemon that vectorizes codebases with a local **Ollama** (`qwen3-embedding:0.6b` by default) and exposes them so your AI agents can perform **hybrid (semantic + exact-term) search** over the **Model Context Protocol (MCP)**.
 
 A single long-lived daemon manages **multiple projects**. By sending commands to the running daemon through a thin **CLI**, you can index new projects; while one project is being indexed in the background, you can run **uninterrupted searches** in other projects.
 
@@ -40,7 +40,7 @@ A single long-lived daemon manages **multiple projects**. By sending commands to
   > ⚠️ **Do not install via Snap.** Snap gives the app an isolated `HOME` (`~/snap/.../<revision>`); since the revision changes on every update, your data/settings "disappear". If `install.sh` detects a bun installed via snap, it stops the installation and redirects you to the official installer. If you already have a snap bun: `sudo snap remove bun-js` then the official installation above.
 - A running [Ollama](https://ollama.com) and the embedding model:
   ```bash
-  ollama pull qwen3-embedding
+  ollama pull qwen3-embedding:0.6b
   ```
 
 ## Installation
@@ -57,11 +57,11 @@ This command (Linux/macOS · x64/arm64):
 
 1. Detects the operating system + architecture and downloads the appropriate binary from **GitHub Releases** (+ verifies sha256).
 2. Installs the **`cidx`** command and its alias **`repodex`** to PATH (`~/.local/bin`).
-3. Checks **Ollama** and the `qwen3-embedding` model.
+3. Checks **Ollama** and the `qwen3-embedding:0.6b` model.
 4. On Linux, installs a **systemd user service** → the daemon starts automatically on every boot (with `linger`). On macOS, the daemon is started with `cidx start`.
 5. Starts the daemon and performs a health check.
 
-> **No Bun or source code needed** — the binary carries everything (including grammars) within itself. You still need a running [Ollama](https://ollama.com) for embeddings: `ollama pull qwen3-embedding`.
+> **No Bun or source code needed** — the binary carries everything (including grammars) within itself. You still need a running [Ollama](https://ollama.com) for embeddings: `ollama pull qwen3-embedding:0.6b`.
 
 Optional environment variables:
 
@@ -88,7 +88,7 @@ cd cidx
 1. Checks **Bun**, installs it if missing.
 2. Installs dependencies (`bun install`).
 3. Adds the **`cidx`** command and its alias **`repodex`** to PATH.
-4. Checks **Ollama** and the `qwen3-embedding` model (offers to download it if missing).
+4. Checks **Ollama** and the `qwen3-embedding:0.6b` model (offers to download it if missing).
 5. Installs a **systemd user service** → the daemon starts automatically on every boot (with `linger`, even when not logged in).
 6. Starts the daemon and performs a health check.
 
@@ -377,7 +377,7 @@ server:
 
 ollama:
   url: http://127.0.0.1:11434
-  model: qwen3-embedding
+  model: qwen3-embedding:0.6b # the bare tag is the 8B model — much larger, no better for ~512-token chunks
   batchSize: 8                # number of chunks per embed request
   concurrency: 4              # number of parallel embed requests (bounded pool)
 

@@ -152,10 +152,15 @@ esac
 
 # ------------------------------------------------------ 4) Ollama / model
 info "Checking Ollama..."
-MODEL="${OLLAMA_MODEL:-qwen3-embedding}"
+MODEL="${OLLAMA_MODEL:-qwen3-embedding:0.6b}"
 if command -v ollama >/dev/null 2>&1; then
   ok "Ollama found: $(command -v ollama)"
-  if ollama list 2>/dev/null | awk '{print $1}' | grep -q "^${MODEL}\(:latest\)\?$"; then
+  # `ollama list` reports the fully tagged name (`qwen3-embedding:latest`); a
+  # bare MODEL means the `:latest` tag, a MODEL that already carries a tag
+  # (e.g. qwen3-embedding:0.6b) must be compared verbatim. Match full names
+  # per line instead of interpolating MODEL into a regex, which would treat
+  # metacharacters in the name as patterns.
+  if ollama list 2>/dev/null | awk 'NR > 1 {print $1}' | sed 's/:latest$//' | grep -qx -- "$MODEL"; then
     ok "Embedding model present: $MODEL"
   else
     warn "Embedding model '$MODEL' not found."

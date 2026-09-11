@@ -1,6 +1,6 @@
 # MCP Code Indexer — Documentation
 
-> Binary **`cidx`** (alias **`repodex`**) — a Bun daemon that vectorizes codebases with a local Ollama (`qwen3-embedding`) and exposes hybrid (semantic + BM25) code search over MCP.
+> Binary **`cidx`** (alias **`repodex`**) — a Bun daemon that vectorizes codebases with a local Ollama (`qwen3-embedding:0.6b` by default) and exposes hybrid (semantic + BM25) code search over MCP.
 
 This folder is the **canonical, living documentation** for the project. The root [`README.md`](../README.md) is the user-facing install & usage guide; everything here is for contributors and for tracking what the system does, how it's built, and what's planned.
 

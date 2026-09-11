@@ -22,14 +22,14 @@
 #   NO_SERVICE=1            -> do not install the systemd service (only manual `cidx start`)
 #   ASSUME_YES=1           -> automatically answer "yes" to interactive prompts
 #   CIDX_HOME=...    -> explicitly set the data root (passed to the service + CLI)
-#   OLLAMA_MODEL=...        -> embedding model (default: qwen3-embedding)
+#   OLLAMA_MODEL=...        -> embedding model (default: qwen3-embedding:0.6b)
 #   REPODEX_REPO=owner/name -> source repo (default: Ancolen/repodex)
 #
 set -euo pipefail
 
 REPO="${REPODEX_REPO:-Ancolen/repodex}"
 SERVICE_NAME="cidx"
-MODEL="${OLLAMA_MODEL:-qwen3-embedding}"
+MODEL="${OLLAMA_MODEL:-qwen3-embedding:0.6b}"
 
 # ----------------------------------------------------------------- helpers
 if [ -t 1 ]; then
@@ -158,7 +158,10 @@ esac
 info "Checking Ollama..."
 if have ollama; then
   ok "Ollama found: $(command -v ollama)"
-  if ollama list 2>/dev/null | awk '{print $1}' | grep -q "^${MODEL}\(:latest\)\?$"; then
+  # Compare full names per line (a trailing `:latest` on Ollama's side is
+  # stripped, so a bare MODEL matches its default tag). Interpolating MODEL
+  # into a regex mis-compares names with metacharacters, so match literally.
+  if ollama list 2>/dev/null | awk 'NR > 1 {print $1}' | sed 's/:latest$//' | grep -qx -- "$MODEL"; then
     ok "Embedding model present: $MODEL"
   else
     warn "Embedding model '$MODEL' not found."

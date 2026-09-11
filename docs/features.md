@@ -78,7 +78,7 @@ What the tool **does today** (version 2.4.0). For what's planned, see [`status.m
 
 ## Efficiency
 
-- **Batch + bounded-parallel embedding** — Ollama batch API; `batchSize` chunks per request, `concurrency` parallel requests.
+- **Batch + bounded-parallel embedding** — Ollama batch API; `batchSize` chunks per request, `concurrency` parallel requests. Default model `qwen3-embedding:0.6b` — the bare `qwen3-embedding` tag resolves to the **8B** variant in Ollama, which is 4.6 GB and no better for chunks that are at most ~512 tokens; override with `ollama.model` / `OLLAMA_MODEL`, or per project with `.cidx.json` `embedModel`.
 - **Content-hash embedding cache** — unchanged symbols aren't re-embedded even if the file changes; identical code across files is free.
 - **mtime cache** — unchanged files are skipped entirely.
 - **ANN vector index** — built automatically when a table exceeds `vectorIndexThreshold` (default 50k) rows.

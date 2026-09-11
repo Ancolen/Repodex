@@ -29,7 +29,7 @@ async function runConfig(env: Record<string, string>): Promise<{ CONFIG: any; CO
 describe("config — defaults and environment variable overrides", () => {
   test("in-code defaults apply when YAML is missing", async () => {
     const { CONFIG } = await runConfig({});
-    expect(CONFIG.OLLAMA_MODEL).toBe("qwen3-embedding");
+    expect(CONFIG.OLLAMA_MODEL).toBe("qwen3-embedding:0.6b");
     expect(CONFIG.EMBED_BATCH_SIZE).toBe(8);
     expect(CONFIG.EMBED_CONCURRENCY).toBe(4);
     expect(CONFIG.MAX_CHUNK_SIZE).toBe(1500);

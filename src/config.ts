@@ -77,7 +77,16 @@ export interface IndexerConfig {
 const DEFAULTS: IndexerConfig = {
   home: path.join(os.homedir(), ".cidx"),
   server: { host: "127.0.0.1", mcpPort: 9371, controlPort: 9372 },
-  ollama: { url: "http://127.0.0.1:11434", model: "qwen3-embedding", batchSize: 8, concurrency: 4 },
+  // The bare `qwen3-embedding` tag resolves to the 8B variant in Ollama; the
+  // default is pinned to :0.6b so a fresh install does not pull 4.6 GB for
+  // chunks that are at most ~512 tokens. Override per project via `.cidx.json`
+  // `embedModel` (or globally here / via OLLAMA_MODEL).
+  ollama: {
+    url: "http://127.0.0.1:11434",
+    model: "qwen3-embedding:0.6b",
+    batchSize: 8,
+    concurrency: 4,
+  },
   embedding: { cacheMax: 50000 },
   indexing: {
     maxChunkSize: 1500,
@@ -131,7 +140,7 @@ server:
 
 ollama:
   url: ${DEFAULTS.ollama.url}
-  model: ${DEFAULTS.ollama.model}
+  model: ${DEFAULTS.ollama.model}   # :0.6b is enough for ~512-token chunks; the bare tag is the 8B model
   batchSize: ${DEFAULTS.ollama.batchSize}              # number of chunks per embed request
   concurrency: ${DEFAULTS.ollama.concurrency}
 

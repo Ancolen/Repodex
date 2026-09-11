@@ -17,7 +17,7 @@ bun run typecheck   # tsc --noEmit — strict mode, must pass
 bun test            # pure-logic unit tests; no Ollama required
 ```
 
-Real indexing/search additionally needs a running Ollama with a `qwen3-embedding`
+Real indexing/search additionally needs a running Ollama with a `qwen3-embedding:0.6b`
 model, but tests don't.
 
 ## Ground rules

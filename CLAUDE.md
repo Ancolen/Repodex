@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`cidx` (binary name **`cidx`**, alias **`repodex`**) — a Bun daemon that vectorizes codebases with a local Ollama (`qwen3-embedding`) and exposes hybrid (semantic + BM25) code search over MCP. One long-lived daemon manages **multiple projects**; a thin CLI sends commands to it; AI agents connect over HTTP/stdio. `README.md` is the user-facing doc (English); the `docs/` folder holds the authoritative design, features, status, and changelog (`architecture.md`, `features.md`, `status.md`, `changelog.md`, `cpu-only-ops.md`); this `CLAUDE.md` is the AI-agent operating contract.
+`cidx` (binary name **`cidx`**, alias **`repodex`**) — a Bun daemon that vectorizes codebases with a local Ollama (`qwen3-embedding:0.6b` by default; the bare tag is the 8B model) and exposes hybrid (semantic + BM25) code search over MCP. One long-lived daemon manages **multiple projects**; a thin CLI sends commands to it; AI agents connect over HTTP/stdio. `README.md` is the user-facing doc (English); the `docs/` folder holds the authoritative design, features, status, and changelog (`architecture.md`, `features.md`, `status.md`, `changelog.md`, `cpu-only-ops.md`); this `CLAUDE.md` is the AI-agent operating contract.
 
 ## Commands
 
@@ -22,7 +22,7 @@ bun run src/cli.ts <cmd>     # ≈ cidx <cmd>  (index/list/search/find/refs/sync
 
 Tests are pure-logic unit tests (`bun:test`) — they do **not** require a running Ollama. They cover RRF, `buildWhere`, the AST chunker, tree-sitter grammars, registry (temp sqlite), job-queue + worker pool, bounded concurrency, config, and text helpers. Some load the LanceDB native module, so `bun install` must have run.
 
-Daemon data lives in `~/.cidx/` (`config.yml`, `db/` LanceDB tables, `meta.db` sqlite, `daemon.log`). Override the root with `CIDX_HOME`. A running Ollama + `qwen3-embedding` model is required for real indexing/search (not for tests).
+Daemon data lives in `~/.cidx/` (`config.yml`, `db/` LanceDB tables, `meta.db` sqlite, `daemon.log`). Override the root with `CIDX_HOME`. A running Ollama + `qwen3-embedding:0.6b` model is required for real indexing/search (not for tests).
 
 ## Architecture — the big picture
 

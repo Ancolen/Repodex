@@ -26,7 +26,7 @@ sudo systemctl start ollama     # bring back the GPU-backed service
 # Create a CPU-only variant of the embedding model
 mkdir -p ~/.cidx/models
 cat > ~/.cidx/models/qwen3-embedding-cpu.Modelfile <<'EOF'
-FROM qwen3-embedding
+FROM qwen3-embedding:0.6b
 PARAMETER num_gpu 0
 EOF
 
@@ -37,7 +37,7 @@ ollama create qwen3-embedding-cpu -f ~/.cidx/models/qwen3-embedding-cpu.Modelfil
 # (an index built with model X is incompatible with model Y for vector search).
 
 # To switch back:
-#   1. set model: qwen3-embedding in config.yml
+#   1. set model: qwen3-embedding:0.6b in config.yml
 #   2. ollama rm qwen3-embedding-cpu
 #   3. restart the daemon + reindex
 ```

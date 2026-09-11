@@ -18,7 +18,7 @@ The design of `cidx` (`cidx` / `repodex`): a single long-lived Bun daemon that v
 | Language | TypeScript (Bun runs it directly) | `tsx`/`ts-node` unnecessary |
 | Persistent store | **`bun:sqlite`** (embedded SQLite) | Atomic, queryable, crash-resilient for registry + job state |
 | Vector DB | LanceDB (`@lancedb/lancedb`) | Confirmed to run under Bun (native NAPI test passed) |
-| Embedding | Ollama (`qwen3-embedding`), batch API | Local, fast |
+| Embedding | Ollama (`qwen3-embedding:0.6b` default), batch API | Local, fast |
 | Chunking | **`web-tree-sitter` (WASM)** | Runtime-independent, Bun-safe, no native compilation |
 | Distribution | Single executable via `bun build --compile` | Daemon + CLI in one binary |
 
