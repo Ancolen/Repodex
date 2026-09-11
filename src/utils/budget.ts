@@ -43,3 +43,108 @@ export function applyCharBudget<T extends BudgetedResult>(rows: T[], maxChars?: 
   }
   return out;
 }
+
+// ------------------------------------------------------------- context pack
+
+/**
+ * Approximate framing overhead for one pack entry beyond its hit text (the
+ * "Outline:" / "Imports:" captions, separators and spacing). Purely a framing
+ * estimate — the legs' real content is measured below.
+ */
+export const PACK_FRAME_CHARS = 80;
+
+/** Approximate rendered size of one outline line ("L12-34  method Name"). */
+export const OUTLINE_LINE_CHARS = 20;
+
+/** Approximate rendered size of one import line ("→ src/a.ts  (from "./a")"). */
+export const IMPORT_LINE_CHARS = 30;
+
+/** The outline shape applyPackBudget measures (a structural subset is enough). */
+export interface PackOutlineEntry {
+  symbolName?: string;
+  symbolType?: string;
+}
+
+/** The import-edge shape applyPackBudget measures. */
+export interface PackImportEdge {
+  raw?: string;
+  relativePath?: string;
+  path?: string;
+}
+
+/** One assembled pack entry: the search hit plus its per-hit enrichment legs. */
+export interface PackEntry {
+  /** The search hit itself (content + surrounding context). */
+  hit: BudgetedResult;
+  /** The hit file's outline lines (optional leg). */
+  outline?: PackOutlineEntry[];
+  /** The hit file's forward imports (optional leg). */
+  imports?: PackImportEdge[];
+}
+
+/** Approximate rendered size of a pack entry's outline (one line per symbol). */
+export function outlineSize(outline?: PackOutlineEntry[]): number {
+  if (!outline) return 0;
+  let n = 0;
+  for (const o of outline) {
+    n += (o.symbolName?.length ?? 0) + (o.symbolType?.length ?? 0) + OUTLINE_LINE_CHARS;
+  }
+  return n;
+}
+
+/** Approximate rendered size of a pack entry's import list (one line per edge). */
+export function importsSize(imports?: PackImportEdge[]): number {
+  if (!imports) return 0;
+  let n = 0;
+  for (const e of imports) {
+    n += (e.raw?.length ?? 0) + (e.relativePath ?? e.path ?? "").length + IMPORT_LINE_CHARS;
+  }
+  return n;
+}
+
+/** Rough rendered size of one pack entry: the hit (content + context + framing) plus its legs. */
+export function packEntrySize(entry: PackEntry): number {
+  return resultSize(entry.hit) + outlineSize(entry.outline) + importsSize(entry.imports) + PACK_FRAME_CHARS;
+}
+
+/** What the pack-level budget reports back. */
+export interface PackBudgetResult<T> {
+  /** The kept entries, in ranked order (the top entry is always present). */
+  hits: T[];
+  /** Running total of the kept entries' approximate rendered size. */
+  totalChars: number;
+  /** Entries dropped whole to fit the budget (they are NOT truncated). */
+  omitted: number;
+}
+
+/**
+ * THE ONE BUDGET OF A CONTEXT PACK, applied once over the assembled entries.
+ * Entries are added whole, in ranked order, while the running total fits; the top
+ * entry is always kept (even if it alone exceeds the budget) so a small budget never
+ * yields an empty pack; everything after the first non-fitting entry is reported as
+ * `omitted` — never truncated, never silently dropped. The rank prefix is kept whole
+ * on purpose (same discipline as `applyCharBudget`): a later, smaller entry is not
+ * admitted past a higher-ranked one that didn't fit.
+ *
+ * No-op when `maxChars` is unset/non-finite/<=0 — the entries pass through untouched
+ * and `totalChars` still reports their combined size (so callers can show it).
+ */
+export function applyPackBudget<T extends PackEntry>(entries: T[], maxChars?: number): PackBudgetResult<T> {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return { hits: entries, totalChars: 0, omitted: 0 };
+  }
+  if (maxChars === undefined || !Number.isFinite(maxChars) || maxChars <= 0) {
+    let total = 0;
+    for (const e of entries) total += packEntrySize(e);
+    return { hits: entries, totalChars: total, omitted: 0 };
+  }
+  const hits: T[] = [];
+  let used = 0;
+  for (const e of entries) {
+    const size = packEntrySize(e);
+    if (hits.length > 0 && used + size > maxChars) break;
+    hits.push(e);
+    used += size;
+  }
+  return { hits, totalChars: used, omitted: entries.length - hits.length };
+}
