@@ -21,7 +21,7 @@
 | [O3](#o3-table-stats--compact) | Table stats / compact | Ops | Low | Low |
 | [O4](#o4-daemon-idle-shutdown) | Daemon idle shutdown | Ops | Low | Low |
 
-**Suggested order** (getiri/efor balance, updated for this set): `C1` change impact → `C2` API diff. The rest fill in behind: `C4`, `S3`, `A2`, `C5`, `S2`, `A3`, `O3`, `S4`, `C3`, `O4`, `O2`.
+**Suggested order** (getiri/efor balance, updated for this set): `C2` API diff. The rest fill in behind: `C4`, `S3`, `A2`, `C5`, `S2`, `A3`, `O3`, `S4`, `C3`, `O4`, `O2`. (`C1` change impact shipped — see its tombstone below.)
 
 ---
 
@@ -137,34 +137,7 @@ An agent's first query is often intent-shaped and under-specified ("auth check m
 
 **Impact: High · Effort: Low-Medium**
 
-#### Motivation
-
-"This function is about to change — what breaks?" is currently answered by the agent in three separate calls (`get_call_graph` callers, `get_dependencies` imported-by, `find_references`) that it then has to reconcile itself. All three data sources exist and are cached; the synthesis is one pure module.
-
-#### Design
-
-- New tool `get_change_impact(path, symbol?, project?, depth?, limit?)` (≥1 of symbol/path, like the call graph) returning **one ranked report**:
-  - **Direct callers** (call graph, `callers` direction, bounded depth),
-  - **Imported-by** (dependency graph reverse),
-  - **Whole-identifier reference count + a few representative `file:line` hits** (`find_references` data, capped),
-  - **Per-consumer severity**: a caller that *calls* the symbol scores higher than a file that merely *imports* its module, which scores higher than a loose textual reference. Ranked `direct callers → importers → textual refs`, each section capped by `limit` with `truncated`.
-  - Cross-cuts: the symbol's own file's fan-out (how entangled the change site is), test-file callers called out separately ("covered by" vs "consumed by").
-- **Anchor resolution** mirrors `get_call_graph` (name matches `find_symbol`'s qualified form; both anchor kinds, ≥1 required).
-- **No new scanning** — all three adjacency sources come from their existing caches (`depGraphCache` mtime-keyed, call-graph `lastIndexedAt`-keyed, the dead-code-style reference pass is shared). The only new work is joining them.
-- `scannedSymbols`/`scannedFiles`/`truncated` surfaced like its three parents.
-
-#### Files touched
-
-`src/core/impact.ts` (new, pure join logic), `src/core/index-manager.ts` (tool method + cache wiring), the full 8-layer wiring (tool-defs → mcp → control-api → stdio-bridge → cli → format → index-manager), tests.
-
-#### Risks
-
-- Same-name disambiguation: same limitation as the call graph (whole-identifier matching); document it in the tool description — this is a review aid, not proof.
-
-#### Acceptance
-
-- Pure join tests with synthetic adjacency maps (severity ranking, caps, truncation flags).
-- Fixture project test: a symbol with a caller, an importer, and a textual mention appears in all three sections, ranked correctly.
+> Shipped in Unreleased — see [changelog](./changelog.md) and [features](./features.md). One design deviation from the text below: a **file anchor resolves to the file's single callable, or is refused with the candidate list** — a ranked report needs *one* change site, whereas the call graph can render a tree per root (a path-only report over several symbols would have ranked an undefined merge of them).
 
 ---
 

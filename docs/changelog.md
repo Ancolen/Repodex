@@ -8,6 +8,34 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ## Unreleased
 
+### `get_change_impact` — one ranked answer to "if I change X, what breaks?" (proposal C1)
+
+An agent answering that question today burns three calls (`get_call_graph` callers, `get_dependencies` imported-by, `find_references`) and then has to reconcile them itself. `get_change_impact` does the reconciliation **server-side** and returns one ranked report: **all three adjacency views already exist and are cached — the only new work is the join** (`src/core/impact.ts`, pure, a sibling of `callgraph.ts` / `deadcode.ts`). No schema change, no reindex, no embedding.
+
+#### One ranked report, sections in severity order
+
+A consumer that *calls* the symbol outranks a file that merely *imports* its module, which outranks a loose textual mention:
+
+- **▲ Direct callers** — the cached call graph, reverse direction, breadth-first and cycle-safe (`flattenCallers`): every consumer within `depth` (default 3) is listed **once, at its minimum depth** (`depth 1` = calls the anchor directly, `2` = calls a caller, …), sorted by depth then path; the anchor itself is never its own consumer.
+- **→ Importers** — the cached dependency graph, reverse. An importer whose own body also mentions the symbol ranks first inside the section (`alsoReferences: true`) — a stronger signal than a bare side-effect import.
+- **≈ Textual references** — the whole-identifier reference pass: an exact count of **distinct source lines** mentioning the symbol (the definition line excluded, overlapping chunks deduped) plus a few representative `file:line` hits with their containing symbol. `count` and the per-file set always cover every match; only the sample list is capped.
+- **✓ Covered by** — test files are pulled **out** of the production sections and reported separately with how they reach the symbol (`via: call / import / reference`): "covered by a test" is a different fact from "consumed by production".
+- **Change site (fan-out)** — how entangled the anchor itself is: distinct indexed files its file imports, distinct in-index symbols it calls, and the imported paths.
+
+Each section carries `total` (the true count before the cap) + `truncated`, and the report surfaces `scannedSymbols` / `scannedChunks` / `truncated` / `scanTruncated` like its three parents — no silent caps.
+
+#### Anchor, cost, and the same-name limitation
+
+Anchors mirror `get_call_graph`: `symbol` (exact / prefix / dotted-suffix, so a bare method name resolves to its qualified form), `path`, or both; ≥1 required. Unlike the call graph — a tree per root — a ranked report needs **one** change site, so a file with several callables (or an ambiguous name) is refused with the candidate list (`selectAnchor`). Cost: the call graph and import graph come from their `lastIndexedAt` / mtime caches; the reference pass is one `tableSymbolsWithContent` read, the same pass `find_dead_code` pays. Same-name disambiguation is whole-identifier matching, **not** LSP — documented in the tool description; this is a review aid, not proof.
+
+#### Surfaces (the full 8 layers)
+
+Tool `get_change_impact` (`tool-defs.ts`) → MCP handler (`mcp.ts`, ≥1 of symbol/path) → `POST /impact` (control API) → **stdio bridge `case "get_change_impact"`** (the hand-maintained, easy-to-miss layer) → CLI `cidx impact <symbol|file> [--project x] [--depth n] [--limit n]` (alias `change-impact`; the positional auto-detects an existing path, like `callgraph`) → `formatImpact` (`src/server/format.ts`, sections in severity order + the fan-out line + `⚠` truncation lines).
+
+#### Tests
+
+New suite `tests/impact.test.ts` (20) — pure join over synthetic adjacency: the caller traversal (depth bounding, minimum-depth dedup, cycles, work cap), the reference scan (definition rule, overlap dedup, exact counts under a sample cap), severity ordering, per-section caps/totals/truncation, the test-file split, and the fan-out. `tests/impact-fixture.test.ts` (16) — a real fixture project (a symbol with a caller, a side-effect importer and a comment mention, plus a test file) parsed with the **real** engines (`chunkCode`, `extractImports` → `resolveImports`, `buildCallEdges`) and joined; the symbol appears in all three sections ranked correctly, its test file lands in `coveredBy`, and the engine's anchor/project-resolution contract is pinned. `bun run typecheck` clean; `bun test` **455/455** (1198 expect).
+
 ### `get_context_pack` — one call for "get me up to speed on X" (proposal A1)
 
 An agent doing "get me up to speed on X" burns 4–6 round-trips (search → outline per hit → deps per hit → context lines), each a full round-trip. `get_context_pack` assembles the same material **server-side in one call** — less latency, less context churn, and a shape the agent can rely on. **All composition, no new engines**: every leg already exists and is cached; the only new logic is assembly + the pack-level budget. No schema change, no reindex.
