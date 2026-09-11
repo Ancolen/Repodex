@@ -65,7 +65,7 @@ async function scoreOne(query: string, doc: string): Promise<number> {
       prompt: judgePrompt(query, doc),
       raw: true,
       stream: false,
-      options: { num_predict: 1, temperature: 0 },
+      options: { num_predict: 1, temperature: 0, num_ctx: CONFIG.RERANK_NUM_CTX },
       logprobs: true,
       top_logprobs: 20,
     }),

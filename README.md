@@ -378,6 +378,7 @@ server:
 ollama:
   url: http://127.0.0.1:11434
   model: qwen3-embedding:0.6b # the bare tag is the 8B model — much larger, no better for ~512-token chunks
+  numCtx: 1024                # Ollama num_ctx for embed calls; chunks are ≤512 tokens, so 4096 (Ollama's default) is 8× oversized VRAM
   batchSize: 8                # number of chunks per embed request
   concurrency: 4              # number of parallel embed requests (bounded pool)
 
@@ -390,6 +391,7 @@ search:
     model: qwen3-reranker-q8  # causal-LM reranker; scored via yes/no token logprobs
     topK: 20                  # how many candidates to rerank before slicing to limit
     concurrency: 4            # concurrent reranker calls to Ollama
+    numCtx: 1024              # Ollama num_ctx for the rerank prompt (query + one chunk + template ≈ 500 tokens)
   mmr:
     enabled: true             # diversify the top results (Maximal Marginal Relevance)
     lambda: 0.5               # 1.0 = pure relevance, 0.0 = pure diversity (0.5 dedupes near-duplicates)
@@ -416,7 +418,7 @@ watcher:
   debounceMs: 300
 ```
 
-**Priority:** in-code defaults < YAML < environment variables. Environment variables can also be used for a quick temporary override: `CIDX_HOME`, `OLLAMA_URL`, `OLLAMA_MODEL`, `MCP_PORT`, `CONTROL_PORT`, `EMBED_BATCH_SIZE`, `EMBED_CONCURRENCY`, `EMBED_CACHE_MAX`, `MAX_CHUNK_TOKENS`, `VECTOR_INDEX_THRESHOLD`, `JOB_CONCURRENCY`, `RERANK_MODEL`, `RERANK_TOP_K`, `RERANK_CONCURRENCY`, `MMR_LAMBDA`, `MMR_TOP_K`. You can define additional ignore rules by placing a `.cidxignore` at a project root (`.gitignore` is also obeyed).
+**Priority:** in-code defaults < YAML < environment variables. Environment variables can also be used for a quick temporary override: `CIDX_HOME`, `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX`, `MCP_PORT`, `CONTROL_PORT`, `EMBED_BATCH_SIZE`, `EMBED_CONCURRENCY`, `EMBED_CACHE_MAX`, `MAX_CHUNK_TOKENS`, `VECTOR_INDEX_THRESHOLD`, `JOB_CONCURRENCY`, `RERANK_MODEL`, `RERANK_TOP_K`, `RERANK_CONCURRENCY`, `RERANK_NUM_CTX`, `MMR_LAMBDA`, `MMR_TOP_K`. You can define additional ignore rules by placing a `.cidxignore` at a project root (`.gitignore` is also obeyed).
 
 > 💡 **Exclude large data folders.** Since `allowedExtensions` includes `.json`, generated/very large JSON data files (e.g. HuggingFace `tokenizer.json`, fixture/static data) get split into thousands of chunks and embedded — this slows down indexing and pollutes search results. Exclude such folders by placing a `.cidxignore` at the project root:
 > ```gitignore

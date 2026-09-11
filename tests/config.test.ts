@@ -7,6 +7,7 @@
  * -> only in-code defaults + environment variables take effect.
  */
 import { test, expect, describe } from "bun:test";
+import { DEFAULT_CONFIG_YAML } from "../src/config";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { writeFileSync, mkdirSync, rmSync, existsSync, readFileSync } from "node:fs";
@@ -30,8 +31,10 @@ describe("config — defaults and environment variable overrides", () => {
   test("in-code defaults apply when YAML is missing", async () => {
     const { CONFIG } = await runConfig({});
     expect(CONFIG.OLLAMA_MODEL).toBe("qwen3-embedding:0.6b");
+    expect(CONFIG.OLLAMA_NUM_CTX).toBe(1024);
     expect(CONFIG.EMBED_BATCH_SIZE).toBe(8);
     expect(CONFIG.EMBED_CONCURRENCY).toBe(4);
+    expect(CONFIG.RERANK_NUM_CTX).toBe(1024);
     expect(CONFIG.MAX_CHUNK_SIZE).toBe(1500);
     expect(CONFIG.OVERLAP_SIZE).toBe(200);
     expect(CONFIG.MAX_CHUNK_TOKENS).toBe(512);
@@ -63,9 +66,25 @@ describe("config — defaults and environment variable overrides", () => {
     expect(CONFIG.VECTOR_INDEX_THRESHOLD).toBe(99999);
   });
 
+  test("OLLAMA_NUM_CTX / RERANK_NUM_CTX environment variables override defaults", async () => {
+    const { CONFIG } = await runConfig({ OLLAMA_NUM_CTX: "2048", RERANK_NUM_CTX: "512" });
+    expect(CONFIG.OLLAMA_NUM_CTX).toBe(2048);
+    expect(CONFIG.RERANK_NUM_CTX).toBe(512);
+  });
+
   test("invalid numerical environment variables are ignored (fallback to default)", async () => {
     const { CONFIG } = await runConfig({ EMBED_BATCH_SIZE: "abc" });
     expect(CONFIG.EMBED_BATCH_SIZE).toBe(8);
+    const ctx = await runConfig({ OLLAMA_NUM_CTX: "not-a-number", RERANK_NUM_CTX: "" });
+    expect(ctx.CONFIG.OLLAMA_NUM_CTX).toBe(1024);
+    expect(ctx.CONFIG.RERANK_NUM_CTX).toBe(1024);
+  });
+
+  test("the generated config template carries the num_ctx keys with the defaults", () => {
+    // A config.yml written at first boot pins whatever the template says (YAML
+    // beats the in-code default), so a typo there would stick permanently.
+    expect(DEFAULT_CONFIG_YAML.match(/numCtx:/g)?.length).toBe(2); // ollama + search.rerank
+    expect(DEFAULT_CONFIG_YAML).toContain("numCtx: 1024");
   });
 
   test("CIDX_HOME expands '~' and derived paths are located under home", async () => {

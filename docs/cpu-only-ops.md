@@ -52,6 +52,27 @@ ollama create qwen3-embedding-cpu -f ~/.cidx/models/qwen3-embedding-cpu.Modelfil
   a full reindex (see the model-compatibility rule in `docs/architecture.md`).
 - With Method 1 the model name stays the same → no reindex needed.
 
+## Shrink the context buffer too (`num_ctx`)
+
+Memory is not only the weights — Ollama also allocates the **context buffer**
+up front and holds it for as long as the model stays resident, and it defaults
+to `num_ctx` **4096**. cidx pins it explicitly:
+
+- `ollama.numCtx` (default **1024**) for the embed calls — chunks are capped at
+  ~512 tokens, and `num_ctx` applies to each input of a batch individually, not
+  to the concatenated batch.
+- `search.rerank.numCtx` (default **1024**) for the reranker prompt.
+
+Measured on `qwen3-embedding:0.6b` (Ollama 0.33.2, one model loaded):
+
+| `num_ctx` | Resident (ollama ps) |
+| --------- | -------------------- |
+| 4096 (Ollama default) | 2.4 GB |
+| 1024 (cidx default)   | 1.4 GB |
+
+Embeddings are unchanged for inputs that fit. Raise both keys if you raise
+`indexing.maxChunkSize` past ~4000 chars (~1024 tokens).
+
 ## cidx management commands
 
 ```bash

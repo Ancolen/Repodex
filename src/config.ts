@@ -22,7 +22,19 @@ import { parse as parseYaml } from "yaml";
 export interface IndexerConfig {
   home: string;
   server: { host: string; mcpPort: number; controlPort: number };
-  ollama: { url: string; model: string; batchSize: number; concurrency: number };
+  ollama: {
+    url: string;
+    model: string;
+    batchSize: number;
+    concurrency: number;
+    /**
+     * Ollama `num_ctx` sent with every embed request. Ollama allocates 4096
+     * when it is not given, which is ~8x oversized for chunks capped at
+     * ~512 tokens — the context buffer is allocated up front per loaded
+     * model, so the overshoot is paid in VRAM/RAM, not in accuracy.
+     */
+    numCtx: number;
+  };
   embedding: { cacheMax: number };
   indexing: {
     maxChunkSize: number;
@@ -62,6 +74,13 @@ export interface IndexerConfig {
       topK: number;
       /** Max concurrent reranker calls to Ollama. */
       concurrency: number;
+      /**
+       * Ollama `num_ctx` for the rerank `/api/generate` calls. The judge prompt
+       * is the query + one chunk + the Qwen3-Reranker template (~500 tokens at
+       * the default chunk size), so 1024 fits it with headroom while avoiding
+       * Ollama's 4096 default allocation.
+       */
+      numCtx: number;
     };
     mmr: {
       /** If true, MMR diversifies the top results by default (per-call override via the search API). */
@@ -86,6 +105,7 @@ const DEFAULTS: IndexerConfig = {
     model: "qwen3-embedding:0.6b",
     batchSize: 8,
     concurrency: 4,
+    numCtx: 1024,
   },
   embedding: { cacheMax: 50000 },
   indexing: {
@@ -121,7 +141,7 @@ const DEFAULTS: IndexerConfig = {
   },
   watcher: { debounceMs: 300 },
   search: {
-    rerank: { enabled: true, model: "qwen3-reranker-q8", topK: 20, concurrency: 4 },
+    rerank: { enabled: true, model: "qwen3-reranker-q8", topK: 20, concurrency: 4, numCtx: 1024 },
     mmr: { enabled: true, lambda: 0.5, topK: 20 },
   },
 };
@@ -141,6 +161,7 @@ server:
 ollama:
   url: ${DEFAULTS.ollama.url}
   model: ${DEFAULTS.ollama.model}   # :0.6b is enough for ~512-token chunks; the bare tag is the 8B model
+  numCtx: ${DEFAULTS.ollama.numCtx}              # Ollama num_ctx for embed calls (chunks are ≤512 tokens + headroom); Ollama defaults to 4096 and allocates that buffer per loaded model
   batchSize: ${DEFAULTS.ollama.batchSize}              # number of chunks per embed request
   concurrency: ${DEFAULTS.ollama.concurrency}
 
@@ -167,6 +188,7 @@ search:
     model: ${DEFAULTS.search.rerank.model}    # causal-LM reranker; scored via yes/no token logprobs
     topK: ${DEFAULTS.search.rerank.topK}                  # how many candidates to rerank before slicing to limit
     concurrency: ${DEFAULTS.search.rerank.concurrency}              # concurrent reranker calls to Ollama
+    numCtx: ${DEFAULTS.search.rerank.numCtx}              # Ollama num_ctx for the rerank prompt (query + one chunk + template ≈ 500 tokens)
   mmr:
     enabled: true              # diversify the top results (Maximal Marginal Relevance)
     lambda: 0.5                # 1.0 = pure relevance, 0.0 = pure diversity
@@ -277,6 +299,7 @@ export const RESOLVED: IndexerConfig = {
     model: process.env.OLLAMA_MODEL ?? y.ollama?.model ?? DEFAULTS.ollama.model,
     batchSize: num(process.env.EMBED_BATCH_SIZE) ?? y.ollama?.batchSize ?? DEFAULTS.ollama.batchSize,
     concurrency: num(process.env.EMBED_CONCURRENCY) ?? y.ollama?.concurrency ?? DEFAULTS.ollama.concurrency,
+    numCtx: num(process.env.OLLAMA_NUM_CTX) ?? y.ollama?.numCtx ?? DEFAULTS.ollama.numCtx,
   },
   embedding: {
     cacheMax: num(process.env.EMBED_CACHE_MAX) ?? y.embedding?.cacheMax ?? DEFAULTS.embedding.cacheMax,
@@ -322,6 +345,8 @@ export const RESOLVED: IndexerConfig = {
         num(process.env.RERANK_CONCURRENCY) ??
         y.search?.rerank?.concurrency ??
         DEFAULTS.search.rerank.concurrency,
+      numCtx:
+        num(process.env.RERANK_NUM_CTX) ?? y.search?.rerank?.numCtx ?? DEFAULTS.search.rerank.numCtx,
     },
     mmr: {
       enabled:
@@ -345,6 +370,7 @@ export const CONFIG = {
 
   OLLAMA_URL: RESOLVED.ollama.url,
   OLLAMA_MODEL: RESOLVED.ollama.model,
+  OLLAMA_NUM_CTX: RESOLVED.ollama.numCtx,
   EMBED_BATCH_SIZE: RESOLVED.ollama.batchSize,
   EMBED_CONCURRENCY: RESOLVED.ollama.concurrency,
   EMBED_CACHE_MAX: RESOLVED.embedding.cacheMax,
@@ -366,6 +392,7 @@ export const CONFIG = {
   RERANK_MODEL: RESOLVED.search.rerank.model,
   RERANK_TOP_K: RESOLVED.search.rerank.topK,
   RERANK_CONCURRENCY: RESOLVED.search.rerank.concurrency,
+  RERANK_NUM_CTX: RESOLVED.search.rerank.numCtx,
 
   MMR_ENABLED: RESOLVED.search.mmr.enabled,
   MMR_LAMBDA: RESOLVED.search.mmr.lambda,

@@ -1,4 +1,5 @@
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe, spyOn } from "bun:test";
+import { CONFIG } from "../src/config";
 import { scoreFromLogprobs, rerankScores } from "../src/services/rerank";
 
 describe("scoreFromLogprobs", () => {
@@ -74,5 +75,52 @@ describe("scoreFromLogprobs", () => {
 describe("rerankScores", () => {
   test("empty input → empty output (no network)", async () => {
     expect(await rerankScores("anything", [])).toEqual([]);
+  });
+
+  test("the /api/generate body carries num_ctx alongside num_predict/temperature", async () => {
+    // Ollama allocates its context buffer from num_ctx (4096 when unset), so the
+    // rerank request must pin it explicitly. Guarded here because a regression
+    // would only show up as VRAM bloat, never as an error.
+    const bodies: any[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input: any, init?: any) => {
+      bodies.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({ logprobs: [{ top_logprobs: [{ token: "yes", logprob: -0.1 }] }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const scores = await rerankScores("parse the config", ["const x = readConfig();"]);
+      expect(scores).toEqual([1]); // only "yes" in the logprobs → 1.0
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+
+    expect(bodies.length).toBe(1);
+    expect(bodies[0].model).toBe(CONFIG.RERANK_MODEL);
+    expect(bodies[0].raw).toBe(true);
+    expect(bodies[0].stream).toBe(false);
+    expect(bodies[0].logprobs).toBe(true);
+    expect(bodies[0].options.num_predict).toBe(1);
+    expect(bodies[0].options.temperature).toBe(0);
+    expect(bodies[0].options.num_ctx).toBe(CONFIG.RERANK_NUM_CTX);
+    expect(bodies[0].prompt).toContain("<Query>: parse the config");
+    expect(bodies[0].prompt).toContain("<Document>: const x = readConfig();");
+  });
+
+  test("a per-doc failure degrades to the neutral score instead of throwing", async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response("boom", { status: 500 })) as typeof fetch;
+    // The degradation is logged by design; keep it out of the test output.
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(await rerankScores("q", ["doc"])).toEqual([0.5]);
+      expect(errSpy).toHaveBeenCalled();
+    } finally {
+      errSpy.mockRestore();
+      globalThis.fetch = realFetch;
+    }
   });
 });
