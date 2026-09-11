@@ -92,6 +92,9 @@
 - ✅ systemd user service via `install.sh` (auto-start at boot with linger).
 - ✅ Cross-platform release assets + one-line `web-install.sh`.
 
+### Ops & diagnostics
+- ✅ **`cidx doctor`** (proposal `O1`) — one **read-only** diagnostic pass; every check reports `ok`/`warn`/`fail` with a one-line fix hint, exit 0 unless a check fails. CLI-side: daemon reachability + **CLI ↔ daemon version match** (mismatch → warn). Daemon-side via `GET /doctor` (`src/core/doctor.ts`, the check registry — pure checks over injected state, one `runDoctor(ports)` gatherer): Ollama reachable + configured model installed (`/api/tags`); the reranker verdict from `IndexManager.ensureRerankAvailable`'s **cached** probe (missing model → warn, RRF fallback); per project — table exists (`fail` when missing), **schema freshness** through `tableColumns` (pre-2.4.0 table → the *"reindex to enable the docstring search legs"* hint), ANN/FTS index presence (no ANN below `vectorIndexThreshold` is by design; non-empty table without a `content` BM25 index → warn), registry ↔ table sanity (chunk-count drift, empty file cache over a non-empty table, skipped while a job runs), and a `fail` when the project's pinned `embedModel` is absent from Ollama; orphan tables under `~/.cidx/db` (warn); config validity via the **same `parseProjectConfig` the indexer uses** (unparseable YAML / `.cidx.json` → warn); disk usage of the data root with per-table sizes (inline read-only walk — the O3 `stats` command is not built). Tests: `tests/doctor.test.ts` — every check against synthetic state (missing table, legacy schema, broken YAML/JSON, orphan tables) + a healthy synthetic install that comes out all-`ok`.
+
 ---
 
 ## 🚧 In progress

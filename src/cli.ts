@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, openSync } from "node:fs";
 import { CONFIG, RESOLVED, CONFIG_SOURCE, resolveConfigPath } from "./config";
 import { daemonCommand, bridgeCommand } from "./runtime";
+import { daemonCheck, type DoctorCheck, type DoctorReport } from "./core/doctor";
 import { resolveEditor, buildEditorArgs } from "./utils/editor";
 
 const BASE = `http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}`;
@@ -973,6 +974,16 @@ const COMMANDS: Record<string, CmdDoc> = {
       "cidx deadcode api --type function",
     ],
   },
+  doctor: {
+    usage: "doctor",
+    summary: "One read-only diagnostic pass: daemon, Ollama, models, tables, schema, config, disk.",
+    details: [
+      "Every check reports ok / warn / fail with a one-line fix hint.",
+      "Checks the daemon, Ollama + the configured embed model, the reranker probe, each project's table and schema freshness (pre-2.4.0 tables get the reindex hint), ANN/FTS index presence, file-cache sanity, orphan tables, config-file validity, and the disk usage of the data root.",
+      "Read-only — doctor never mutates anything. Exits 1 only when a check fails.",
+    ],
+    examples: ["cidx doctor"],
+  },
   config: {
     usage: "config [path]",
     summary: "Shows the active YAML configuration as JSON; 'path' prints only the file path.",
@@ -1006,7 +1017,7 @@ const COMMANDS: Record<string, CmdDoc> = {
 
 const HELP_ORDER = [
   "start", "index", "list", "status", "reindex", "sync", "remove",
-  "search", "open", "batch", "find", "refs", "overview", "deps", "deadcode", "callgraph", "commits", "config", "mcp", "stop", "version", "help",
+  "search", "open", "batch", "find", "refs", "overview", "deps", "deadcode", "callgraph", "commits", "doctor", "config", "mcp", "stop", "version", "help",
 ];
 
 /** Detailed help for a single command. */
@@ -1125,6 +1136,78 @@ function printHelp(): void {
   console.log(lines.join("\n"));
 }
 
+/** Prints a doctor report (CLI inline formatter): one line per check + its fix hint. */
+function printDoctor(checks: DoctorCheck[]): void {
+  const width = checks.reduce((n, c) => Math.max(n, c.title.length), 0);
+  for (const c of checks) {
+    const badge = c.status === "ok" ? "ok  " : c.status === "warn" ? "warn" : "FAIL";
+    console.log(`  ${badge}  ${c.title.padEnd(width)}  ${c.detail ?? ""}`);
+    if (c.hint) console.log(`        fix: ${c.hint}`);
+  }
+}
+
+/**
+ * `cidx doctor` — one read-only diagnostic pass (proposal O1).
+ * The daemon-owning checks come from `GET /doctor`; the daemon-reachability +
+ * version-match check is the only one evaluated here (an unreachable daemon is
+ * the one thing the daemon cannot report itself). Exit 0 unless a check fails.
+ */
+async function cmdDoctor(): Promise<void> {
+  let daemonVersion: string | undefined;
+  let pid: number | undefined;
+  let reachable = false;
+  try {
+    const r = await fetch(`${BASE}/ping`, { signal: AbortSignal.timeout(2000) });
+    if (r.ok) {
+      const data = (await r.json()) as { version?: string; pid?: number };
+      daemonVersion = data.version;
+      pid = data.pid;
+      reachable = true;
+    }
+  } catch {
+    reachable = false;
+  }
+
+  const checks: DoctorCheck[] = [
+    daemonCheck({
+      reachable,
+      cliVersion: CLI_VERSION,
+      ...(daemonVersion !== undefined ? { daemonVersion } : {}),
+      ...(pid !== undefined ? { pid } : {}),
+    }),
+  ];
+  let report: DoctorReport | null = null;
+  if (reachable) {
+    try {
+      report = await api<DoctorReport>("GET", "/doctor");
+    } catch (err) {
+      checks.push({
+        id: "doctor",
+        title: "doctor",
+        status: "fail",
+        detail: `the daemon's diagnostic pass failed: ${err instanceof Error ? err.message : String(err)}`,
+        hint: "check the daemon log (~/.cidx/daemon.log)",
+      });
+    }
+  }
+
+  const all = report ? checks.concat(report.checks) : checks;
+  console.log(`\ncidx doctor — daemon ${reachable ? `v${daemonVersion} (pid ${pid})` : "not running"} · data: ${report?.home ?? CONFIG.ROOT_DIR}\n`);
+  printDoctor(all);
+
+  const fails = all.filter((c) => c.status === "fail").length;
+  const warns = all.filter((c) => c.status === "warn").length;
+  if (fails > 0) {
+    console.log(`\n${fails} failure${fails === 1 ? "" : "s"}, ${warns} warning${warns === 1 ? "" : "s"} — follow the fix hints above.`);
+    process.exit(1);
+  }
+  console.log(
+    warns > 0
+      ? `\nNo failures, ${warns} warning${warns === 1 ? "" : "s"}.`
+      : "\nAll checks passed.",
+  );
+}
+
 async function cmdVersion(): Promise<void> {
   console.log(`cidx ${CLI_VERSION}`);
   try {
@@ -1168,6 +1251,7 @@ async function main(): Promise<void> {
     case "deadcode": case "dead-code": await cmdDeadcode(positionals, flags); break;
     case "callgraph": case "call-graph": await cmdCallGraph(positionals, flags); break;
     case "commits": case "git-log": case "gitlog": await cmdCommits(positionals, flags); break;
+    case "doctor": await cmdDoctor(); break;
     case "config": await cmdConfig(positionals); break;
     case "mcp": case "stdio": await cmdMcp(); break;
     case "stop": await cmdStop(); break;

@@ -6,6 +6,33 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ---
 
+## Unreleased
+
+### `cidx doctor` — one read-only diagnostic pass (proposal O1)
+
+`bun run typecheck` clean, `bun test` **348/348** (917 expect). Ships the "O1 `cidx doctor`" design from [`status.md`](./status.md): the support checklist — is the daemon up, is Ollama reachable, is the embed model installed, is the table schema current, is the config valid — answered by one command. Every check reports `ok` / `warn` / `fail` with a one-line fix hint; **doctor never mutates anything**, and the exit code is scriptable (0 unless a check fails, warnings still 0).
+
+### CLI (`cidx doctor`)
+
+Thin client, like the other subcommands: it evaluates the one check the daemon cannot report itself (daemon reachability + the **CLI ↔ daemon version match** → warn on mismatch), fetches `GET /doctor`, and renders every check with its fix hint. Exits 1 only when a check is `fail`.
+
+### Control API (`GET /doctor`) and the check registry (`src/core/doctor.ts`, new)
+
+The daemon owns the checks that need its state. `src/core/doctor.ts` is the check registry and is **pure where possible**: each check takes injected, already-measured state (plain data) and returns a verdict, so checks are unit-testable without a daemon, Ollama or LanceDB. `runDoctor(ports)` is the single state gatherer, wired in `control-api.ts` from `IndexManager` + `services/db` + `CONFIG`; `GET /doctor` returns the aggregated report (`status` = worst verdict, `checks[]`, `home`).
+
+- **Ollama** — reachable + the configured `OLLAMA_MODEL` installed, from one `/api/tags` call (a bare model name matches its `:latest`/tagged form). Unreachable or missing model → `fail`.
+- **Reranker** — reuses `IndexManager.ensureRerankAvailable`'s **cached** probe (no second implementation); a missing model is a `warn` (search falls back to RRF order).
+- **Per registered project** — table exists (`fail` when the registry row has no table), **schema freshness** via `tableColumns` (a pre-2.4.0 table → *"reindex to enable the docstring search legs"*), ANN/FTS index presence (no ANN below `vectorIndexThreshold` is by design; a non-empty table without a `content` FTS index is a `warn` — text/hybrid finds nothing), and registry ↔ table sanity (registry chunk count vs live rows, empty file cache over a non-empty table — both skipped while a job is running). A project whose pinned `embedModel` is not installed in Ollama is a `fail` (search in that project fails).
+- **Orphan tables** — directories under `~/.cidx/db` the registry does not know → `warn` (never searched, only disk). The mirror case (a registry row without a table) is the project check's `fail`, so each problem is reported once.
+- **Config validity** — the global YAML parses, and each project's `.cidx.json` is validated by the **same `parseProjectConfig` the indexer uses** (shared, not duplicated). Unparseable/invalid files are `warn`s: cidx ignores them and runs on defaults, which is exactly what doctor makes visible.
+- **Disk usage** — total + per-table directory sizes of `~/.cidx/`, computed inline with a read-only fs walk (the O3 `stats` command is *not* part of this).
+
+### Tests
+
+New suite `tests/doctor.test.ts` (52 tests): every check against synthetic state (missing table, legacy schema, missing FTS/ANN, chunk-count drift, orphan tables, broken YAML/JSON config, version mismatch), a healthy synthetic install that yields all-`ok`, and the collector `runDoctor` over fake ports (including a degraded table read). `measureDiskUsage` is exercised against a real temp directory.
+
+---
+
 ## 2.4.0 — docstring / comment embedding + doc search legs
 
 Version bumped 2.3.0 → **2.4.0**; `bun run typecheck` clean, `bun test` **296/296** (790 expect). Ships the "Embed docstring / comment separately" proposal from [`status.md`](./status.md) — a symbol's docstring / doc-comment is extracted at chunk time, embedded into a **separate `doc_vector` column on the same row**, and searched as its own retrieval legs, so intent queries ("how to do X") hit the *documentation* even when the *code body* doesn't semantically match.

@@ -1,9 +1,12 @@
 import { existsSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import express from "express";
-import { CONFIG } from "../config";
+import * as lancedb from "@lancedb/lancedb";
+import { CONFIG, CONFIG_SOURCE } from "../config";
 import { hostGuard } from "./host-guard";
 import { fileOutline } from "../chunking/chunker";
+import { measureDiskUsage, runDoctor, type DoctorPorts } from "../core/doctor";
+import { countTableRows, listTables, tableColumns } from "../services/db";
 import type { JobQueue } from "../core/job-queue";
 import type { IndexManager } from "../core/index-manager";
 import type { IndexRecord } from "../core/registry";
@@ -39,6 +42,84 @@ function viewIndex(deps: ControlDeps, rec: IndexRecord) {
               : 0,
         }
       : null,
+  };
+}
+
+// -------------------------------------------------------------------- doctor
+
+/**
+ * The reranker verdict comes from `IndexManager`'s own cached one-shot probe
+ * (`ensureRerankAvailable`) — doctor reuses it instead of asking Ollama a second
+ * time. The method is private on the class, hence this structural view.
+ */
+type RerankProber = { ensureRerankAvailable(): Promise<boolean> };
+
+/**
+ * Second, read-only LanceDB connection, used only for index metadata
+ * (`Table.listIndices` — ANN/FTS presence). `services/db.ts` owns the daemon's
+ * connection and exposes no index-metadata helper, and LanceDB is an embedded
+ * store designed for concurrent readers, so a dedicated read-only handle is
+ * safe. Cached: one extra connection per daemon process.
+ */
+let doctorDb: lancedb.Connection | null = null;
+async function doctorConnection(): Promise<lancedb.Connection> {
+  if (!doctorDb) doctorDb = await lancedb.connect(CONFIG.DB_DIR);
+  return doctorDb;
+}
+
+/** Gathers the live state `runDoctor` reads — every port injectable, none throwing. */
+function doctorPorts(deps: ControlDeps): DoctorPorts {
+  const prober = deps.manager as unknown as RerankProber;
+  return {
+    indexes: () => deps.manager.listIndexes(),
+    tableNames: () => listTables(),
+    tableColumns: async (table) => [...(await tableColumns(table))],
+    rowCount: (table) => countTableRows(table),
+    tableIndices: async (table) => {
+      const conn = await doctorConnection();
+      const names = await conn.tableNames();
+      if (!names.includes(table)) return [];
+      const t = await conn.openTable(table);
+      return (await t.listIndices()).map((ix) => ({ columns: ix.columns, indexType: ix.indexType }));
+    },
+    ollama: async () => {
+      try {
+        const r = await fetch(`${CONFIG.OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(5000) });
+        if (!r.ok) return { reachable: true, models: [] };
+        const data = (await r.json()) as { models?: { name?: string }[] };
+        return {
+          reachable: true,
+          models: (data.models ?? [])
+            .map((m) => m.name ?? "")
+            .filter((n) => n.length > 0),
+        };
+      } catch {
+        return { reachable: false, models: [] };
+      }
+    },
+    rerankerAvailable: () => prober.ensureRerankAvailable(),
+    configPath: () => CONFIG_SOURCE,
+    readText: async (filePath) => {
+      try {
+        return await readFile(filePath, "utf-8");
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+          console.error(`[doctor] cannot read '${filePath}':`, err);
+        }
+        return null;
+      }
+    },
+    diskUsage: () => measureDiskUsage(CONFIG.ROOT_DIR),
+    settings: {
+      home: CONFIG.ROOT_DIR,
+      dbDir: CONFIG.DB_DIR,
+      ollamaUrl: CONFIG.OLLAMA_URL,
+      embedModel: CONFIG.OLLAMA_MODEL,
+      docstrings: CONFIG.DOCSTRINGS,
+      vectorIndexThreshold: CONFIG.VECTOR_INDEX_THRESHOLD,
+      rerankEnabled: CONFIG.RERANK_ENABLED,
+      rerankModel: CONFIG.RERANK_MODEL,
+    },
   };
 }
 
@@ -426,6 +507,21 @@ export function startControlApi(
   app.post("/shutdown", (_req, res) => {
     res.json({ stopping: true });
     setTimeout(() => void deps.onShutdown(), 50);
+  });
+
+  // ------------------------------------------------------------------ doctor
+
+  /**
+   * Read-only diagnostic pass for `cidx doctor` (proposal O1): Ollama + the
+   * reranker probe, per-project table/schema/index/cache checks, orphan tables,
+   * config-file validity, and data-root disk usage. Never mutates anything.
+   */
+  app.get("/doctor", async (_req, res) => {
+    try {
+      res.json(await runDoctor(doctorPorts(deps)));
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
   });
 
   return new Promise<void>((resolve, reject) => {

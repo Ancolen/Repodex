@@ -110,6 +110,18 @@ What the tool **does today** (version 2.4.0). For what's planned, see [`status.m
 - Cross-platform release assets (linux / darwin × x64 / arm64), built on native runners.
 - `install.sh` / `web-install.sh` install a systemd user service (Linux) → auto-start at boot.
 
+## Ops & diagnostics
+
+- **`cidx doctor`** — one **read-only** diagnostic pass over the whole install: the support checklist (daemon up? Ollama reachable? model installed? schema current? config valid?) answered in a single command. Every check reports **`ok` / `warn` / `fail`** plus a one-line fix hint; exit 0 unless a check **fails** (warnings still exit 0), so it is scriptable. Nothing is ever mutated.
+  - **Daemon (CLI-side)** — reachable via `/ping`, and the CLI ↔ daemon **version match** (a mismatch is a `warn`: restart the daemon).
+  - **Ollama** — reachable + the configured `ollama.model` installed (one `/api/tags` call; a bare name matches its `:latest`/tagged form). Unreachable or missing model → `fail`.
+  - **Reranker** — the result of the same **cached** probe search uses (`IndexManager.ensureRerankAvailable`); a missing model is a `warn` (search falls back to RRF order).
+  - **Per project** — table exists (`fail` if the registry row has no table), **schema freshness** (a pre-2.4.0 table without `doc`/`doc_vector` gets the *reindex to enable the docstring legs* hint), **ANN/FTS presence** (no ANN below `vectorIndexThreshold` is by design; a non-empty table without a `content` BM25 index is a `warn`), and registry ↔ table sanity (chunk-count drift, empty file cache over a non-empty table — skipped while a job runs). A project whose pinned `embedModel` is missing from Ollama is a `fail`.
+  - **Orphan tables** — `~/.cidx/db` directories no registry row references (`warn`: never searched, only disk). A registry row without a table is reported by that project's check.
+  - **Config** — the global YAML parses; every project's `.cidx.json` is validated by the **same validator the indexer uses** (`parseProjectConfig`). Broken files are `warn`s (cidx silently ignores them today — doctor makes that visible).
+  - **Disk usage** — total + per-table directory sizes of the data root (`CIDX_HOME`, default `~/.cidx`), computed inline (read-only walk).
+  - **Layering** — the checks live in `src/core/doctor.ts` as pure functions over injected state (unit-tested without a daemon/Ollama/LanceDB); `GET /doctor` (Control API) gathers the live state and returns the aggregated report; the CLI renders it.
+
 ## MCP tools exposed to agents
 
 | Tool | Purpose |
@@ -131,6 +143,6 @@ What the tool **does today** (version 2.4.0). For what's planned, see [`status.m
 ## CLI commands (summary)
 
 `start [dir]` · `index <dir> [--name x]` · `list` · `status [name]` · `reindex <name>` · `sync <name>` · `remove <name>` ·
-`search "<query>" [flags]` · `open "<query>" [flags]` · `batch "<q1>" "<q2>" ...` · `find <name> [flags]` · `refs <name> [flags]` · `deps <file> [flags]` · `callgraph <symbol|file> [flags]` · `commits <project> [query] [flags]` · `deadcode <name> [flags]` · `overview <name>` · `mcp` · `config [path]` · `stop` · `version` · `help [cmd]`
+`search "<query>" [flags]` · `open "<query>" [flags]` · `batch "<q1>" "<q2>" ...` · `find <name> [flags]` · `refs <name> [flags]` · `deps <file> [flags]` · `callgraph <symbol|file> [flags]` · `commits <project> [query] [flags]` · `deadcode <name> [flags]` · `overview <name>` · `doctor` · `mcp` · `config [path]` · `stop` · `version` · `help [cmd]`
 
 > Full details: `cidx help` / `cidx help <command>`.
