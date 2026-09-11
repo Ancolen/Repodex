@@ -27,6 +27,7 @@ import { TOOL_DEFINITIONS } from "./server/tool-defs";
 import {
   formatResults,
   formatBatchResults,
+  formatContextPack,
   formatOutline,
   formatReferences,
   formatOverview,
@@ -179,6 +180,20 @@ async function main(): Promise<void> {
             doc: args.doc,
           });
           return ok(formatBatchResults(groups));
+        }
+        case "get_context_pack": {
+          const pack = await api<Parameters<typeof formatContextPack>[0]>("POST", "/pack", {
+            query: args.query,
+            project: args.project,
+            limit: args.limit,
+            maxChars: args.maxChars,
+            contextLines: args.contextLines,
+          });
+          // Readable text for the model + the structured object for JSON consumers.
+          return {
+            content: [{ type: "text" as const, text: formatContextPack(pack) }],
+            structuredContent: { pack },
+          };
         }
         case "find_symbol": {
           const results = await api<Parameters<typeof formatResults>[0]>("POST", "/find", {

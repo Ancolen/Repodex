@@ -351,4 +351,47 @@ export const TOOL_DEFINITIONS: Tool[] = [
       required: ["project"],
     },
   },
+  {
+    name: "get_context_pack",
+    description:
+      "ONE call that assembles what you'd otherwise burn 4-6 round-trips on: the hybrid search " +
+      "core of search_codebase (same reranker/MMR/doc-leg/query-cache pipeline) PLUS, for every hit, " +
+      "its file's symbol outline capped to the hit's neighborhood, the hit file's forward imports " +
+      "(resolved to indexed files only), and the optional surrounding context lines — all under a " +
+      "SINGLE pack-level character budget. Hits are added whole in ranked order while the pack fits; " +
+      "the top hit is always included; hits that didn't fit are reported as 'omitted' (never truncated). " +
+      "Use it to get up to speed on a topic ('how does X work here?') in one turn. The same FRESHNESS " +
+      "caveat as search_codebase applies: the index lags edits by ~1-2s.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Natural language query or technical terms to search for.",
+        },
+        project: {
+          type: "string",
+          description: "Search only in this project (optional). If not given, all projects are searched.",
+        },
+        limit: {
+          type: "number",
+          description: "Maximum number of hits considered for the pack (default: 5).",
+        },
+        maxChars: {
+          type: "number",
+          description:
+            "Character budget for the WHOLE pack (default: 6000). Applied once over the assembled pack: " +
+            "hits are kept whole in ranked order while the running total fits (the top hit is always kept) " +
+            "and the rest are counted in 'omitted'. Internal legs never truncate on top of this.",
+        },
+        contextLines: {
+          type: "number",
+          description:
+            "If > 0, include up to this many surrounding lines (read live from the file on disk) " +
+            "before/after each hit chunk. Default 0.",
+        },
+      },
+      required: ["query"],
+    },
+  },
 ];

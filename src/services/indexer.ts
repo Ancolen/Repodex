@@ -4,6 +4,7 @@ import ignore, { type Ignore } from "ignore";
 import { CONFIG } from "../config";
 import { readProjectConfig, extToLanguage, languageAllowSet } from "../core/project-config";
 import { chunkCode } from "../chunking/chunker";
+import { extractIdTerms } from "../core/idterms";
 import { getEmbeddings } from "./ollama";
 import { insertChunks, deleteFileRecords, ensureVectorIndex, ensureFtsIndex, type CodeRecord } from "./db";
 import { hashContent } from "../utils/hash";
@@ -181,7 +182,8 @@ async function embedTexts(
  *
  * Each chunk's docstring (`chunk.doc`, see `chunking/docstring.ts`) is embedded
  * into a separate `doc_vector` (same model, same dimension), so symbol docs form
- * their own retrieval leg.
+ * their own retrieval leg. Compound identifiers are split into subparts into
+ * `id_terms` (`src/core/idterms.ts`) — a pure CPU step, no embedding.
  */
 export async function indexFile(
   target: IndexTarget,
@@ -252,6 +254,10 @@ export async function indexFile(
       // Docstring leg: null on doc-less chunks (fixed-schema nullable columns).
       doc: chunk.doc ?? null,
       doc_vector: null,
+      // Identifier-part BM25 leg (no embedding): compound identifiers of the
+      // chunk split into subparts (`getUserName` → "getusername get user name"),
+      // null when the chunk has none. See `src/core/idterms.ts`.
+      id_terms: extractIdTerms(chunk.content) || null,
     });
   }
   if (docVecs) {
@@ -385,6 +391,8 @@ export async function indexDirectory(
       console.error(`[indexer] failed to build doc_vector index for '${target.tableName}':`, err);
     }
     try {
+      // BM25 over `content`, `doc` and `id_terms` (the optional legs are
+      // schema-guarded inside and never fail the index).
       const built = await ensureFtsIndex(target.tableName);
       if (built > 0) console.error(`[indexer] built ${built} BM25/FTS index(es) for '${target.tableName}'.`);
     } catch (err) {

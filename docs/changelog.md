@@ -8,15 +8,77 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ## Unreleased
 
+### `get_context_pack` — one call for "get me up to speed on X" (proposal A1)
+
+An agent doing "get me up to speed on X" burns 4–6 round-trips (search → outline per hit → deps per hit → context lines), each a full round-trip. `get_context_pack` assembles the same material **server-side in one call** — less latency, less context churn, and a shape the agent can rely on. **All composition, no new engines**: every leg already exists and is cached; the only new logic is assembly + the pack-level budget. No schema change, no reindex.
+
+#### What one call returns
+
+`pack: { hits: [{ hit, outline, imports }], totalChars, omitted, maxChars }` — a structured object, not a flat results list:
+
+- **Search core (reused, never reimplemented).** `getContextPack` calls `searchIndex`/`searchAll` **exactly as today** — hybrid + rerank + MMR + the docstring legs + the shared query cache all apply unchanged.
+- **Per-hit enrichment, one pass.** The usual `signature` / `indexedAt` / `contextLines` enrichment, plus two new legs per hit:
+  - **`outline`** — the hit file's `get_file_outline` data (`chunker.ts → fileOutline`), capped to the hit's **neighborhood** (`sliceOutlineForHit`): the symbols overlapping the hit's chunk range, then up to 4 symbols below it ("what comes next in the file"), at most 12 entries. Symbols wholly above the chunk are dropped. Parsed **once per file per call** (hits can share a file); a missing/unreadable file drops its leg, never the hit.
+  - **`imports`** — the forward leg of `getDependencies` only (relative specifiers → `extractImports` → `resolveImports`, **resolved to indexed files only**, so there are no phantom edges), capped at 10 with `importsTruncated: true` when the cap bites. The reverse graph is deliberately **not** triggered (its first build parses every indexed file); external/unresolved specifiers are not pack legs.
+- **ONE budget for the whole pack.** `applyPackBudget` (`src/utils/budget.ts`, the pack-level variant of `applyCharBudget`) runs **once** over the assembled pack: hits are added whole in ranked order while the running total fits (`packEntrySize` = hit content + context lines + outline lines + import lines + framing), the **top hit is always kept** even when it alone exceeds the budget, and everything after the first non-fitting hit is counted in **`omitted`** — dropped whole, never truncated, never silently lost. The inner search deliberately runs **without** `maxChars`: a pack has a single budget, so the internal legs never double-bill. Default `maxChars` **6000**; a big `limit` with a small budget degrades gracefully (top-1 + an honest `omitted` count).
+
+#### Surfaces (the full 8 layers)
+
+Tool `get_context_pack` (`tool-defs.ts` — the single source consumed by both transports) → MCP handler (`mcp.ts`, returns the readable text **and** `structuredContent: { pack }` so JSON consumers get the object) → `POST /pack` (control API) → **stdio bridge `case "get_context_pack"`** (the hand-maintained, easy-to-miss layer) → CLI `cidx pack "<query>" [--project x] [--limit n] [--max-chars n] [--context n]` → `formatContextPack` (`src/server/format.ts`, shared by MCP + stdio + the CLI, which prints it rather than forking a second renderer).
+
+#### Tests
+
+New suites `tests/pack-budget.test.ts` (14) — `packEntrySize` / `outlineSize` / `importsSize` arithmetic, no-op cases, top-1-always-kept, exact boundary, running-budget arithmetic, ranked order, big-limit/small-budget degradation, legs counting against the same budget, all-or-nothing inclusion — and `tests/pack-composition.test.ts` (12) — the neighborhood slice (overlap + below-window + caps + file order + above-dropped) and the import leg against a real fixture (`fileOutline` reflects the hit's file; every resolved edge points at a file in the indexed set; cap + `truncated`). `bun run typecheck` clean; `bun test` **322/322** (871 expect).
+
+### Identifier-part BM25 tokenization (proposal S1)
+
+Ships proposal [S1 — Identifier-part BM25 tokenization](./proposals.md) (Impact: High · Effort: Medium): compound identifiers are split into their subparts into a new nullable **`id_terms`** column and BM25-searched as an extra hybrid-search leg, so a natural-language query like *"update user name"* can reach `getUserName` through text and not only through the vector leg. Reuses the 2.4.0 doc-leg pattern end to end (nullable column, explicit Arrow schema, `tableColumns` gating, per-leg try/catch FTS, legacy tables untouched). `bun run typecheck` clean, `bun test` **341/341** (865 expect). Version bump deferred to the central release commit.
+
+### Identifier tokenization (`src/core/idterms.ts`, new)
+
+Pure module (no I/O, no LanceDB), like `src/utils/text.ts` / `src/core/deadcode.ts`:
+
+- `splitIdentifier` breaks an identifier at camelCase / snake_case / kebab-case / dotted / `$` boundaries — Unicode-aware, acronym-run aware (`HTTPServer` → `HTTP` `Server`), digits stay attached to the word they follow (`md5Hash` → `md5 hash`, `sha256sum` stays one part).
+- `extractIdTerms(content)` scans the chunk with one combined identifier regex (the `countReferences` precedent) and emits, per distinct compound identifier, `<raw> <part> <part> …` lowercased and space-joined: `getUserName` → `getusername get user name`, `user_id` → `user_id user id`. Single-word tokens are skipped (the `content` leg already indexes them verbatim) and identifiers are deduplicated in first-seen order.
+- The string is **capped at 2000 chars** at a term boundary, so a minified/generated file cannot produce a pathological row; a lone oversized identifier is truncated.
+- `idTermsQueryParts` / `wantIdTermsLeg` tokenize a query the same way and gate the leg (see Search below).
+
+**Design deviation from the proposal:** identifiers are extracted with the regex pass, not tree-sitter identifier nodes. The chunker is untouched, no second parse per file, the shared-parser determinism surface (see the Lua precedent) stays out of scope, and character-fallback chunks (json/md/xml/rst) — which have no identifier nodes — are covered as well.
+
+### Schema (`src/services/db.ts`)
+
+One new **nullable** column on the fixed row schema: `id_terms` (string|null). No embedding, no vector index — BM25 only.
+
+- The **explicit Arrow schema** used at table creation (`arrowSchemaFor`) gains the column. It must be explicit for the same reason `doc` is: inference cannot type an all-null field, and `id_terms` is null on every chunk without a compound identifier.
+- `stripUnknownColumns` now strips any optional column the target table predates (`doc`/`doc_vector` from before 2.4.0, `id_terms` from before this change), so writes keep working on both legacy shapes. A full reindex recreates the table with the full schema.
+- `ensureFtsIndex` builds BM25 over `id_terms` alongside `content` and `doc`, in its **own try/catch** — a failure warns and never fails the index.
+- `searchTableText` keeps single-column calls: `@lancedb/lancedb` 0.30 searches only the first column of a `columns` list ("For now, only one column can be searched" — verified against 0.30.0), so the `id_terms` leg is a separate query, exactly like the `doc` leg. The doc note in `searchTableText` spells this out.
+
+### Indexing (`src/services/indexer.ts`)
+
+`indexFile` populates `id_terms` in the record loop, straight from the chunk text (`extractIdTerms(...) || null` — null when the chunk has no compound identifier). Pure CPU, **no embedding pass**: unlike `doc_vector`, this leg adds no Ollama calls.
+
+### Search (`src/core/index-manager.ts`)
+
+`mergeWithDocLegs` → `mergeWithExtraLegs` (same role, one more leg, plus the search `mode`):
+
+- **Gating.** The `id_terms` leg runs only (a) in `hybrid` mode, (b) when the table has the column (`tableColumns` — legacy tables never pay the query), and (c) when the query itself tokenizes into **≥ 2 parts** (`wantIdTermsLeg`) — a single-word query is already served by `content`, and skipping keeps the RRF rank pool undiluted for queries the leg cannot help. It is **not** tied to the `doc` opt-out: it is a code-side leg, not a docstring leg.
+- **Merging.** Anonymous: `id_terms` hits join the RRF merge without a marker field (no new output field, no tool-def change). `_docHit` still marks doc-contribution results only.
+- **Legacy invariant preserved byte-for-byte.** When no extra leg yields results, `combine` still returns the single non-empty list sliced with its native metric (vector legs keep `_distance` and no `_score`); nothing is "simplified" into always-RRF.
+
+### Surfaces & tests
+
+No new tool, CLI flag, or output field. New suite `tests/idterms.test.ts` (45 tests): the table-driven splitter (camelCase, snake_case, kebab-case, SCREAMING_SNAKE, dotted, acronym runs, digits, unicode), extraction (dedup, single-word skip, lowercasing, the 2000-char cap at a term boundary), the query gate, and — against a real temp LanceDB — the fresh-table column + FTS behavior, `ensureFtsIndex`'s three indexes, writes into a legacy table (stripped, not rejected), and the legacy table's byte-identical pre-S1 result shape (native BM25 `_score` well above the RRF maximum of 1/60, vector `_distance` with no `_score`, no `id_terms` on rows).
+
 ### `cidx doctor` — one read-only diagnostic pass (proposal O1)
 
 `bun run typecheck` clean, `bun test` **348/348** (917 expect). Ships the "O1 `cidx doctor`" design from [`status.md`](./status.md): the support checklist — is the daemon up, is Ollama reachable, is the embed model installed, is the table schema current, is the config valid — answered by one command. Every check reports `ok` / `warn` / `fail` with a one-line fix hint; **doctor never mutates anything**, and the exit code is scriptable (0 unless a check fails, warnings still 0).
 
-### CLI (`cidx doctor`)
+#### CLI (`cidx doctor`)
 
 Thin client, like the other subcommands: it evaluates the one check the daemon cannot report itself (daemon reachability + the **CLI ↔ daemon version match** → warn on mismatch), fetches `GET /doctor`, and renders every check with its fix hint. Exits 1 only when a check is `fail`.
 
-### Control API (`GET /doctor`) and the check registry (`src/core/doctor.ts`, new)
+#### Control API (`GET /doctor`) and the check registry (`src/core/doctor.ts`, new)
 
 The daemon owns the checks that need its state. `src/core/doctor.ts` is the check registry and is **pure where possible**: each check takes injected, already-measured state (plain data) and returns a verdict, so checks are unit-testable without a daemon, Ollama or LanceDB. `runDoctor(ports)` is the single state gatherer, wired in `control-api.ts` from `IndexManager` + `services/db` + `CONFIG`; `GET /doctor` returns the aggregated report (`status` = worst verdict, `checks[]`, `home`).
 
@@ -27,7 +89,7 @@ The daemon owns the checks that need its state. `src/core/doctor.ts` is the chec
 - **Config validity** — the global YAML parses, and each project's `.cidx.json` is validated by the **same `parseProjectConfig` the indexer uses** (shared, not duplicated). Unparseable/invalid files are `warn`s: cidx ignores them and runs on defaults, which is exactly what doctor makes visible.
 - **Disk usage** — total + per-table directory sizes of `~/.cidx/`, computed inline with a read-only fs walk (the O3 `stats` command is *not* part of this).
 
-### Tests
+#### Tests
 
 New suite `tests/doctor.test.ts` (52 tests): every check against synthetic state (missing table, legacy schema, missing FTS/ANN, chunk-count drift, orphan tables, broken YAML/JSON config, version mismatch), a healthy synthetic install that yields all-`ok`, and the collector `runDoctor` over fake ports (including a degraded table read). `measureDiskUsage` is exercised against a real temp directory.
 

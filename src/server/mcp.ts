@@ -16,6 +16,7 @@ import { TOOL_DEFINITIONS } from "./tool-defs";
 import {
   formatResults,
   formatBatchResults,
+  formatContextPack,
   formatOutline,
   formatReferences,
   formatOverview,
@@ -129,6 +130,34 @@ function buildServer(deps: McpDeps): Server {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text", text: `Search error: ${msg}` }], isError: true };
+      }
+    }
+
+    if (name === "get_context_pack") {
+      const args = rawArgs as {
+        query: string;
+        project?: string;
+        limit?: number;
+        maxChars?: number;
+        contextLines?: number;
+      };
+      if (!args.query) {
+        return { content: [{ type: "text", text: "'query' is required." }], isError: true };
+      }
+      const opts: { limit?: number; maxChars?: number; contextLines?: number } = {};
+      if (typeof args.limit === "number") opts.limit = args.limit;
+      if (typeof args.maxChars === "number") opts.maxChars = args.maxChars;
+      if (typeof args.contextLines === "number") opts.contextLines = args.contextLines;
+      try {
+        const pack = await deps.manager.getContextPack(args.query, args.project, opts);
+        // Readable text for the model + the structured object for JSON consumers.
+        return {
+          content: [{ type: "text", text: formatContextPack(pack) }],
+          structuredContent: { pack },
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text", text: `Context pack error: ${msg}` }], isError: true };
       }
     }
 

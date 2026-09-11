@@ -13,6 +13,13 @@ import { CONFIG } from "../config";
  * docstring/doc comment and its embedding. Null on chunks without a symbol
  * doc. Tables created before 2.4.0 lack these columns — `insertChunks` strips
  * the fields for those (legacy tables gain them on a full reindex).
+ *
+ * `id_terms` (identifier-part BM25 leg, S1 — see `src/core/idterms.ts`):
+ * compound identifiers of the chunk split into subparts, lowercased and
+ * space-joined, with the raw identifier kept first (`getUserName` →
+ * `getusername get user name`). Null when the chunk has none. No embedding —
+ * this column is only BM25-indexed. Tables created before it lack the column;
+ * `insertChunks` strips the field for those (a full reindex adds it).
  */
 export interface CodeRecord {
   id: string;
@@ -28,6 +35,8 @@ export interface CodeRecord {
   doc?: string | null;
   /** Embedding of `doc`, same model/dim as `vector` (null when no doc). */
   doc_vector?: number[] | null;
+  /** Compound identifiers of the chunk split into subparts (null when none). */
+  id_terms?: string | null;
   [key: string]: unknown; // for LanceDB Data compatibility
 }
 
@@ -147,8 +156,9 @@ export function buildWhere(filters?: SearchFilters): string | undefined {
  * are cleaned up. The table is created if it does not exist.
  *
  * LEGACY COMPATIBILITY: tables created before 2.4.0 have no `doc`/`doc_vector`
- * columns; adding records with unknown fields fails at the Arrow layer, so the
- * fields are stripped for those tables (search skips the doc legs there too).
+ * columns and tables created before the `id_terms` column have none of those;
+ * adding records with unknown fields fails at the Arrow layer, so the fields
+ * are stripped for those tables (search skips the corresponding legs there too).
  * A full reindex recreates the table with the full schema.
  *
  * Writes are serialized per table (against a concurrent createTable race).
@@ -173,9 +183,10 @@ export async function insertChunks(table: string, records: CodeRecord[]): Promis
 /**
  * Explicit Arrow schema for table creation, mirroring what inference produced
  * for the original columns (number → Float64, string → Utf8, vector →
- * FixedSizeList(dim, Float32)) plus the nullable docstring columns. Needed
- * because inference cannot type an all-null field — a `doc: null` row 0 would
- * fail createTable with "Failed to infer data type for field doc".
+ * FixedSizeList(dim, Float32)) plus the nullable docstring columns and the
+ * nullable identifier-terms column. Needed because inference cannot type an
+ * all-null field — a `doc: null` row 0 would fail createTable with "Failed to
+ * infer data type for field doc" (and `id_terms` is null just as often).
  * The vector dim comes from the batch's first non-null vector (always present —
  * the indexer skips chunks without a vector).
  */
@@ -185,7 +196,7 @@ function arrowSchemaFor(records: CodeRecord[]): lancedb.SchemaLike {
   // chunk carries no doc.
   const vecType = new FixedSizeList(dim, new Field("item", new Float32(), true));
   // All fields nullable — inference-created tables are nullable too, and
-  // doc / doc_vector legitimately hold nulls.
+  // doc / doc_vector / id_terms legitimately hold nulls.
   const f = (name: string, type: DataType): Field => new Field(name, type, true);
   return new Schema([
     f("id", new Utf8()),
@@ -199,20 +210,37 @@ function arrowSchemaFor(records: CodeRecord[]): lancedb.SchemaLike {
     f("endLine", new Float64()),
     f("doc", new Utf8()),
     f("doc_vector", vecType),
+    f("id_terms", new Utf8()),
   ]);
 }
 
 /**
- * Drops `doc` / `doc_vector` from records when the table predates those columns
- * (LanceDB rejects unknown fields with "Found field not in schema").
+ * Drops the optional columns a table predates (`doc`/`doc_vector` from before
+ * 2.4.0, `id_terms` from before the identifier-part leg — LanceDB rejects
+ * unknown fields with "Found field not in schema"). Tables carrying every
+ * current column get the records back untouched.
  */
 async function stripUnknownColumns(t: lancedb.Table, records: CodeRecord[]): Promise<CodeRecord[]> {
   const cols = new Set((await t.schema()).fields.map((f) => f.name));
-  if (cols.has("doc") && cols.has("doc_vector")) return records;
+  const dropDoc = !(cols.has("doc") && cols.has("doc_vector"));
+  const dropIdTerms = !cols.has("id_terms");
+  if (!dropDoc && !dropIdTerms) return records;
   return records.map((r) => {
-    const { doc, doc_vector, ...rest } = r;
-    void doc;
-    void doc_vector;
+    if (dropDoc && dropIdTerms) {
+      const { doc, doc_vector, id_terms, ...rest } = r;
+      void doc;
+      void doc_vector;
+      void id_terms;
+      return rest as CodeRecord;
+    }
+    if (dropDoc) {
+      const { doc, doc_vector, ...rest } = r;
+      void doc;
+      void doc_vector;
+      return rest as CodeRecord;
+    }
+    const { id_terms, ...rest } = r;
+    void id_terms;
     return rest as CodeRecord;
   });
 }
@@ -230,8 +258,8 @@ export async function deleteFileRecords(table: string, filePath: string): Promis
 
 /**
  * Column names of a table (empty set when the table does not exist). Used to
- * adapt to legacy tables that predate the `doc` / `doc_vector` columns and to
- * decide which search legs are available.
+ * adapt to legacy tables that predate the `doc` / `doc_vector` / `id_terms`
+ * columns and to decide which search legs are available.
  */
 export async function tableColumns(table: string): Promise<Set<string>> {
   const conn = getDB();
@@ -264,7 +292,11 @@ export async function searchTable(
 /**
  * Full-text (BM25) search; with an optional metadata filter.
  * Requires an FTS index on the searched columns (returns empty if absent).
- * `columns` defaults to `content`; the docstring leg passes `doc`.
+ * `columns` defaults to `content`; the docstring leg passes `doc` and the
+ * identifier-part leg passes `id_terms` — each as its OWN call, because
+ * `@lancedb/lancedb` 0.30 only searches the first column of the list ("For
+ * now, only one column can be searched", verified against 0.30.0: a two-column
+ * list silently ignores the rest).
  */
 export async function searchTableText(
   table: string,
@@ -442,9 +474,11 @@ export async function ensureVectorIndex(table: string, minRows: number, column =
 }
 
 /**
- * Builds full-text (BM25) indexes on the `content` column and — when the table
- * has the docstring column — on `doc` (both if absent). Required for the BM25
- * legs of hybrid search. Skipped if the table is empty.
+ * Builds full-text (BM25) indexes on the `content` column, on `doc` when the
+ * table has the docstring column, and on `id_terms` when the table has the
+ * identifier-terms column (each if absent). Required for the BM25 legs of
+ * hybrid search. The optional legs have their own try/catch — a failure warns
+ * and never fails the index. Skipped if the table is empty.
  *
  * @returns the number of indexes built.
  */
@@ -474,6 +508,18 @@ export async function ensureFtsIndex(table: string): Promise<number> {
     } catch (err) {
       // Never fail the whole job over the optional doc leg.
       console.error(`[db] failed to build FTS index on 'doc' for '${table}':`, err);
+    }
+  }
+  // The identifier-terms column holds compound identifiers split into subparts;
+  // BM25 over it is the natural-language → identifier leg (no vectors involved).
+  // Legacy tables without the column are skipped.
+  if ((await tableColumns(table)).has("id_terms") && !hasFtsOn("id_terms")) {
+    try {
+      await t.createIndex("id_terms", { config: lancedb.Index.fts() });
+      built++;
+    } catch (err) {
+      // Never fail the whole job over the optional identifier leg.
+      console.error(`[db] failed to build FTS index on 'id_terms' for '${table}':`, err);
     }
   }
   return built;
