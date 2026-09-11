@@ -8,6 +8,39 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ## Unreleased
 
+### `get_api_diff` — public API diff / breaking-change detector (proposal C2)
+
+`bun run typecheck` clean, `bun test` **453/453** (1222 expect). Ships proposal [C2 — Public API diff / breaking-change detector](./proposals.md): "did this release break anything public?" answered by comparing two git refs as **exported-symbol surfaces**. The base ref's surface is re-parsed from git (`git ls-tree -r` ∩ AST extensions → `git show <ref>:<path>` → the **same `chunkCode` recipe** the indexer uses) in bounded concurrency; the head defaults to the **working tree as currently indexed** (no reindex), or another ref to compare two historical points. Every symbol is classified `removed` / `signature-changed` / `visibility-narrowed` (all **breaking**) / `added` / `unchanged`, with the before → after signatures side by side on the breaking ones. No embedding, no LanceDB write, no schema change, nothing persisted; `notARepo`, `unknownRef` and `invalidRef` are **reported, not thrown**, and files that fail to read or parse at a ref are listed as `unparsed` instead of silently contributing nothing.
+
+#### The comparator (`src/core/apidiff.ts`, new)
+
+Pure module (no I/O in the comparator itself), like `deadcode.ts` / `commits.ts`:
+
+- `compareSurfaces(base, head)` joins the two surfaces on `(path, type, name)` and classifies: absent at head → `removed`; present but no longer exported → `visibility-narrowed`; declaration head changed and its parameter list differs → `signature-changed`; absent at base → `added`; otherwise `unchanged`. A rename is an honest `removed` **+** `added` pair — there is no rename inference, so nothing is silently paired up.
+- `paramList` / `paramsDiffer` implement the **per-language, deliberately approximate** signature comparison: arity, parameter order and *normalized* parameter names. Normalization cuts default values (`b = 2` → `b`) and type annotations after a single top-level `:` (C++'s `std::string` survives — `::` is a scope separator, not an annotation), strips `...`/`&`/`*`/`?`/`mut`/`const` decoration and Python's keyword-only `*` marker, drops Python's implicit `self`/`cls`, and picks the name token per language (Go's `name Type` keeps the **first** token, Java/C++'s `Type name` the **last**). A side with no comparable parameter list never counts as changed — no breaking claim without evidence.
+- `unchanged` symbols are always **counted**; they are only *listed* with `includeUnchanged` (`--all`), because on a real repo they drown the verdict. `exportedOnly` keeps everything that is exported on **at least one** side — so a `visibility-narrowed` symbol is still visible while a private-on-both-sides helper is filtered out.
+- `extractRefSurface` is the one impure helper here (git + tree-sitter, colocated so the engine and the tests share it): `git ls-tree -r --name-only -z` ∩ `EXT_TO_GRAMMAR` (the **scope guard** — only the 16 bundled grammars have a surface), then a `mapWithConcurrency` pass over `git show` → `fileSurface` — the embedding pipeline's concurrency shape, minus embeddings. `fileSurface` re-runs `chunkCode` so a symbol is named/typed/ranged identically on both sides, and confirms a symbol-less file with `rootNode.hasError` before calling it `parse-error` (a legitimately symbol-less file is just empty).
+
+#### Exportedness, factored out (`src/core/exported.ts`, new)
+
+`detectExported` moved verbatim out of `deadcode.ts` into its own module and is re-exported from there, so dead-code scoring and the API surface recover "exported" from chunk text with **one** per-language recipe (`export …`, `pub …`, Go capitalization, `public …`, GDScript `class_name`/`@export`). Existing dead-code tests are unchanged.
+
+#### Git (`src/services/git.ts`)
+
+`safeGitRef` (a whitelist — refnames, SHAs, `~`/`^` revisions; rejects anything option-, glob-, `object:path`- or reflog-shaped before it reaches an argv), `gitRefExists` (`rev-parse --verify --quiet`), `gitLsTreeFiles` (`ls-tree -r --name-only -z`, NUL-safe) and `gitShowFile` (`show <ref>:<path>`, literal argv, no shell). Every helper reports failure (`null`/`false`) rather than throwing, in the `searchGitLog` tradition.
+
+#### Engine (`src/core/index-manager.ts` → `getApiDiff`)
+
+Checks `isGitRepo` → `notARepo`, validates/resolves both refs → `invalidRef` / `unknownRef`, extracts the base (and head, when a ref was given) surface from git, projects the index rows for the default head (`surfaceFromIndexRows`), and compares. Report: `entries` (breaking first, capped by `limit`), `counts` (never capped, including `unchanged`), `breaking`, `unparsedFiles` (with the side that failed), `scannedFiles` + `truncated` (file cap *and* entry cap both flag it).
+
+#### Surfaces (the full 8 layers)
+
+Tool `get_api_diff` (`tool-defs.ts`) → MCP handler (`mcp.ts`) → `POST /apidiff` (control API) → **stdio bridge `case "get_api_diff"`** → CLI `cidx apidiff <project> <base> [--head x] [--limit n] [--max-files n] [--exported-only] [--all]` (alias `api-diff`) → `formatApiDiff` (`src/server/format.ts`, shared by MCP + stdio + CLI) → `IndexManager.getApiDiff`.
+
+#### Tests
+
+New suite `tests/apidiff.test.ts` (34 tests), no Ollama and a throw-away `CIDX_HOME`: the comparator (all five kinds, the breaking-first ordering, the honest rename pair, `exportedOnly`), the parameter normalizer table (TS/Rust/Go/Java/C++/Python — defaults, annotations, `::`, variadics, `self`, the no-comparable-list conservative case), the git helpers and **the scripted fixture repo across two tags `v1`→`v2`**: a removed, a renamed, a signature-changed, a default-value-only, a body-only, a visibility-narrowed, an added and two unchanged symbols are all classified correctly, `unparsed` is reported for the file that does not parse at `v1`, and the engine is exercised on both head sides (a ref, and the working tree through a real temp LanceDB table) plus `notARepo` / unknown-ref / invalid-ref. The tree-sitter interleaved-determinism suite stays green.
+
 ### `get_context_pack` — one call for "get me up to speed on X" (proposal A1)
 
 An agent doing "get me up to speed on X" burns 4–6 round-trips (search → outline per hit → deps per hit → context lines), each a full round-trip. `get_context_pack` assembles the same material **server-side in one call** — less latency, less context churn, and a shape the agent can rely on. **All composition, no new engines**: every leg already exists and is cached; the only new logic is assembly + the pack-level budget. No schema change, no reindex.

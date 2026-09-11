@@ -172,32 +172,7 @@ An agent's first query is often intent-shaped and under-specified ("auth check m
 
 **Impact: High · Effort: Medium-High**
 
-#### Motivation
-
-"Did this release break anything public?" is the changelog-generation / pre-merge-review question. The index holds the *current* API surface; git holds the *past* — and the chunker's AST extraction can run against both.
-
-#### Design
-
-- New tool `get_api_diff(project, base, head?)` — `base`/`head` are git refs (tags, SHAs, branch names; `head` defaults to the working tree, i.e. the current index).
-- **Current surface:** from the index directly (existing symbol rows; "exported" recovered per-language from chunk text exactly as `scoreDeadCode` already does — one recovery function factored out and shared).
-- **Historical surface:** `git show <ref>:<path>` (via the existing no-shell `execFile` pattern in `src/services/git.ts`) for the files known at that ref (`git ls-tree -r --name <ref>`, intersected with indexed extensions), then **parse with the same tree-sitter recipe** to extract exported symbols at that ref. No index mutation, no reindex, nothing persisted.
-- **Diff output, classified:** `removed` (breaking), `signature-changed` (breaking; compare parameter lists/arity per language), `visibility-narrowed` (breaking), `added` (non-breaking), `unchanged`. Breaking entries carry ref→ref signatures side by side. `notARepo`/unknown-ref reported, not thrown.
-- **Scope guard:** only AST languages (16 grammars); files that parse-fail at the old ref are reported as `unparsed` — no silent skips. Cap `scannedFiles`/`truncated`.
-
-#### Files touched
-
-`src/services/git.ts` (`git show` / `ls-tree` helpers), `src/core/apidiff.ts` (new, pure comparator), a factored-out `exportedness` helper shared with `deadcode.ts`, the 8-layer wiring, tests.
-
-#### Risks
-
-- **Effort is the extraction, not the diff**: historical parse needs a batched, bounded-concurrent pass over old-ref file contents (reuse the embedding pipeline's concurrency shape, minus embeddings).
-- Signature comparison is per-language and approximate (string-normalized parameter lists); document that structural (name-order/overload) differences need review.
-- Large repos: `git ls-tree` at the old ref can be big — bound by the indexed-extension intersection + `scannedFiles` cap.
-
-#### Acceptance
-
-- Fixture repo (scripted `git` history in a temp dir): removed/renamed/signature-changed/added symbols all classified correctly across two tags.
-- Non-repo project → `notARepo`; bad ref → reported, not thrown.
+> Shipped in Unreleased — see [changelog](./changelog.md) and [features](./features.md). As designed (git refs compared as exported-symbol surfaces, historical side re-parsed with the same tree-sitter recipe, `detectExported` factored out of `scoreDeadCode`, `unparsed`/`notARepo`/unknown-ref reported, AST-only scope guard, caps surfaced). Three small deviations: `unchanged` symbols are always **counted** but only *listed* with `includeUnchanged` (`--all`) so they don't drown the verdict; `exportedOnly` filters on "exported on **at least one** side" (a pure both-sides filter would hide a `visibility-narrowed` symbol); and a parse-failure check (`rootNode.hasError`) runs only for AST files that yield no symbols, so the common path stays single-parse.
 
 ---
 
