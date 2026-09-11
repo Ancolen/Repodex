@@ -35,6 +35,7 @@ import { applyCharBudget, applyPackBudget } from "../utils/budget";
 import { fileOutline, type OutlineEntry } from "../chunking/chunker";
 import { gitHeadPath, isGitRepo, searchGitLog } from "../services/git";
 import { rrfMerge } from "../utils/rrf";
+import { wantIdTermsLeg } from "./idterms";
 import { deriveSignature, matchIdentifierLines } from "../utils/text";
 import { extractImports } from "../chunking/imports";
 import { resolveImports, buildFileIndex, type ResolvedDep, type FileIndex } from "./resolve";
@@ -1574,22 +1575,22 @@ export class IndexManager {
     if (mode === "vector") {
       const vec = await searchTable(table, vector!, limit, where);
       if (!wantDoc) return vec;
-      return this.mergeWithDocLegs(table, query, vector, where, limit, [vec]);
+      return this.mergeWithExtraLegs(table, query, vector, where, limit, [vec], mode);
     }
     if (mode === "text") {
       const fts = await searchTableText(table, query, limit, where);
       if (!wantDoc) return fts;
-      return this.mergeWithDocLegs(table, query, vector, where, limit, [fts]);
+      return this.mergeWithExtraLegs(table, query, vector, where, limit, [fts], mode);
     }
 
-    // hybrid: vector + BM25 → RRF (plus the docstring legs, when present)
+    // hybrid: vector + BM25 → RRF (plus the docstring / identifier legs, when present)
     const pool = Math.max(limit * 3, 10);
     const [vec, fts] = await Promise.all([
       searchTable(table, vector!, pool, where),
       searchTableText(table, query, pool, where),
     ]);
     if (!wantDoc) return this.combine([vec, fts], limit);
-    return this.mergeWithDocLegs(table, query, vector, where, pool, [vec, fts]);
+    return this.mergeWithExtraLegs(table, query, vector, where, pool, [vec, fts], mode);
   }
 
   /** Merges non-empty result lists: a single list keeps its native metric, multiple lists go through RRF. */
@@ -1603,21 +1604,33 @@ export class IndexManager {
   }
 
   /**
-   * Merges the docstring retrieval legs with the base result lists via RRF.
-   * The legs are gated on the table actually having the columns (tables indexed
-   * before 2.4.0 predate `doc`/`doc_vector`): `doc_vector` ANN (needs a query
-   * vector) and BM25 over `doc`. Results that matched via a doc leg carry
-   * `_docHit: true` — useful for explaining why a code chunk answered an
-   * intent-style query ("how do we …?"). When no doc leg yields anything, the
-   * base lists keep their legacy semantics untouched.
+   * Merges the optional retrieval legs with the base result lists via RRF:
+   * the docstring legs (`doc_vector` ANN — needs a query vector — and BM25 over
+   * `doc`) and the identifier-part leg (BM25 over `id_terms`). All are gated on
+   * the table actually having the columns (tables indexed before 2.4.0 predate
+   * `doc`/`doc_vector`; tables indexed before the identifier leg predate
+   * `id_terms`), so legacy tables never pay the extra queries.
+   *
+   * The `id_terms` leg adds BM25 matches against compound identifiers split into
+   * their subparts (`getUserName` → "getusername get user name"), so an
+   * intent-shaped query ("update user name") can reach code through text, not
+   * only through the vector leg. It runs in `hybrid` mode only, and only when
+   * the query itself splits into ≥ 2 parts — a single-word query is already
+   * served by the `content` leg, and the RRF rank pool stays undiluted for the
+   * queries the leg cannot help. It merges **anonymously** (no marker field):
+   * only doc hits carry `_docHit: true`.
+   *
+   * When no extra leg yields anything, the base lists keep their legacy
+   * semantics untouched (`combine`'s native single-leg metrics).
    */
-  private async mergeWithDocLegs(
+  private async mergeWithExtraLegs(
     table: string,
     query: string,
     vector: number[] | null,
     where: string | undefined,
     fetchCount: number,
     base: SearchResult[][],
+    mode: string,
   ): Promise<SearchResult[]> {
     const cols = await tableColumns(table);
     const docIds = new Set<string>();
@@ -1630,6 +1643,10 @@ export class IndexManager {
     if (cols.has("doc")) {
       const hits = await searchTableText(table, query, fetchCount, where, ["doc"]);
       for (const h of hits) docIds.add(String(h.id));
+      if (hits.length > 0) lists.push(hits);
+    }
+    if (mode === "hybrid" && wantIdTermsLeg(query, cols.has("id_terms"))) {
+      const hits = await searchTableText(table, query, fetchCount, where, ["id_terms"]);
       if (hits.length > 0) lists.push(hits);
     }
     if (lists.length === base.length) return this.combine(base, fetchCount);

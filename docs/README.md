@@ -6,9 +6,9 @@ This folder is the **canonical, living documentation** for the project. The root
 
 ## At a glance
 
-- **Current version:** `2.3.0` (per-project config + cidx open)
-- **Status:** core architecture, hybrid search, multi-language chunking (incl. Godot), and all robustness/security fixes are **complete and stable**. See [`status.md`](./status.md) for the full done / not-done breakdown.
-- **Test suite:** `bun test` — 265/265 passing (713 expectations).
+- **Current version:** `2.4.0` (docstring / comment embedding + doc search legs)
+- **Status:** core architecture, hybrid search (now with rerank / MMR / docstring legs), multi-language chunking (incl. Godot), and all robustness/security fixes are **complete and stable**. See [`status.md`](./status.md) for the full done / not-done breakdown.
+- **Test suite:** `bun test` — 296/296 passing (790 expectations).
 
 ## Documentation map
 
@@ -17,6 +17,7 @@ This folder is the **canonical, living documentation** for the project. The root
 | [architecture.md](./architecture.md) | Design, runtime/toolchain, core decisions, data flow, directory layout, security model, test strategy | A structural / architectural decision changes |
 | [features.md](./features.md) | Capability catalog — what the tool *does* today, organized by area | A feature is added or changes behavior |
 | [status.md](./status.md) | ✅ **Done** / 🚧 **In progress** / 💡 **Proposed** / ⏸️ **Deferred** — the roadmap tracker | You finish something, start something, or decide on a proposal |
+| [proposals.md](./proposals.md) | Detailed designs for the 💡 Proposed items (motivation, mechanics, files touched, risks, acceptance) | You flesh out a proposal, or reality changes a proposal's design |
 | [changelog.md](./changelog.md) | Version-by-version implementation history (v1 → v4), newest first | You cut a release or finish a versioned milestone |
 | [cpu-only-ops.md](./cpu-only-ops.md) | Running Ollama CPU-only — operational notes | The CPU-mode workaround changes |
 
@@ -24,5 +25,5 @@ This folder is the **canonical, living documentation** for the project. The root
 
 - **Adding a new feature?** Update [`features.md`](./features.md) (what it does) **and** [`status.md`](./status.md) (move it from 💡 Proposed to ✅ Done), then add an entry to [`changelog.md`](./changelog.md).
 - **Making an architectural decision?** Record it in [`architecture.md`](./architecture.md).
-- **Brainstorming what to build next?** Add it to the 💡 Proposed section of [`status.md`](./status.md).
+- **Brainstorming what to build next?** Add it to the 💡 Proposed section of [`status.md`](./status.md); when it earns a real design, flesh it out in [`proposals.md`](./proposals.md) and reference its ID from `status.md`.
 - **AI-agent operating notes** (critical invariants, index freshness, strictness quirks) live in the root [`CLAUDE.md`](../CLAUDE.md) — that file is the contract Claude Code works against; the docs here describe the system itself.
