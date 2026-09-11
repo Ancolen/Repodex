@@ -52,7 +52,26 @@ import type { CallSymbol, CallChunk, CallGraphNode } from "./callgraph";
 export type { CallGraphNode } from "./callgraph";
 import type { CommitHit, CommitQueryOpts } from "./commits";
 export type { CommitHit, CommitQueryOpts } from "./commits";
+// ---- public API diff (proposal C2) ----
+export type {
+  ApiSymbol,
+  ApiChangeKind,
+  ApiDiffSide,
+  ApiDiffEntry,
+  ApiDiffCounts,
+} from "./apidiff";
 import { mapWithConcurrency } from "../utils/concurrency";
+// ---- public API diff (proposal C2) ----
+import {
+  compareSurfaces,
+  countDiff,
+  extractRefSurface,
+  surfaceFromIndexRows,
+  type ApiSymbol,
+  type ApiDiffCounts,
+  type ApiDiffEntry,
+} from "./apidiff";
+import { gitRefExists, safeGitRef } from "../services/git";
 
 const INDEX_JOB = "index";
 
@@ -275,6 +294,38 @@ export interface CommitSearchResult {
   truncated: boolean;
   /** The project directory is not a git repo — no history to search. */
   notARepo: boolean;
+}
+
+// ------------------------------------------------------ API diff (proposal C2)
+
+/** Label for the default head side of an API diff: the index, i.e. the working tree. */
+export const WORKING_TREE = "(working tree)";
+
+/** Result of `get_api_diff`: the classified public-API difference between two refs. */
+export interface ApiDiffResult {
+  project: string;
+  /** The ref the diff starts from (the "before" side). */
+  base: string;
+  /** The ref compared to; `WORKING_TREE` when the index supplied the head side. */
+  head: string;
+  /** True when the head side came from the index (no `head` ref was given). */
+  headIsIndex: boolean;
+  /** Classified symbols, breaking kinds first, capped by `limit`. */
+  entries: ApiDiffEntry[];
+  /** Per-kind totals over the WHOLE diff (never capped). */
+  counts: ApiDiffCounts & { breaking: number };
+  /** Files at a ref that could not be read or parsed — reported, never skipped. */
+  unparsedFiles: { path: string; reason: string; side: "base" | "head" }[];
+  /** AST-language files scanned on the historical side(s). */
+  scannedFiles: number;
+  /** A cap was hit (files or entries) — the diff is partial. */
+  truncated: boolean;
+  /** The project directory is not a git repo — no refs to compare. */
+  notARepo?: boolean;
+  /** The named ref doesn't resolve in the project's repo. */
+  unknownRef?: "base" | "head";
+  /** The named ref can't safely be passed to git (reported instead of thrown). */
+  invalidRef?: "base" | "head";
 }
 
 /** Converts a project name to a safe LanceDB table name. */
@@ -1800,6 +1851,124 @@ export class IndexManager {
       CONFIG.MMR_LAMBDA,
     );
     return indices.map((i) => pool[i]!);
+  }
+
+  // ---------------------------------------------------- API diff (proposal C2)
+
+  /**
+   * Public API diff between two git refs ("did this release break anything
+   * public?"). The BASE surface is re-parsed from git (`git ls-tree` →
+   * `git show` → the same `chunkCode` recipe, in bounded concurrency — see
+   * `extractRefSurface`); the HEAD surface comes from the index (the working
+   * tree) unless an explicit `head` ref is given, in which case it is extracted
+   * from that ref the same way. Read-only: no index mutation, no reindex,
+   * nothing persisted, no embedding.
+   *
+   * `notARepo` / `unknownRef` / `invalidRef` are REPORTED, not thrown; files
+   * that fail to read or parse at a ref are listed in `unparsedFiles` instead of
+   * being skipped silently; `scannedFiles` + `truncated` surface the coverage of
+   * the historical pass.
+   */
+  async getApiDiff(
+    project: string,
+    base: string,
+    opts?: {
+      /** The head ref (tag / SHA / branch). Defaults to the working tree = the index. */
+      head?: string;
+      /** Cap on returned entries (default 200); `counts` always covers everything. */
+      limit?: number;
+      /** Cap on files parsed per historical side (default `API_DIFF_MAX_FILES`). */
+      maxFiles?: number;
+      /** Keep only symbols that are exported on at least one side (default false). */
+      exportedOnly?: boolean;
+      /** List `unchanged` symbols too (default false — they are always counted). */
+      includeUnchanged?: boolean;
+    },
+  ): Promise<ApiDiffResult> {
+    const rec = this.registry.getIndex(project);
+    if (!rec) throw new Error(`Index not found: ${project}`);
+    const limit = opts?.limit ?? 200;
+    const head = opts?.head ?? WORKING_TREE;
+
+    const result: ApiDiffResult = {
+      project: rec.name,
+      base,
+      head,
+      headIsIndex: !opts?.head,
+      entries: [],
+      counts: { removed: 0, signatureChanged: 0, visibilityNarrowed: 0, added: 0, unchanged: 0, breaking: 0 },
+      unparsedFiles: [],
+      scannedFiles: 0,
+      truncated: false,
+    };
+
+    if (!(await isGitRepo(rec.path))) {
+      result.notARepo = true;
+      return result;
+    }
+    // Refs are validated before they reach a git argv (and reported, not thrown).
+    if (!safeGitRef(base)) {
+      result.invalidRef = "base";
+      return result;
+    }
+    if (opts?.head !== undefined && !safeGitRef(opts.head)) {
+      result.invalidRef = "head";
+      return result;
+    }
+    if (!(await gitRefExists(rec.path, base))) {
+      result.unknownRef = "base";
+      return result;
+    }
+    if (opts?.head !== undefined && !(await gitRefExists(rec.path, opts.head))) {
+      result.unknownRef = "head";
+      return result;
+    }
+
+    // `exactOptionalPropertyTypes`: only carry `maxFiles` when the caller set it.
+    const refOpts = opts?.maxFiles !== undefined ? { maxFiles: opts.maxFiles } : {};
+    const baseSurface = await extractRefSurface(rec.path, base, refOpts);
+    if (!baseSurface) {
+      result.unknownRef = "base";
+      return result;
+    }
+    result.scannedFiles = baseSurface.scannedFiles;
+    result.truncated = baseSurface.truncated;
+    result.unparsedFiles = baseSurface.unparsed.map((u) => ({ ...u, side: "base" as const }));
+
+    let headSymbols: ApiSymbol[];
+    if (opts?.head !== undefined) {
+      const headSurface = await extractRefSurface(rec.path, opts.head, refOpts);
+      if (!headSurface) {
+        result.unknownRef = "head";
+        return result;
+      }
+      headSymbols = headSurface.symbols;
+      result.truncated = result.truncated || headSurface.truncated;
+      result.unparsedFiles.push(...headSurface.unparsed.map((u) => ({ ...u, side: "head" as const })));
+      result.scannedFiles += headSurface.scannedFiles;
+    } else {
+      headSymbols = await this.indexSurface(rec);
+    }
+
+    const entries = compareSurfaces(baseSurface.symbols, headSymbols);
+    result.counts = countDiff(entries);
+    const visible = opts?.includeUnchanged === true ? entries : entries.filter((e) => e.kind !== "unchanged");
+    result.entries = (opts?.exportedOnly === true
+      ? visible.filter((e) => e.base?.exported === true || e.head?.exported === true)
+      : visible
+    ).slice(0, limit);
+    if (result.entries.length < visible.length) result.truncated = true;
+    return result;
+  }
+
+  /**
+   * The project's CURRENT surface, straight from the index: symbol rows only
+   * (the indexer's character-fallback corpora carry no symbols), exportedness
+   * recovered from the chunk text with the shared `detectExported` recipe. No
+   * re-parse, no Ollama — the index *is* the working tree's surface.
+   */
+  private async indexSurface(rec: IndexRecord): Promise<ApiSymbol[]> {
+    return surfaceFromIndexRows(rec.path, await tableSymbolsWithContent(rec.tableName));
   }
 
   /** Is the index compatible with the active embedding model? (compatible if no model recorded.) */

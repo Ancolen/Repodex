@@ -24,6 +24,7 @@ import {
   formatDeadCode,
   formatCallGraph,
   formatCommits,
+  formatApiDiff,
 } from "./format";
 import type { JobQueue } from "../core/job-queue";
 import type { IndexManager } from "../core/index-manager";
@@ -426,6 +427,44 @@ function buildServer(deps: McpDeps): Server {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text", text: `Commit search error: ${msg}` }], isError: true };
+      }
+    }
+
+    // ---- public API diff (proposal C2) ----
+    if (name === "get_api_diff") {
+      const args = rawArgs as {
+        project: string;
+        base: string;
+        head?: string;
+        limit?: number;
+        maxFiles?: number;
+        exportedOnly?: boolean;
+        includeUnchanged?: boolean;
+      };
+      if (!args.project || !args.base) {
+        return {
+          content: [{ type: "text", text: "'project' and 'base' are required." }],
+          isError: true,
+        };
+      }
+      const opts: {
+        head?: string;
+        limit?: number;
+        maxFiles?: number;
+        exportedOnly?: boolean;
+        includeUnchanged?: boolean;
+      } = {};
+      if (typeof args.head === "string") opts.head = args.head;
+      if (typeof args.limit === "number") opts.limit = args.limit;
+      if (typeof args.maxFiles === "number") opts.maxFiles = args.maxFiles;
+      if (typeof args.exportedOnly === "boolean") opts.exportedOnly = args.exportedOnly;
+      if (typeof args.includeUnchanged === "boolean") opts.includeUnchanged = args.includeUnchanged;
+      try {
+        const diff = await deps.manager.getApiDiff(args.project, args.base, opts);
+        return { content: [{ type: "text", text: formatApiDiff(diff) }] };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text", text: `API diff error: ${msg}` }], isError: true };
       }
     }
 

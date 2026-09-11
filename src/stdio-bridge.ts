@@ -35,6 +35,7 @@ import {
   formatDeadCode,
   formatCallGraph,
   formatCommits,
+  formatApiDiff,
 } from "./server/format";
 
 const BASE = `http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}`;
@@ -289,6 +290,19 @@ async function main(): Promise<void> {
             limit: args.limit,
           });
           return ok(formatCommits(cs));
+        }
+        // ---- public API diff (proposal C2) ----
+        case "get_api_diff": {
+          const diff = await api<Parameters<typeof formatApiDiff>[0]>("POST", "/apidiff", {
+            project: args.project,
+            base: args.base,
+            head: args.head,
+            limit: args.limit,
+            maxFiles: args.maxFiles,
+            exportedOnly: args.exportedOnly,
+            includeUnchanged: args.includeUnchanged,
+          });
+          return ok(formatApiDiff(diff));
         }
         default:
           return fail(`Unknown tool: ${name}`);

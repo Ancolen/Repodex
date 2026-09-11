@@ -6,7 +6,7 @@ import { CONFIG, RESOLVED, CONFIG_SOURCE, resolveConfigPath } from "./config";
 import { daemonCommand, bridgeCommand } from "./runtime";
 import { daemonCheck, type DoctorCheck, type DoctorReport } from "./core/doctor";
 import { resolveEditor, buildEditorArgs } from "./utils/editor";
-import { formatContextPack } from "./server/format";
+import { formatContextPack, formatApiDiff } from "./server/format";
 
 const BASE = `http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}`;
 
@@ -713,6 +713,35 @@ function printDeadCode(r: any): void {
   }
 }
 
+// ---------------------------------------------------- API diff (proposal C2)
+
+/** `cidx apidiff <project> <base> [--head x] [--limit n] [--max-files n] [--exported-only] [--all]` */
+async function cmdApiDiff(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
+  await requireDaemon();
+  const project = positionals[0];
+  const base = positionals[1];
+  if (!project || !base) {
+    console.error("Usage: cidx apidiff <project> <base> [--head x] [--limit n] [--max-files n] [--exported-only] [--all]");
+    process.exit(1);
+  }
+  const body: {
+    project: string;
+    base: string;
+    head?: string;
+    limit?: number;
+    maxFiles?: number;
+    exportedOnly?: boolean;
+    includeUnchanged?: boolean;
+  } = { project, base };
+  if (typeof flags.head === "string") body.head = flags.head;
+  if (typeof flags.limit === "string") body.limit = Number(flags.limit);
+  if (typeof flags["max-files"] === "string") body.maxFiles = Number(flags["max-files"]);
+  if (flags["exported-only"] === true) body.exportedOnly = true;
+  if (flags.all === true) body.includeUnchanged = true;
+  const r = await api<any>("POST", "/apidiff", body);
+  console.log(formatApiDiff(r));
+}
+
 async function cmdMcp(): Promise<void> {
   // Starts the stdio bridge, taking over stdio (MCP client ↔ bridge).
   const proc = Bun.spawn({
@@ -1015,6 +1044,30 @@ const COMMANDS: Record<string, CmdDoc> = {
       "cidx deadcode api --type function",
     ],
   },
+  apidiff: {
+    usage: "apidiff <project> <base> [flags]",
+    summary: "Public-API diff between two git refs: removed / signature-changed / added symbols.",
+    aliases: ["api-diff"],
+    flags: [
+      ["--head <ref>", "The 'after' ref (default: the working tree as currently indexed)."],
+      ["--limit <n>", "Maximum diff entries (default: 200)."],
+      ["--max-files <n>", "Cap on files parsed per historical side (default: 1000)."],
+      ["--exported-only", "Keep only symbols that look exported on at least one side."],
+      ["--all", "Also list the unchanged symbols (they are always counted)."],
+    ],
+    details: [
+      "The base ref's surface is re-parsed from git (ls-tree + show + the same tree-sitter recipe);",
+      "the head defaults to the current index, so no reindex is needed.",
+      "Removed / signature-changed / visibility-narrowed entries are BREAKING and carry the",
+      "before → after signatures. Parameter comparison is approximate (arity + parameter names).",
+      "Files that fail to parse at the old ref are listed as 'unparsed' — never skipped silently.",
+    ],
+    examples: [
+      "cidx apidiff api v1.2.0",
+      "cidx apidiff api v1.2.0 --head v1.3.0 --exported-only",
+      "cidx apidiff api main~5 --limit 50",
+    ],
+  },
   doctor: {
     usage: "doctor",
     summary: "One read-only diagnostic pass: daemon, Ollama, models, tables, schema, config, disk.",
@@ -1058,7 +1111,7 @@ const COMMANDS: Record<string, CmdDoc> = {
 
 const HELP_ORDER = [
   "start", "index", "list", "status", "reindex", "sync", "remove",
-  "search", "open", "batch", "pack", "find", "refs", "overview", "deps", "deadcode", "callgraph", "commits", "doctor", "config", "mcp", "stop", "version", "help",
+  "search", "open", "batch", "pack", "find", "refs", "overview", "deps", "deadcode", "callgraph", "commits", "apidiff", "doctor", "config", "mcp", "stop", "version", "help",
 ];
 
 /** Detailed help for a single command. */
@@ -1072,6 +1125,7 @@ function printCommandHelp(name: string): void {
     : name === "dead-code" ? "deadcode"
     : name === "call-graph" ? "callgraph"
     : name === "git-log" || name === "gitlog" ? "commits"
+    : name === "api-diff" ? "apidiff"
     : name;
   const doc = COMMANDS[key];
   if (!doc) {
@@ -1139,6 +1193,7 @@ function printHelp(): void {
   lines.push('  cidx callgraph handleRequest     # caller/callee trees for a function');
   lines.push('  cidx commits api "login flow"     # git-history / commit-message search');
   lines.push('  cidx deadcode api --min-confidence 70  # potential dead code');
+  lines.push('  cidx apidiff api v1.2.0           # public-API diff between two git refs');
   lines.push('  cidx sync api          # fast incremental update');
   lines.push("");
   lines.push("CONNECTING TO AN AI AGENT (MCP)");
@@ -1148,7 +1203,7 @@ function printHelp(): void {
   lines.push("  Stdio-expecting clients (Claude Desktop): cidx mcp");
   lines.push("  Tools: search_codebase, search_codebase_batch, find_symbol, find_references,");
   lines.push("            get_file_outline, get_dependencies, get_call_graph, find_dead_code, search_commits,");
-  lines.push("            get_repo_overview, list_indexes, get_index_status, index_project");
+  lines.push("            get_api_diff, get_repo_overview, list_indexes, get_index_status, index_project");
   lines.push("");
   lines.push("CONFIGURATION");
   lines.push(`  Active file: ${CONFIG_SOURCE ?? "(none — defaults)"}`);
@@ -1293,6 +1348,7 @@ async function main(): Promise<void> {
     case "deadcode": case "dead-code": await cmdDeadcode(positionals, flags); break;
     case "callgraph": case "call-graph": await cmdCallGraph(positionals, flags); break;
     case "commits": case "git-log": case "gitlog": await cmdCommits(positionals, flags); break;
+    case "apidiff": case "api-diff": await cmdApiDiff(positionals, flags); break;
     case "doctor": await cmdDoctor(); break;
     case "config": await cmdConfig(positionals); break;
     case "mcp": case "stdio": await cmdMcp(); break;

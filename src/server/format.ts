@@ -10,6 +10,9 @@ import type {
   CommitSearchResult,
   CommitHit,
   ContextPack,
+  ApiDiffResult,
+  ApiDiffSide,
+  ApiChangeKind,
 } from "../core/index-manager";
 import type { OutlineEntry } from "../chunking/chunker";
 
@@ -340,6 +343,80 @@ export function formatCommits(r: CommitSearchResult): string {
   }
   if (r.truncated) {
     lines.push("\n⚠ commit limit hit — older matches exist; pass a higher --limit for more.");
+  }
+  return lines.join("\n");
+}
+
+// ------------------------------------------------------ API diff (proposal C2)
+
+/** One-line location + signature of a diff side. */
+function apiDiffSideLine(side: ApiDiffSide | undefined, label: string): string | null {
+  if (!side) return null;
+  const loc = side.startLine ? `  (L${side.startLine}-${side.endLine})` : "";
+  const vis = side.exported ? "" : "  [not exported]";
+  const sig = side.signature ? `  ${side.signature}` : "";
+  return `${label}${loc}${vis}${sig}`;
+}
+
+const API_DIFF_SECTIONS: { kind: ApiChangeKind; title: string; breaking: boolean }[] = [
+  { kind: "removed", title: "removed", breaking: true },
+  { kind: "signature-changed", title: "signature-changed", breaking: true },
+  { kind: "visibility-narrowed", title: "visibility-narrowed", breaking: true },
+  { kind: "added", title: "added", breaking: false },
+  { kind: "unchanged", title: "unchanged", breaking: false },
+];
+
+/** Converts an API-diff result to text, sectioned breaking-kinds-first. */
+export function formatApiDiff(r: ApiDiffResult): string {
+  const lines: string[] = [];
+  lines.push(`API diff — project: ${r.project} · ${r.base} → ${r.head}${r.headIsIndex ? " (index)" : ""}`);
+  if (r.notARepo) {
+    lines.push("\n(The project directory is not a git repository — there is no ref to diff against.)");
+    return lines.join("\n");
+  }
+  if (r.unknownRef) {
+    lines.push(`\nUnknown ref: '${r.unknownRef === "base" ? r.base : r.head}' does not resolve in this repo.`);
+    return lines.join("\n");
+  }
+  if (r.invalidRef) {
+    lines.push(
+      `\nInvalid ref: '${r.invalidRef === "base" ? r.base : r.head}' is not a ref/revision git can be given.`,
+    );
+    return lines.join("\n");
+  }
+  const c = r.counts;
+  lines.push(
+    `${c.breaking} breaking · removed ${c.removed} · signature-changed ${c.signatureChanged} · ` +
+      `visibility-narrowed ${c.visibilityNarrowed} · added ${c.added} · unchanged ${c.unchanged}` +
+      `  (scanned ${r.scannedFiles} file(s))`,
+  );
+  if (r.truncated) {
+    lines.push("⚠ a cap was hit — the diff is partial; raise --max-files / --limit for full coverage.");
+  }
+  if (r.unparsedFiles.length > 0) {
+    lines.push(`\nUnparsed at a ref (${r.unparsedFiles.length}) — these files contribute NO symbols:`);
+    for (const u of r.unparsedFiles.slice(0, 20)) {
+      lines.push(`  ${u.path}  [${u.reason}, ${u.side}]`);
+    }
+    if (r.unparsedFiles.length > 20) lines.push(`  … and ${r.unparsedFiles.length - 20} more`);
+  }
+  if (r.entries.length === 0) {
+    lines.push("\nNo public-API difference (unchanged symbols are counted above).");
+    return lines.join("\n");
+  }
+  for (const sec of API_DIFF_SECTIONS) {
+    const group = r.entries.filter((e) => e.kind === sec.kind);
+    if (group.length === 0) continue;
+    lines.push(`\n### ${sec.title} (${group.length})${sec.breaking ? " — BREAKING" : ""}`);
+    for (const e of group) {
+      const vis = e.base?.exported || e.head?.exported ? "" : "  [not exported]";
+      lines.push(`  ${e.symbolType}  ${e.symbolName}${vis}  [${e.language}]`);
+      lines.push(`    ${e.relativePath}`);
+      const was = apiDiffSideLine(e.base, "was:  ");
+      const now = apiDiffSideLine(e.head, "now:  ");
+      if (was) lines.push(`    ${was}`);
+      if (now) lines.push(`    ${now}`);
+    }
   }
   return lines.join("\n");
 }

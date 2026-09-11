@@ -394,4 +394,54 @@ export const TOOL_DEFINITIONS: Tool[] = [
       required: ["query"],
     },
   },
+  {
+    name: "get_api_diff",
+    description:
+      "PUBLIC API DIFF between two git refs of an indexed project — the 'did this release break " +
+      "anything public?' / pre-merge-review question. Both sides are compared as exported-symbol " +
+      "surfaces: the base ref is re-parsed from git (git ls-tree + git show + the same tree-sitter " +
+      "recipe as indexing), the head defaults to the WORKING TREE as currently indexed (or pass " +
+      "another ref). Every symbol is classified 'removed' / 'signature-changed' / 'visibility-narrowed' " +
+      "(all BREAKING), 'added' or 'unchanged', with the before/after signatures side by side on the " +
+      "breaking ones. No indexing, no embedding, no reindex; the project must be a git repo " +
+      "('(notARepo)' otherwise) and 'base' must resolve ('unknownRef' otherwise). Parameter comparison " +
+      "is per-language and approximate (arity + parameter names, string-normalized) — treat it as a " +
+      "review list, not proof; files that fail to parse at the old ref are listed as 'unparsed'.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "The indexed project to diff (required)." },
+        base: {
+          type: "string",
+          description: "The 'before' git ref: a tag, a SHA, or a branch name (e.g. 'v1.2.0', 'main~3').",
+        },
+        head: {
+          type: "string",
+          description:
+            "The 'after' git ref (optional). Defaults to the working tree as currently indexed — pass a " +
+            "ref to compare two historical points instead.",
+        },
+        limit: { type: "number", description: "Maximum number of diff entries returned (default: 200)." },
+        maxFiles: {
+          type: "number",
+          description:
+            "Cap on how many files are parsed per historical side (default: 1000). Exceeding it sets " +
+            "'truncated' — the diff is then partial.",
+        },
+        exportedOnly: {
+          type: "boolean",
+          description:
+            "Keep only symbols that look exported on at least one side (default: false — every symbol is " +
+            "reported). Useful in languages where exportedness is recoverable (JS/TS, Rust, Go, Java, C#).",
+        },
+        includeUnchanged: {
+          type: "boolean",
+          description:
+            "Also list the 'unchanged' symbols (default: false — they are always included in the counts, " +
+            "so you never miss them).",
+        },
+      },
+      required: ["project", "base"],
+    },
+  },
 ];

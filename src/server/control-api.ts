@@ -520,6 +520,42 @@ export function startControlApi(
     }
   });
 
+  // ---------------------------------------------------- API diff (proposal C2)
+
+  /** Public-API diff between two git refs of an indexed project (`cidx apidiff`). */
+  app.post("/apidiff", async (req, res) => {
+    const { project, base, head, limit, maxFiles, exportedOnly, includeUnchanged } = (req.body ?? {}) as {
+      project?: string;
+      base?: string;
+      head?: string;
+      limit?: number;
+      maxFiles?: number;
+      exportedOnly?: boolean;
+      includeUnchanged?: boolean;
+    };
+    if (!project || !base) {
+      res.status(400).json({ error: "'project' and 'base' are required." });
+      return;
+    }
+    const opts: {
+      head?: string;
+      limit?: number;
+      maxFiles?: number;
+      exportedOnly?: boolean;
+      includeUnchanged?: boolean;
+    } = {};
+    if (typeof head === "string") opts.head = head;
+    if (typeof limit === "number") opts.limit = limit;
+    if (typeof maxFiles === "number") opts.maxFiles = maxFiles;
+    if (typeof exportedOnly === "boolean") opts.exportedOnly = exportedOnly;
+    if (typeof includeUnchanged === "boolean") opts.includeUnchanged = includeUnchanged;
+    try {
+      res.json(await deps.manager.getApiDiff(project, base, opts));
+    } catch (err) {
+      res.status(404).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   app.post("/shutdown", (_req, res) => {
     res.json({ stopping: true });
     setTimeout(() => void deps.onShutdown(), 50);
