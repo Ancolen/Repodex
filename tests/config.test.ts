@@ -112,6 +112,9 @@ describe("config — legacy ~/.mcp-indexer → ~/.cidx migration", () => {
   async function runApp(env: Record<string, string>): Promise<{ CONFIG: any; CONFIG_SOURCE: string | null; stderr: string }> {
     const full: Record<string, string> = { ...process.env } as Record<string, string>;
     delete full.CIDX_CONFIG; // migration must not be gated for this scenario
+    // The sandbox is defined by $HOME; an inherited $CIDX_HOME (the `[test]`
+    // preload sets one) would take priority over it and skip the migration.
+    delete full.CIDX_HOME;
     for (const [k, v] of Object.entries(env)) full[k] = v;
     const proc = Bun.spawn(["bun", "run", FIXTURE], {
       env: full,

@@ -5,10 +5,7 @@
  * The LanceDB-side legacy invariant (a table created without `id_terms` runs the
  * exact legacy search paths) is covered at the bottom via a real temp table.
  */
-import { test, expect, describe, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { test, expect, describe, beforeAll } from "bun:test";
 import {
   MAX_ID_TERMS_CHARS,
   splitIdentifier,
@@ -16,6 +13,8 @@ import {
   idTermsQueryParts,
   wantIdTermsLeg,
 } from "../src/core/idterms";
+import { CONFIG } from "../src/config";
+import { isolatedHome } from "./helpers/isolated-cidx-home";
 import type { CodeRecord } from "../src/services/db";
 
 describe("splitIdentifier — table-driven", () => {
@@ -156,20 +155,17 @@ describe("idTermsQueryParts / leg gate", () => {
 // ---------------------------------------------------------------------------
 
 describe("id_terms column + legacy tables (LanceDB)", () => {
-  let home: string;
-  // Config is resolved at import time → set CIDX_HOME before loading the module.
+  // The data root is pinned process-wide by the `[test]` preload
+  // (tests/helpers/isolated-cidx-home.ts): CONFIG resolves at import time and
+  // `bun test` shares one module registry, so setting `CIDX_HOME` here would be
+  // too late whenever another file imported the module first.
   let db: typeof import("../src/services/db");
 
   beforeAll(async () => {
-    home = mkdtempSync(join(tmpdir(), "cidx-idterms-"));
-    process.env.CIDX_HOME = home;
     db = await import("../src/services/db");
+    // The tables below must land in the throw-away root, never `~/.cidx`.
+    expect(CONFIG.DB_DIR.startsWith(isolatedHome)).toBe(true);
     await db.initDB();
-  });
-
-  afterAll(() => {
-    rmSync(home, { recursive: true, force: true });
-    delete process.env.CIDX_HOME;
   });
 
   const DOC = "Returns the user name for a session.";

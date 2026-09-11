@@ -8,6 +8,8 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ## Unreleased
 
+- **fix(tests):** the whole suite now runs on a throw-away data root — a `[test]` preload (`bunfig.toml` → `tests/helpers/isolated-cidx-home.ts`) pins `CIDX_HOME` before any test module is imported, so the LanceDB-writing suites (`apidiff`, `idterms`) can no longer lose the "who imported `CONFIG` first" race across files and create stray tables (`idx_apidiff_fixture`, …) in the user's real `~/.cidx/db`.
+
 ### `get_api_diff` — public API diff / breaking-change detector (proposal C2)
 
 `bun run typecheck` clean, `bun test` **489/489** (1347 expect). Ships proposal [C2 — Public API diff / breaking-change detector](./proposals.md): "did this release break anything public?" answered by comparing two git refs as **exported-symbol surfaces**. The base ref's surface is re-parsed from git (`git ls-tree -r` ∩ AST extensions → `git show <ref>:<path>` → the **same `chunkCode` recipe** the indexer uses) in bounded concurrency; the head defaults to the **working tree as currently indexed** (no reindex), or another ref to compare two historical points. Every symbol is classified `removed` / `signature-changed` / `visibility-narrowed` (all **breaking**) / `added` / `unchanged`, with the before → after signatures side by side on the breaking ones. No embedding, no LanceDB write, no schema change, nothing persisted; `notARepo`, `unknownRef` and `invalidRef` are **reported, not thrown**, and files that fail to read or parse at a ref are listed as `unparsed` instead of silently contributing nothing.

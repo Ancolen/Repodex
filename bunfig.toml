@@ -1,0 +1,8 @@
+# Bun configuration. Only the test runner is customized; `bun run` is untouched.
+
+[test]
+# Pin $CIDX_HOME to a throw-away directory before any test module is imported
+# (see tests/helpers/isolated-cidx-home.ts): CONFIG resolves the data root at
+# import time and `bun test` shares one module registry across files, so
+# without this the first file to import it decides where test tables land.
+preload = ["./tests/helpers/isolated-cidx-home.ts"]

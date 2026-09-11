@@ -14,9 +14,13 @@
  * The historical side is REALLY parsed — `git show` → the same `chunkCode` recipe
  * the indexer uses — so the fixture proves the end-to-end extraction, not a mock.
  *
- * The engine tests touch LanceDB, and CONFIG resolves `CIDX_HOME` at import time:
- * the env var is set BEFORE the first dynamic import, so the whole suite runs on a
- * throw-away data root (the same pattern `tests/idterms.test.ts` uses).
+ * The engine tests touch LanceDB, and `CONFIG` resolves the data root at import
+ * time while `bun test` shares one module registry across files — so a per-file
+ * `process.env.CIDX_HOME` only holds if this file is the first to import it
+ * (it wasn't: the fixture table leaked into the real `~/.cidx/db`). The whole
+ * run therefore sits on the throw-away root pinned by the `[test]` preload
+ * (`tests/helpers/isolated-cidx-home.ts`); the fixture's sqlite registry lives
+ * in that same directory, and the preload removes it on exit.
  */
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { spawnSync } from "node:child_process";
@@ -24,12 +28,11 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { isolatedHome } from "./helpers/isolated-cidx-home";
 import type { CodeRecord } from "../src/services/db";
-// Type-only imports are erased, so they cannot resolve CONFIG before the env var
-// below is set — they keep the tests typed without touching the real data root.
+// Type-only imports are erased, so they cannot resolve CONFIG at import time —
+// they keep the tests typed without adding another config consumer to the file.
 import type { ApiSymbol as ApiSymbolType, ApiDiffEntry as ApiDiffEntryType } from "../src/core/apidiff";
-
-process.env.CIDX_HOME = mkdtempSync(path.join(tmpdir(), "cidx-apidiff-home-"));
 
 const {
   compareSurfaces,
@@ -42,6 +45,7 @@ const {
 } = await import("../src/core/apidiff");
 const { gitRefExists, gitLsTreeFiles, gitShowFile, safeGitRef } = await import("../src/services/git");
 const db = await import("../src/services/db");
+const { CONFIG } = await import("../src/config");
 const { Registry } = await import("../src/core/registry");
 const { JobQueue } = await import("../src/core/job-queue");
 const { IndexManager } = await import("../src/core/index-manager");
@@ -231,7 +235,7 @@ describe("surfaceFromIndexRows (the working-tree side)", () => {
 
 // --------------------------------------------------- 2. the git helpers
 
-const HOME = process.env.CIDX_HOME!;
+const HOME = isolatedHome;
 const SEP = path.sep;
 const REPO = mkdtempSync(path.join(tmpdir(), "cidx-apidiff-"));
 
@@ -349,9 +353,8 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
+  // HOME (the shared isolated root) is removed by the preload's own hook.
   rmSync(REPO, { recursive: true, force: true });
-  rmSync(HOME, { recursive: true, force: true });
-  delete process.env.CIDX_HOME;
 });
 
 describe("git ref helpers", () => {
@@ -462,6 +465,10 @@ async function indexRowsAtV2(): Promise<CodeRecord[]> {
 }
 
 beforeAll(async () => {
+  // The fixture table must land in the throw-away root, never the user's
+  // `~/.cidx`: if the preload ever stops running, fail here instead of
+  // silently writing into real user data.
+  expect(CONFIG.DB_DIR.startsWith(HOME)).toBe(true);
   registry = new Registry(DB_PATH);
   registry.upsertIndex({
     name: "fixture",
