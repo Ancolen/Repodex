@@ -33,35 +33,7 @@
 
 **Impact: High · Effort: Medium**
 
-#### Motivation
-
-BM25/FTS indexes `content` verbatim. A query like *"update user name"* never matches `getUserName` as a single token: FTS tokenizes on word boundaries, and `getUserName` is one identifier token. This is the weakest leg of hybrid search — intent-shaped queries ("how do I refresh the cache") only reach code through the vector leg. Splitting identifiers into their parts gives BM25 a real shot at natural-language → code matching, exactly the gap the docstring legs (2.4.0) started to close from the *documentation* side — this closes it from the *code* side.
-
-#### Design
-
-1. **New nullable column `id_terms`** on the fixed row schema (`src/services/db.ts`), exactly the 2.4.0 `doc`/`doc_vector` pattern:
-   - Populated at chunk time (indexer): every identifier in the chunk (extracted via tree-sitter identifier nodes when the chunk is AST-parsed, regex fallback otherwise — `countReferences`' combined-regex pass is a precedent) is split into subparts by camelCase / snake_case / kebab-case / dotted boundaries. Written as a space-joined lowercase string: `getUserName` → `get user name`, `user_id` → `user id`. The raw identifier itself is **also** kept in the string (`getusername get user name`) so exact-symbol BM25 matches don't regress.
-   - Cap the string (e.g. 2000 chars) so a minified/generated file can't produce a pathological row.
-2. **FTS leg.** `ensureFtsIndex` builds BM25 over `id_terms` alongside `content` and `doc` (own try/catch — a failure warns, never fails the index, same as the doc-FTS leg).
-3. **Search.** `searchTableText` gains `id_terms` in its default `columns` list when present; `mergeWithDocLegs` → generalize to `mergeWithExtraLegs` (or keep the name and treat this as one more leg). Results that arrived via the `id_terms` leg could carry `_idHit` or simply merge anonymously — prefer anonymous first (fewer new output fields), and only add a marker if demos show agents care.
-4. **Legacy gating.** All queries gated on `tableColumns(table)`; pre-2.4.0-style tables (and pre-2.5.0 tables lacking `id_terms`) take the exact legacy paths. `insertChunks` extends `stripUnknownColumns` to the new column. **Byte-for-byte legacy behavior preserved**: when only the original legs yield results, `combine` returns the single non-empty list with native metrics — don't "simplify" into always-RRF.
-
-#### Files touched
-
-`src/services/db.ts` (schema, `stripUnknownColumns`, `tableColumns` gating, FTS), `src/services/indexer.ts` (populate + embed pass order — `id_terms` needs no embedding), `src/chunking/` or a new `src/core/idterms.ts` (pure split function), `src/core/index-manager.ts` (leg merge), `tool-defs.ts` (no new field needed if anonymous), tests.
-
-#### Risks
-
-- **BM25 leg-count growth**: five legs (vector, doc-vector, content, doc, id_terms) dilute RRF ranks individually. Mitigate: `id_terms` leg runs only in `hybrid` mode, and only when the query actually tokenizes into ≥2 parts; demo-tune whether it's additive with doc legs.
-- **Reindex required** for existing projects — same migration story as 2.4.0 (`tableColumns` gating makes it seamless).
-- **LanceDB FTS column budget**: verify at design time that a third FTS-indexed column is acceptable on the pinned `@lancedb/lancedb@^0.30` (index build time / memory).
-
-#### Acceptance
-
-- Pure splitter in `src/core/idterms.ts` with a table-driven test suite (camelCase, snake_case, SCREAMING_SNAKE, dotted, digits, unicode).
-- Interleaved-determinism suite still green (identifier extraction shares the parse recipe).
-- Legacy-table test: a table created without `id_terms` returns byte-identical legacy results.
-- Live demo: "update user name"-style queries gain code hits vs. 2.4.0 baseline.
+> Shipped in Unreleased (2.5.0) — see [changelog](./changelog.md) and [features](./features.md). Two design deviations from the text below: identifiers are extracted with a **combined-regex pass over the chunk text** (the `countReferences` precedent) instead of tree-sitter identifier nodes — no second parse per file, the shared-parser determinism surface stays untouched, and character-fallback chunks (json/md/xml/rst) are covered too; and the `id_terms` leg is its **own single-column FTS query** rather than being appended to `searchTableText`'s default `columns`, because `@lancedb/lancedb` 0.30 searches only the first column of a list (verified against 0.30.0).
 
 ---
 

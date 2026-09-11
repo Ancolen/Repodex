@@ -6,6 +6,48 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ---
 
+## Unreleased
+
+Ships proposal [S1 — Identifier-part BM25 tokenization](./proposals.md) (Impact: High · Effort: Medium): compound identifiers are split into their subparts into a new nullable **`id_terms`** column and BM25-searched as an extra hybrid-search leg, so a natural-language query like *"update user name"* can reach `getUserName` through text and not only through the vector leg. Reuses the 2.4.0 doc-leg pattern end to end (nullable column, explicit Arrow schema, `tableColumns` gating, per-leg try/catch FTS, legacy tables untouched). `bun run typecheck` clean, `bun test` **341/341** (865 expect). Version bump deferred to the central release commit.
+
+### Identifier tokenization (`src/core/idterms.ts`, new)
+
+Pure module (no I/O, no LanceDB), like `src/utils/text.ts` / `src/core/deadcode.ts`:
+
+- `splitIdentifier` breaks an identifier at camelCase / snake_case / kebab-case / dotted / `$` boundaries — Unicode-aware, acronym-run aware (`HTTPServer` → `HTTP` `Server`), digits stay attached to the word they follow (`md5Hash` → `md5 hash`, `sha256sum` stays one part).
+- `extractIdTerms(content)` scans the chunk with one combined identifier regex (the `countReferences` precedent) and emits, per distinct compound identifier, `<raw> <part> <part> …` lowercased and space-joined: `getUserName` → `getusername get user name`, `user_id` → `user_id user id`. Single-word tokens are skipped (the `content` leg already indexes them verbatim) and identifiers are deduplicated in first-seen order.
+- The string is **capped at 2000 chars** at a term boundary, so a minified/generated file cannot produce a pathological row; a lone oversized identifier is truncated.
+- `idTermsQueryParts` / `wantIdTermsLeg` tokenize a query the same way and gate the leg (see Search below).
+
+**Design deviation from the proposal:** identifiers are extracted with the regex pass, not tree-sitter identifier nodes. The chunker is untouched, no second parse per file, the shared-parser determinism surface (see the Lua precedent) stays out of scope, and character-fallback chunks (json/md/xml/rst) — which have no identifier nodes — are covered as well.
+
+### Schema (`src/services/db.ts`)
+
+One new **nullable** column on the fixed row schema: `id_terms` (string|null). No embedding, no vector index — BM25 only.
+
+- The **explicit Arrow schema** used at table creation (`arrowSchemaFor`) gains the column. It must be explicit for the same reason `doc` is: inference cannot type an all-null field, and `id_terms` is null on every chunk without a compound identifier.
+- `stripUnknownColumns` now strips any optional column the target table predates (`doc`/`doc_vector` from before 2.4.0, `id_terms` from before this change), so writes keep working on both legacy shapes. A full reindex recreates the table with the full schema.
+- `ensureFtsIndex` builds BM25 over `id_terms` alongside `content` and `doc`, in its **own try/catch** — a failure warns and never fails the index.
+- `searchTableText` keeps single-column calls: `@lancedb/lancedb` 0.30 searches only the first column of a `columns` list ("For now, only one column can be searched" — verified against 0.30.0), so the `id_terms` leg is a separate query, exactly like the `doc` leg. The doc note in `searchTableText` spells this out.
+
+### Indexing (`src/services/indexer.ts`)
+
+`indexFile` populates `id_terms` in the record loop, straight from the chunk text (`extractIdTerms(...) || null` — null when the chunk has no compound identifier). Pure CPU, **no embedding pass**: unlike `doc_vector`, this leg adds no Ollama calls.
+
+### Search (`src/core/index-manager.ts`)
+
+`mergeWithDocLegs` → `mergeWithExtraLegs` (same role, one more leg, plus the search `mode`):
+
+- **Gating.** The `id_terms` leg runs only (a) in `hybrid` mode, (b) when the table has the column (`tableColumns` — legacy tables never pay the query), and (c) when the query itself tokenizes into **≥ 2 parts** (`wantIdTermsLeg`) — a single-word query is already served by `content`, and skipping keeps the RRF rank pool undiluted for queries the leg cannot help. It is **not** tied to the `doc` opt-out: it is a code-side leg, not a docstring leg.
+- **Merging.** Anonymous: `id_terms` hits join the RRF merge without a marker field (no new output field, no tool-def change). `_docHit` still marks doc-contribution results only.
+- **Legacy invariant preserved byte-for-byte.** When no extra leg yields results, `combine` still returns the single non-empty list sliced with its native metric (vector legs keep `_distance` and no `_score`); nothing is "simplified" into always-RRF.
+
+### Surfaces & tests
+
+No new tool, CLI flag, or output field. New suite `tests/idterms.test.ts` (45 tests): the table-driven splitter (camelCase, snake_case, kebab-case, SCREAMING_SNAKE, dotted, acronym runs, digits, unicode), extraction (dedup, single-word skip, lowercasing, the 2000-char cap at a term boundary), the query gate, and — against a real temp LanceDB — the fresh-table column + FTS behavior, `ensureFtsIndex`'s three indexes, writes into a legacy table (stripped, not rejected), and the legacy table's byte-identical pre-S1 result shape (native BM25 `_score` well above the RRF maximum of 1/60, vector `_distance` with no `_score`, no `id_terms` on rows).
+
+---
+
 ## 2.4.0 — docstring / comment embedding + doc search legs
 
 Version bumped 2.3.0 → **2.4.0**; `bun run typecheck` clean, `bun test` **296/296** (790 expect). Ships the "Embed docstring / comment separately" proposal from [`status.md`](./status.md) — a symbol's docstring / doc-comment is extracted at chunk time, embedded into a **separate `doc_vector` column on the same row**, and searched as its own retrieval legs, so intent queries ("how to do X") hit the *documentation* even when the *code body* doesn't semantically match.
