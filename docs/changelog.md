@@ -6,6 +6,32 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ---
 
+## Unreleased
+
+### `get_context_pack` — one call for "get me up to speed on X" (proposal A1)
+
+An agent doing "get me up to speed on X" burns 4–6 round-trips (search → outline per hit → deps per hit → context lines), each a full round-trip. `get_context_pack` assembles the same material **server-side in one call** — less latency, less context churn, and a shape the agent can rely on. **All composition, no new engines**: every leg already exists and is cached; the only new logic is assembly + the pack-level budget. No schema change, no reindex.
+
+#### What one call returns
+
+`pack: { hits: [{ hit, outline, imports }], totalChars, omitted, maxChars }` — a structured object, not a flat results list:
+
+- **Search core (reused, never reimplemented).** `getContextPack` calls `searchIndex`/`searchAll` **exactly as today** — hybrid + rerank + MMR + the docstring legs + the shared query cache all apply unchanged.
+- **Per-hit enrichment, one pass.** The usual `signature` / `indexedAt` / `contextLines` enrichment, plus two new legs per hit:
+  - **`outline`** — the hit file's `get_file_outline` data (`chunker.ts → fileOutline`), capped to the hit's **neighborhood** (`sliceOutlineForHit`): the symbols overlapping the hit's chunk range, then up to 4 symbols below it ("what comes next in the file"), at most 12 entries. Symbols wholly above the chunk are dropped. Parsed **once per file per call** (hits can share a file); a missing/unreadable file drops its leg, never the hit.
+  - **`imports`** — the forward leg of `getDependencies` only (relative specifiers → `extractImports` → `resolveImports`, **resolved to indexed files only**, so there are no phantom edges), capped at 10 with `importsTruncated: true` when the cap bites. The reverse graph is deliberately **not** triggered (its first build parses every indexed file); external/unresolved specifiers are not pack legs.
+- **ONE budget for the whole pack.** `applyPackBudget` (`src/utils/budget.ts`, the pack-level variant of `applyCharBudget`) runs **once** over the assembled pack: hits are added whole in ranked order while the running total fits (`packEntrySize` = hit content + context lines + outline lines + import lines + framing), the **top hit is always kept** even when it alone exceeds the budget, and everything after the first non-fitting hit is counted in **`omitted`** — dropped whole, never truncated, never silently lost. The inner search deliberately runs **without** `maxChars`: a pack has a single budget, so the internal legs never double-bill. Default `maxChars` **6000**; a big `limit` with a small budget degrades gracefully (top-1 + an honest `omitted` count).
+
+#### Surfaces (the full 8 layers)
+
+Tool `get_context_pack` (`tool-defs.ts` — the single source consumed by both transports) → MCP handler (`mcp.ts`, returns the readable text **and** `structuredContent: { pack }` so JSON consumers get the object) → `POST /pack` (control API) → **stdio bridge `case "get_context_pack"`** (the hand-maintained, easy-to-miss layer) → CLI `cidx pack "<query>" [--project x] [--limit n] [--max-chars n] [--context n]` → `formatContextPack` (`src/server/format.ts`, shared by MCP + stdio + the CLI, which prints it rather than forking a second renderer).
+
+#### Tests
+
+New suites `tests/pack-budget.test.ts` (14) — `packEntrySize` / `outlineSize` / `importsSize` arithmetic, no-op cases, top-1-always-kept, exact boundary, running-budget arithmetic, ranked order, big-limit/small-budget degradation, legs counting against the same budget, all-or-nothing inclusion — and `tests/pack-composition.test.ts` (12) — the neighborhood slice (overlap + below-window + caps + file order + above-dropped) and the import leg against a real fixture (`fileOutline` reflects the hit's file; every resolved edge points at a file in the indexed set; cap + `truncated`). `bun run typecheck` clean; `bun test` **322/322** (871 expect).
+
+---
+
 ## 2.4.0 — docstring / comment embedding + doc search legs
 
 Version bumped 2.3.0 → **2.4.0**; `bun run typecheck` clean, `bun test` **296/296** (790 expect). Ships the "Embed docstring / comment separately" proposal from [`status.md`](./status.md) — a symbol's docstring / doc-comment is extracted at chunk time, embedded into a **separate `doc_vector` column on the same row**, and searched as its own retrieval legs, so intent queries ("how to do X") hit the *documentation* even when the *code body* doesn't semantically match.
