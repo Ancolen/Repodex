@@ -36,6 +36,7 @@ import {
   formatCallGraph,
   formatCommits,
   formatApiDiff,
+  formatImpact,
 } from "./server/format";
 
 const BASE = `http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}`;
@@ -303,6 +304,16 @@ async function main(): Promise<void> {
             includeUnchanged: args.includeUnchanged,
           });
           return ok(formatApiDiff(diff));
+        }
+        case "get_change_impact": {
+          const impact = await api<Parameters<typeof formatImpact>[0]>("POST", "/impact", {
+            symbol: args.symbol,
+            path: args.path,
+            project: args.project,
+            depth: args.depth,
+            limit: args.limit,
+          });
+          return ok(formatImpact(impact));
         }
         default:
           return fail(`Unknown tool: ${name}`);

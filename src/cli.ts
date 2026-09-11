@@ -6,7 +6,7 @@ import { CONFIG, RESOLVED, CONFIG_SOURCE, resolveConfigPath } from "./config";
 import { daemonCommand, bridgeCommand } from "./runtime";
 import { daemonCheck, type DoctorCheck, type DoctorReport } from "./core/doctor";
 import { resolveEditor, buildEditorArgs } from "./utils/editor";
-import { formatContextPack, formatApiDiff } from "./server/format";
+import { formatContextPack, formatApiDiff, formatImpact } from "./server/format";
 
 const BASE = `http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}`;
 
@@ -742,6 +742,33 @@ async function cmdApiDiff(positionals: string[], flags: Record<string, string | 
   console.log(formatApiDiff(r));
 }
 
+// ------------------------------------------------------- change impact (C1)
+
+async function cmdImpact(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
+  await requireDaemon();
+  const arg = positionals[0];
+  if (!arg) {
+    console.error("Usage: cidx impact <symbol|file> [--project x] [--depth n] [--limit n]");
+    process.exit(1);
+  }
+  const body: {
+    symbol?: string;
+    path?: string;
+    project?: string;
+    depth?: number;
+    limit?: number;
+  } = {};
+  // A positional that points at a real file → module mode (that file's callable);
+  // otherwise treat it as a symbol name (the call graph's convention).
+  if (existsSync(arg)) body.path = path.resolve(arg);
+  else body.symbol = arg;
+  if (typeof flags.project === "string") body.project = flags.project;
+  if (typeof flags.depth === "string") body.depth = Number(flags.depth);
+  if (typeof flags.limit === "string") body.limit = Number(flags.limit);
+  const r = await api<any>("POST", "/impact", body);
+  console.log(formatImpact(r));
+}
+
 async function cmdMcp(): Promise<void> {
   // Starts the stdio bridge, taking over stdio (MCP client ↔ bridge).
   const proc = Bun.spawn({
@@ -1003,6 +1030,26 @@ const COMMANDS: Record<string, CmdDoc> = {
       "cidx callgraph src/core/index-manager.ts --direction callees --depth 2",
     ],
   },
+  impact: {
+    usage: "impact <symbol|file> [flags]",
+    summary: "Change impact: one ranked answer to 'if I change X, what breaks?'.",
+    aliases: ["change-impact"],
+    flags: [
+      ["--project <name>", "Restrict to this project (inferred from the path, or the single indexed project)."],
+      ["--depth <n>", "How many caller levels to follow, 1 = direct callers only (default: 3)."],
+      ["--limit <n>", "Cap per section (default: 25); exceeding it prints a truncation warning."],
+    ],
+    details: [
+      "Sections are ranked by severity: direct callers, then files that import the module, then textual mentions.",
+      "Test files are listed separately as 'covered by' rather than as production consumers.",
+      "Whole-identifier matching (not full LSP): same-named symbols in different scopes are indistinguishable.",
+      "Joins the cached call graph, dependency graph and reference pass — no schema change, no reindex.",
+    ],
+    examples: [
+      "cidx impact buildCallEdges --project repodex",
+      "cidx impact src/core/impact.ts --depth 2",
+    ],
+  },
   commits: {
     usage: "commits <project> [query] [flags]",
     summary: "Git-history / commit-message search: when/why a feature was added, who changed a file.",
@@ -1111,7 +1158,7 @@ const COMMANDS: Record<string, CmdDoc> = {
 
 const HELP_ORDER = [
   "start", "index", "list", "status", "reindex", "sync", "remove",
-  "search", "open", "batch", "pack", "find", "refs", "overview", "deps", "deadcode", "callgraph", "commits", "apidiff", "doctor", "config", "mcp", "stop", "version", "help",
+  "search", "open", "batch", "pack", "find", "refs", "overview", "deps", "deadcode", "callgraph", "commits", "apidiff", "impact", "doctor", "config", "mcp", "stop", "version", "help",
 ];
 
 /** Detailed help for a single command. */
@@ -1124,6 +1171,7 @@ function printCommandHelp(name: string): void {
     : name === "dependencies" ? "deps"
     : name === "dead-code" ? "deadcode"
     : name === "call-graph" ? "callgraph"
+    : name === "change-impact" ? "impact"
     : name === "git-log" || name === "gitlog" ? "commits"
     : name === "api-diff" ? "apidiff"
     : name;
@@ -1191,6 +1239,7 @@ function printHelp(): void {
   lines.push('  cidx overview api                # project onboarding summary');
   lines.push('  cidx deps src/server/mcp.ts      # import graph of a file');
   lines.push('  cidx callgraph handleRequest     # caller/callee trees for a function');
+  lines.push('  cidx impact handleRequest        # if I change it, what breaks?');
   lines.push('  cidx commits api "login flow"     # git-history / commit-message search');
   lines.push('  cidx deadcode api --min-confidence 70  # potential dead code');
   lines.push('  cidx apidiff api v1.2.0           # public-API diff between two git refs');
@@ -1203,7 +1252,8 @@ function printHelp(): void {
   lines.push("  Stdio-expecting clients (Claude Desktop): cidx mcp");
   lines.push("  Tools: search_codebase, search_codebase_batch, find_symbol, find_references,");
   lines.push("            get_file_outline, get_dependencies, get_call_graph, find_dead_code, search_commits,");
-  lines.push("            get_api_diff, get_repo_overview, list_indexes, get_index_status, index_project");
+  lines.push("            get_api_diff, get_change_impact, get_context_pack, get_repo_overview,");
+  lines.push("            list_indexes, get_index_status, index_project");
   lines.push("");
   lines.push("CONFIGURATION");
   lines.push(`  Active file: ${CONFIG_SOURCE ?? "(none — defaults)"}`);
@@ -1347,6 +1397,7 @@ async function main(): Promise<void> {
     case "deps": case "dependencies": await cmdDeps(positionals, flags); break;
     case "deadcode": case "dead-code": await cmdDeadcode(positionals, flags); break;
     case "callgraph": case "call-graph": await cmdCallGraph(positionals, flags); break;
+    case "impact": case "change-impact": await cmdImpact(positionals, flags); break;
     case "commits": case "git-log": case "gitlog": await cmdCommits(positionals, flags); break;
     case "apidiff": case "api-diff": await cmdApiDiff(positionals, flags); break;
     case "doctor": await cmdDoctor(); break;

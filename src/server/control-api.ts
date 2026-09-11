@@ -556,6 +556,36 @@ export function startControlApi(
     }
   });
 
+  app.post("/impact", async (req, res) => {
+    const { symbol, path: filePath, project, depth, limit } = (req.body ?? {}) as {
+      symbol?: string;
+      path?: string;
+      project?: string;
+      depth?: number;
+      limit?: number;
+    };
+    if (!symbol && !filePath) {
+      res.status(400).json({ error: "Provide a 'symbol' name and/or a 'path' (at least one is required)." });
+      return;
+    }
+    if (filePath && (!existsSync(filePath) || !statSync(filePath).isFile())) {
+      res.status(400).json({ error: `File not found: ${filePath}` });
+      return;
+    }
+    const opts: { symbol?: string; path?: string; project?: string; depth?: number; limit?: number } = {};
+    if (typeof symbol === "string") opts.symbol = symbol;
+    if (typeof filePath === "string") opts.path = filePath;
+    if (typeof project === "string") opts.project = project;
+    if (typeof depth === "number") opts.depth = depth;
+    if (typeof limit === "number") opts.limit = limit;
+    try {
+      const result = await deps.manager.getChangeImpact(opts);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   app.post("/shutdown", (_req, res) => {
     res.json({ stopping: true });
     setTimeout(() => void deps.onShutdown(), 50);
