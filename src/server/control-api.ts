@@ -48,13 +48,6 @@ function viewIndex(deps: ControlDeps, rec: IndexRecord) {
 // -------------------------------------------------------------------- doctor
 
 /**
- * The reranker verdict comes from `IndexManager`'s own cached one-shot probe
- * (`ensureRerankAvailable`) — doctor reuses it instead of asking Ollama a second
- * time. The method is private on the class, hence this structural view.
- */
-type RerankProber = { ensureRerankAvailable(): Promise<boolean> };
-
-/**
  * Second, read-only LanceDB connection, used only for index metadata
  * (`Table.listIndices` — ANN/FTS presence). `services/db.ts` owns the daemon's
  * connection and exposes no index-metadata helper, and LanceDB is an embedded
@@ -69,7 +62,6 @@ async function doctorConnection(): Promise<lancedb.Connection> {
 
 /** Gathers the live state `runDoctor` reads — every port injectable, none throwing. */
 function doctorPorts(deps: ControlDeps): DoctorPorts {
-  const prober = deps.manager as unknown as RerankProber;
   return {
     indexes: () => deps.manager.listIndexes(),
     tableNames: () => listTables(),
@@ -97,7 +89,7 @@ function doctorPorts(deps: ControlDeps): DoctorPorts {
         return { reachable: false, models: [] };
       }
     },
-    rerankerAvailable: () => prober.ensureRerankAvailable(),
+    rerankerAvailable: () => deps.manager.ensureRerankAvailable(),
     configPath: () => CONFIG_SOURCE,
     readText: async (filePath) => {
       try {

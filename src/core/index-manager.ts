@@ -1696,8 +1696,10 @@ export class IndexManager {
    * Probes once (cached) whether the configured reranker model exists in Ollama.
    * Default-on reranking must not pay a per-search storm of failed calls when the
    * model isn't installed, so reranking is disabled for the session if it's absent.
+   * Public: the `doctor` diagnostic reports the same probe's verdict instead of
+   * asking Ollama a second time (one implementation, one cached answer).
    */
-  private async ensureRerankAvailable(): Promise<boolean> {
+  async ensureRerankAvailable(): Promise<boolean> {
     if (this.rerankAvailable !== null) return this.rerankAvailable;
     if (!CONFIG.RERANK_MODEL) {
       this.rerankAvailable = false;
