@@ -91,3 +91,91 @@ export async function searchGitLog(
     return [];
   }
 }
+
+// ---------------------------------------------------------------------------
+// Reading a tree/ref (the API-diff historical surface, proposal C2).
+// Same discipline as `searchGitLog`: `execFile` with no shell (a ref or path can
+// never inject an option or a command), NUL-safe where paths are involved, and
+// every failure is REPORTED (`null`) rather than thrown.
+// ---------------------------------------------------------------------------
+
+/**
+ * Characters allowed in a revision string we are willing to pass to git:
+ * refnames (`v1.2.0`, `feature/x`, `refs/tags/v1`), SHAs, and the revision
+ * suffixes `~`/`^` (`HEAD~3`). Everything else — whitespace, `:` (which would
+ * turn the string into an `object:path` spec), `*?[` (globs), `@{`, `..`, and
+ * any leading `-`/`.`/`/` (option- or path-like) — is rejected.
+ */
+const SAFE_REF_RE = /^[A-Za-z0-9._^~/-]+$/;
+
+/**
+ * Validates a user-supplied git ref before it reaches a git argv. Returns the
+ * (trimmed) ref unchanged when it is safe to pass, or null when it is not —
+ * the caller reports `invalidRef` instead of throwing.
+ */
+export function safeGitRef(ref: string): string | null {
+  const r = ref.trim();
+  if (r.length === 0 || r.length > 256) return null;
+  if (!SAFE_REF_RE.test(r)) return null;
+  if (r.startsWith("-") || r.startsWith(".") || r.startsWith("/")) return null;
+  if (r.endsWith(".") || r.endsWith(".lock") || r.endsWith("/")) return null;
+  if (r.includes("..") || r.includes("@")) return null;
+  return r;
+}
+
+/**
+ * Does `ref` resolve to an object in this repo? (`git rev-parse --verify`.)
+ * Refs are validated with `safeGitRef` first; a non-repo / missing git also
+ * returns false (the caller checks `isGitRepo` separately to report `notARepo`).
+ */
+export async function gitRefExists(baseDir: string, ref: string): Promise<boolean> {
+  if (!safeGitRef(ref)) return false;
+  try {
+    await execFileAsync("git", ["-C", baseDir, "rev-parse", "--verify", "--quiet", `${ref}^{object}`], {
+      timeout: 10000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Repo-relative paths of every file tracked at `ref` —
+ * `git ls-tree -r --name-only -z <ref>` (NUL-separated, so paths with spaces or
+ * Unicode survive). Returns null when the ref doesn't resolve or git fails; the
+ * caller reports `unknownRef`/an error instead of treating it as "no files".
+ */
+export async function gitLsTreeFiles(baseDir: string, ref: string): Promise<string[] | null> {
+  if (!safeGitRef(ref)) return null;
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["-C", baseDir, "ls-tree", "-r", "--name-only", "-z", ref],
+      { timeout: 30000, maxBuffer: 64 * 1024 * 1024 },
+    );
+    return stdout.split("\0").filter((p) => p.length > 0);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Content of `<ref>:<relPath>` (`git show`), decoded as UTF-8. `relPath` comes
+ * from `gitLsTreeFiles` (git's own output, passed as a literal argv element), so
+ * it needs no escaping. Returns null when the path is absent at the ref or git
+ * fails — never throws.
+ */
+export async function gitShowFile(baseDir: string, ref: string, relPath: string): Promise<string | null> {
+  if (!safeGitRef(ref)) return null;
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", baseDir, "show", `${ref}:${relPath}`], {
+      timeout: 30000,
+      maxBuffer: 32 * 1024 * 1024,
+      encoding: "utf8",
+    });
+    return stdout;
+  } catch {
+    return null;
+  }
+}
