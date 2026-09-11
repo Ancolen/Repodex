@@ -50,6 +50,15 @@ import {
 import { buildCallEdges, traverseCallGraph, matchRootSymbols } from "./callgraph";
 import type { CallSymbol, CallChunk, CallGraphNode } from "./callgraph";
 export type { CallGraphNode } from "./callgraph";
+// C1 — change impact: the pure join over the three cached adjacency sources.
+import {
+  buildImpactReport,
+  selectAnchor,
+  IMPACT_DEFAULT_DEPTH,
+  IMPACT_DEFAULT_LIMIT,
+} from "./impact";
+import type { ChangeImpactReport, ImpactAnchor, ImpactChunk } from "./impact";
+export type { ChangeImpactReport, ImpactAnchor } from "./impact";
 import type { CommitHit, CommitQueryOpts } from "./commits";
 export type { CommitHit, CommitQueryOpts } from "./commits";
 import { mapWithConcurrency } from "../utils/concurrency";
@@ -1213,6 +1222,135 @@ export class IndexManager {
     };
     if (opts?.query) result.query = opts.query;
     return result;
+  }
+
+  // ------------------------------------------------------------ change impact
+
+  /**
+   * "If I change X, what breaks?" — ONE ranked report joining the three adjacency
+   * views that already exist:
+   *
+   *   1. direct callers (the cached call graph, reverse, depth-bounded),
+   *   2. imported-by (the cached dependency graph, reverse),
+   *   3. whole-identifier reference count + a few representative `file:line` hits.
+   *
+   * Severity ranks a caller that CALLS the symbol over a file that merely IMPORTS
+   * its module over a loose textual mention; sections are returned in that order,
+   * each capped by `limit` with its own `truncated` flag. Test files are split out
+   * into `coveredBy` ("exercised by a test") rather than counted as production
+   * consumers, and the change site's own fan-out is reported alongside. The only
+   * work that is not already cached is the reference pass (one `tableSymbolsWithContent`
+   * read — the same pass `find_dead_code` pays) and the join itself. Additive: no
+   * schema change, no reindex.
+   */
+  async getChangeImpact(opts: {
+    symbol?: string;
+    path?: string;
+    project?: string;
+    depth?: number;
+    limit?: number;
+  }): Promise<ChangeImpactReport> {
+    const symbol = opts.symbol?.trim();
+    const filePath = opts.path?.trim();
+    if (!symbol && !filePath) {
+      throw new Error("getChangeImpact needs a symbol name and/or a file path.");
+    }
+    const depth = opts.depth ?? IMPACT_DEFAULT_DEPTH;
+    const limit = opts.limit ?? IMPACT_DEFAULT_LIMIT;
+
+    // Project resolution mirrors `getCallGraph`: from the file path, the explicit
+    // name, or the single indexed project (an anchor may be a bare symbol name).
+    let rec: IndexRecord;
+    let absFile: string | undefined;
+    if (filePath) {
+      absFile = path.resolve(filePath);
+      rec = this.resolveProjectForFile(absFile, opts.project);
+    } else if (opts.project) {
+      const r = this.registry.getIndex(opts.project);
+      if (!r) throw new Error(`Index not found: ${opts.project}`);
+      rec = r;
+    } else {
+      const all = this.registry.listIndexes();
+      if (all.length === 0) throw new Error("No indexed project; index a directory first.");
+      if (all.length > 1) {
+        throw new Error(
+          `'${symbol}' could belong to multiple projects (${all.map((p) => p.name).join(", ")}); pass --project.`,
+        );
+      }
+      rec = all[0]!;
+    }
+
+    const graph = await this.buildCallGraph(rec);
+    const anchor = this.resolveImpactAnchor(rec, graph, symbol, absFile);
+
+    // Reference leg: one indexed-content pass (same read `findDeadCode` does).
+    const allRows = await tableSymbolsWithContent(rec.tableName);
+    const chunks: ImpactChunk[] = [];
+    for (const r of allRows) {
+      if (typeof r.content !== "string" || r.content.length === 0) continue;
+      const chunk: ImpactChunk = {
+        filePath: r.filePath,
+        startLine: typeof r.startLine === "number" ? r.startLine : 1,
+        content: r.content,
+      };
+      if (r.symbolName) chunk.symbolName = r.symbolName;
+      if (r.symbolType) chunk.symbolType = r.symbolType;
+      chunks.push(chunk);
+    }
+
+    // Imported-by leg: the on-demand import graph (mtime-keyed cache; the first
+    // call per project parses every indexed file's imports).
+    const depGraph = await this.buildImportGraph(rec);
+
+    return buildImpactReport({
+      project: rec.name,
+      projectRoot: rec.path,
+      anchor,
+      callersOf: graph.reverse,
+      calleesOf: graph.forward,
+      symbolsByKey: graph.symbolsByKey,
+      importedBy: depGraph.reverse,
+      importsOf: depGraph.forward,
+      chunks,
+      isTestFile,
+      depth,
+      limit,
+      scanTruncated: allRows.length >= 200000 || graph.truncated,
+    });
+  }
+
+  /**
+   * Resolves the ONE symbol the impact report is anchored on. Name matching
+   * mirrors `get_call_graph` (`matchRootSymbols` → exact / prefix / dotted-suffix /
+   * dotted-substring), so a bare method name resolves to its qualified indexed
+   * form; a file anchor means the callables defined in that file. The candidate →
+   * anchor reduction (dedup + the several-matches refusal) is `impact.selectAnchor`.
+   */
+  private resolveImpactAnchor(
+    rec: IndexRecord,
+    graph: CallGraphCacheEntry,
+    symbol: string | undefined,
+    absFile: string | undefined,
+  ): ImpactAnchor {
+    let matched: CallSymbol[];
+    if (symbol) {
+      matched = matchRootSymbols(graph.nameToSymbols, symbol);
+      if (absFile) matched = matched.filter((s) => s.filePath === absFile);
+      if (matched.length === 0) {
+        const where = absFile ? ` in ${path.relative(rec.path, absFile)}` : "";
+        throw new Error(`No callable symbol '${symbol}' found${where} (project: ${rec.name}).`);
+      }
+    } else {
+      matched = absFile
+        ? [...graph.symbolsByKey.values()].filter((s) => s.filePath === absFile)
+        : [];
+      if (matched.length === 0) {
+        throw new Error(
+          `No callable symbols found in '${path.relative(rec.path, absFile!)}' (project: ${rec.name}).`,
+        );
+      }
+    }
+    return selectAnchor(matched, rec.path, symbol ?? path.relative(rec.path, absFile!));
   }
 
   /**
