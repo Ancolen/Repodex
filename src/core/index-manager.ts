@@ -31,12 +31,13 @@ import { cachedEmbed, getEmbedding } from "../services/ollama";
 import { readProjectConfig } from "./project-config";
 import { rerankScores } from "../services/rerank";
 import { selectMMR } from "../utils/mmr";
-import { applyCharBudget } from "../utils/budget";
+import { applyCharBudget, applyPackBudget } from "../utils/budget";
+import { fileOutline, type OutlineEntry } from "../chunking/chunker";
 import { gitHeadPath, isGitRepo, searchGitLog } from "../services/git";
 import { rrfMerge } from "../utils/rrf";
 import { deriveSignature, matchIdentifierLines } from "../utils/text";
 import { extractImports } from "../chunking/imports";
-import { resolveImports, buildFileIndex, type ResolvedDep } from "./resolve";
+import { resolveImports, buildFileIndex, type ResolvedDep, type FileIndex } from "./resolve";
 import {
   countReferences,
   scoreDeadCode,
@@ -83,6 +84,40 @@ export interface ScopedSearchResult extends SearchResult {
 export interface BatchSearchGroup {
   query: string;
   results: ScopedSearchResult[];
+}
+
+/** One assembled hit of a context pack: the search hit plus its file's shape and imports. */
+export interface ContextPackHit {
+  /** The search hit, enriched as always (`signature` / `indexedAt` / context lines). */
+  hit: ScopedSearchResult;
+  /**
+   * The hit file's symbol map (`get_file_outline` data), capped to the hit's
+   * neighborhood: the symbols overlapping the hit's chunk range plus the next few
+   * below it. Absent when the file is unreadable / has no symbols.
+   */
+  outline?: OutlineEntry[];
+  /**
+   * Forward imports of the hit file, resolved to indexed files ONLY (no phantom
+   * edges), capped at `PACK_IMPORT_CAP`. Absent when the file imports nothing indexed.
+   */
+  imports?: DependencyEdge[];
+  /** More indexed imports exist beyond the cap (no silent caps). */
+  importsTruncated?: boolean;
+}
+
+/** Result of `get_context_pack`: search + per-hit file shape + imports, under ONE budget. */
+export interface ContextPack {
+  query: string;
+  /** The project searched (null = all projects were searched). */
+  project: string | null;
+  /** Assembled hits in ranked order, each whole — a hit is never truncated mid-content. */
+  hits: ContextPackHit[];
+  /** Approximate rendered size of the kept pack (hits + legs + framing). */
+  totalChars: number;
+  /** Hits dropped whole by the pack budget (they exceeded what was left). */
+  omitted: number;
+  /** The budget that was applied (null = uncapped). */
+  maxChars: number | null;
 }
 
 /** Search behavior: merge mode + metadata filters. */
@@ -321,6 +356,108 @@ function toEdge(dep: ResolvedDep, projectRoot: string): DependencyEdge {
   }
   if (dep.reason) edge.reason = dep.reason;
   return edge;
+}
+
+// ------------------------------------------------------ context pack (pure helpers)
+
+/** Default pack-level character budget (`get_context_pack`). */
+const PACK_DEFAULT_MAX_CHARS = 6000;
+
+/** Default number of hits considered for a pack. */
+const PACK_DEFAULT_LIMIT = 5;
+
+/** Forward-import cap per hit (resolved edges only). */
+const PACK_IMPORT_CAP = 10;
+
+/** Outline entries kept per hit, at most. */
+const PACK_OUTLINE_MAX = 12;
+
+/** Outline entries kept BELOW the hit's chunk range (the "what comes next" window). */
+const PACK_OUTLINE_BELOW = 4;
+
+/**
+ * Caps a file outline to a hit's neighborhood: the symbols whose line range
+ * overlaps the hit's chunk, followed by up to `below` symbols that start after it
+ * ("what comes next in the file"), capped at `max` overall. File order is preserved
+ * (every overlapping symbol starts at or before the chunk's end and every kept
+ * below-symbol starts after it, so the concatenation stays sorted); symbols wholly
+ * above the chunk are dropped — they are not its neighborhood. Without line info the
+ * outline passes through, still capped.
+ */
+export function sliceOutlineForHit(
+  outline: OutlineEntry[],
+  startLine: number | undefined,
+  endLine: number | undefined,
+  max: number = PACK_OUTLINE_MAX,
+  below: number = PACK_OUTLINE_BELOW,
+): OutlineEntry[] {
+  if (outline.length === 0) return [];
+  if (typeof startLine !== "number" || typeof endLine !== "number") return outline.slice(0, max);
+  const overlapping: OutlineEntry[] = [];
+  const after: OutlineEntry[] = [];
+  for (const o of outline) {
+    if (o.startLine <= endLine && o.endLine >= startLine) overlapping.push(o);
+    else if (o.startLine > endLine) after.push(o);
+  }
+  return [...overlapping, ...after.slice(0, below)].slice(0, max);
+}
+
+/**
+ * Keeps only the imports that resolved to an indexed file (`resolveImports` +
+ * `toEdge` already validate every candidate against the index and set `path` — no
+ * phantom edges), capped at `cap`, with the overflow reported rather than silently
+ * dropped.
+ */
+export function resolvedImports(
+  edges: DependencyEdge[],
+  cap: number = PACK_IMPORT_CAP,
+): { imports: DependencyEdge[]; truncated: boolean } {
+  const resolved = edges.filter((e) => e.status === "resolved");
+  return { imports: resolved.slice(0, cap), truncated: resolved.length > cap };
+}
+
+/** Reads + parses a file's outline once per pack call (hits can share a file). */
+function cachedFileOutline(
+  abs: string,
+  cache: Map<string, Promise<OutlineEntry[]>>,
+): Promise<OutlineEntry[]> {
+  const cached = cache.get(abs);
+  if (cached) return cached;
+  const promise = readFile(abs, "utf-8")
+    .then((content) => fileOutline(abs, content))
+    .catch(() => [] as OutlineEntry[]);
+  cache.set(abs, promise);
+  return promise;
+}
+
+/**
+ * Forward imports of one file (the `getDependencies` forward leg only — the
+ * reverse graph, whose first build parses every indexed file, is deliberately
+ * NOT triggered here). Specifiers are resolved against the project's indexed set,
+ * so a resolved edge always points at a real indexed file.
+ */
+function cachedForwardImports(
+  rec: IndexRecord,
+  abs: string,
+  index: FileIndex,
+  cache: Map<string, Promise<DependencyEdge[]>>,
+): Promise<DependencyEdge[]> {
+  const key = `${rec.name}\u0000${abs}`;
+  const cached = cache.get(key);
+  if (cached) return cached;
+  const promise = (async (): Promise<DependencyEdge[]> => {
+    let content: string;
+    try {
+      content = await readFile(abs, "utf-8");
+    } catch {
+      return [];
+    }
+    const specs = await extractImports(abs, content);
+    if (specs.length === 0) return [];
+    return resolveImports(specs, rec.path, index, abs).map((d) => toEdge(d, rec.path));
+  })().catch(() => [] as DependencyEdge[]);
+  cache.set(key, promise);
+  return promise;
 }
 
 /**
@@ -582,6 +719,97 @@ export class IndexManager {
         return { query, results };
       }),
     );
+  }
+
+  // ------------------------------------------------------------- context pack
+
+  /**
+   * One call assembling what an agent otherwise burns 4–6 round-trips on.
+   *
+   * 1. **Search core** — `searchIndex`/`searchAll` EXACTLY as today (hybrid +
+   *    rerank + MMR + doc legs + the shared query cache): reused, never reimplemented.
+   * 2. **Per-hit enrichment, one pass** — the usual `signature`/`indexedAt`/context
+   *    lines, plus the hit file's outline capped to the hit's neighborhood and the
+   *    hit file's forward imports resolved to indexed files only. Outline/imports
+   *    are parsed once per file per call (hits can share a file) and every leg is
+   *    best-effort: a missing/unreadable file drops its leg, never the hit.
+   * 3. **ONE pack-level budget** — `applyPackBudget` runs once over the assembled
+   *    pack: hits are added whole in ranked order while the running total fits, the
+   *    top hit is always kept, and the rest are reported as `omitted`. The inner
+   *    search deliberately runs WITHOUT `maxChars` — a pack has a single budget, so
+   *    the internal legs must not double-bill.
+   *
+   * All composition, no new engines: every leg already exists and is cached.
+   */
+  async getContextPack(
+    query: string,
+    project?: string,
+    opts?: { limit?: number; maxChars?: number; contextLines?: number },
+  ): Promise<ContextPack> {
+    const limit = opts?.limit ?? PACK_DEFAULT_LIMIT;
+    const contextLines = opts?.contextLines ?? 0;
+    // No `maxChars` here on purpose: the pack budget is applied once, below.
+    const results = project
+      ? await this.searchIndex(project, query, limit, { contextLines })
+      : await this.searchAll(query, limit, { contextLines });
+
+    // Per-hit legs, one pass: outlines/imports keyed per file, the indexed-file
+    // index built once per project (hits can share a file or a project).
+    const outlines = new Map<string, Promise<OutlineEntry[]>>();
+    const imports = new Map<string, Promise<DependencyEdge[]>>();
+    const projects = new Map<string, { rec: IndexRecord; index: FileIndex }>();
+    const packHits = await Promise.all(
+      results.map((hit) => this.buildPackHit(hit, outlines, imports, projects)),
+    );
+
+    const maxChars = opts?.maxChars ?? PACK_DEFAULT_MAX_CHARS;
+    const capped = typeof maxChars === "number" && Number.isFinite(maxChars) && maxChars > 0;
+    const budgeted = applyPackBudget(packHits, capped ? maxChars : undefined);
+    return {
+      query,
+      project: project ?? null,
+      hits: budgeted.hits,
+      totalChars: budgeted.totalChars,
+      omitted: budgeted.omitted,
+      maxChars: capped ? maxChars : null,
+    };
+  }
+
+  /** Assembles one hit's legs: the file's outline (neighborhood) + its forward imports. */
+  private async buildPackHit(
+    hit: ScopedSearchResult,
+    outlineCache: Map<string, Promise<OutlineEntry[]>>,
+    importCache: Map<string, Promise<DependencyEdge[]>>,
+    projects: Map<string, { rec: IndexRecord; index: FileIndex }>,
+  ): Promise<ContextPackHit> {
+    const entry: ContextPackHit = { hit };
+    const abs = hit.filePath ? path.resolve(hit.filePath) : undefined;
+    if (!abs) return entry;
+
+    // One indexed-file index per project per call (hits can share a project).
+    let project = projects.get(hit.project);
+    if (!project) {
+      const rec = this.registry.getIndex(hit.project);
+      if (!rec) return entry; // project removed mid-flight → the hit keeps no legs
+      project = { rec, index: buildFileIndex(this.registry.listCachedFiles(rec.name)) };
+      projects.set(hit.project, project);
+    }
+
+    const [outline, imports] = await Promise.all([
+      cachedFileOutline(abs, outlineCache),
+      cachedForwardImports(project.rec, abs, project.index, importCache),
+    ]);
+
+    if (outline.length > 0) {
+      const neighborhood = sliceOutlineForHit(outline, hit.startLine, hit.endLine);
+      if (neighborhood.length > 0) entry.outline = neighborhood;
+    }
+    if (imports.length > 0) {
+      const capped = resolvedImports(imports, PACK_IMPORT_CAP);
+      if (capped.imports.length > 0) entry.imports = capped.imports;
+      if (capped.truncated) entry.importsTruncated = true;
+    }
+    return entry;
   }
 
   /**
