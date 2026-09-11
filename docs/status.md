@@ -1,6 +1,6 @@
 # Status — Done / Proposed / Roadmap
 
-> The living tracker. **When you finish, start, or decide on something, edit this file.** Pair each change with an entry in [`changelog.md`](./changelog.md) and (for behavior) [`features.md`](./features.md).
+> The living tracker. **When you finish, start, or decide on something, edit this file.** Pair each change with an entry in [`changelog.md`](./changelog.md) and (for behavior) [`features.md`](./features.md); a proposal that earns a real design gets fleshed out in [`proposals.md`](./proposals.md) and referenced from here by ID.
 >
 > Current release: **2.4.0** (docstring / comment embedding + doc search legs). Test suite: **296/296** passing (790 expectations).
 
@@ -37,6 +37,7 @@
 - ✅ **Multi-query batch search** (`search_codebase_batch` / `cidx batch`) — runs several queries concurrently in one round-trip, results grouped per query; each query reuses `searchIndex`/`searchAll` (so rerank/MMR/maxChars + the shared query cache apply per query). Duplicate/blank queries are de-duped.
 - ✅ **Git-history / commit-message search** (`search_commits` / `cidx commits`) — the "when / why was feature X added" and "who changed this file" questions that code search can't answer: a separate search space over the project's git history. Runs `git log` **live** in the indexed project's directory (`src/services/git.ts → searchGitLog`: `-z` NUL-safe, `-i` case-insensitive, `execFile` no-shell → no injection; path filter relativized + passed after `--`); **no embedding, no LanceDB, no schema change, no reindex** (additive, like the other code-intelligence tools). Pure parser in `src/core/commits.ts` (`parseCommitLog`) — fields are `\x1f`-separated, and a commit header is anchored on a 40-hex SHA + `\x1f` so a changed-file name can't be mistaken for a new commit (lets `--name-only` files be split out in one pass, surviving multi-line bodies). Filters: message `query`, file/path history, `author`, `since`/`until` (git date syntax), `limit` (default 50), `withFiles` (changed files per commit); no filters → most recent commits. `notARepo` is reported when the project isn't a git working tree.
 - ✅ **Docstring / doc-comment embedding + doc search legs** (2.4.0) — a symbol's docstring (Python) or contiguous preceding doc-comment run (JSDoc, Rust `///`, Go `//`, …) is extracted at chunk time (`src/chunking/docstring.ts → extractDoc`, capped 1200 chars, attached to the first chunk of split symbols) and stored in new **`doc` / `doc_vector` columns on the same row** — the doc is embedded with the same model as the code. Hybrid search merges up to **four RRF legs**: code-vector, doc-vector ANN, content BM25, doc BM25 — all gated on actual table columns (`tableColumns`), so **pre-2.4.0 legacy tables take the exact legacy paths** until reindexed (`insertChunks` strips the unknown columns via `stripUnknownColumns`). Doc-contribution results carry `_docHit: true` → rendered as `[doc hit]` in CLI/MCP output. Gated globally by `indexing.docstrings` (default true) and per-call by `doc:false` (search_codebase, /search, stdio bridge, CLI `--doc false`). ANN + BM25 indexes built over `doc`/`doc_vector` at full-index time; apply to existing projects with a full reindex.
+- ✅ **Identifier-part BM25 tokenization** (`id_terms` leg, proposal [S1](./proposals.md)) — the docstring legs' counterpart on the **code** side: BM25 indexes `content` verbatim, so *"update user name"* could never match `getUserName` as text. At chunk time every compound identifier of a chunk is split at camelCase / snake_case / kebab-case / dotted boundaries (`src/core/idterms.ts`, pure — `splitIdentifier` / `extractIdTerms`, Unicode- and acronym-aware, digits kept with the word they follow) into a new nullable **`id_terms` column** — `getUserName` → `getusername get user name`, `user_id` → `user_id user id` — deduplicated, capped at 2000 chars per chunk at a term boundary, raw identifier kept so exact-symbol BM25 doesn't regress. Hybrid search gains a **fifth RRF leg** (BM25 over `id_terms`, its own FTS index with its own try/catch), gated on the table having the column (`tableColumns`), on **`hybrid` mode only**, and on the query tokenizing into **≥ 2 parts**; it merges **anonymously** (no marker field, no tool-def change). Extraction is a combined-regex pass over the chunk text (the `countReferences` precedent), not an AST walk — no second parse, the shared-parser determinism surface stays untouched, and character-fallback chunks (json/md/xml/rst) are covered too. **Pure CPU, no embedding pass** (unlike `doc_vector`). Legacy tables take the exact pre-S1 paths (`stripUnknownColumns` covers the new column; the single-leg native-metric `combine` behavior is unchanged) — apply with a full reindex.
 
 ### Chunking & languages
 - ✅ AST-based smart chunking (web-tree-sitter); namespace / module / mod descent.
@@ -102,17 +103,40 @@ _(Nothing actively in flight — the docstring / comment embedding proposal is i
 
 ## 💡 Proposed (not yet built)
 
-> Impact / effort are rough, relative estimates. The "dead-code detection" and "call graph" proposals have since shipped (see Code intelligence in [`features.md`](./features.md)); the "Embed docstring / comment separately" proposal shipped in 2.4.0.
+> Impact / effort are rough, relative estimates. The "dead-code detection" and "call graph" proposals have since shipped (see Code intelligence in [`features.md`](./features.md)); the "Embed docstring / comment separately" proposal shipped in 2.4.0; [S1](./proposals.md#s1-identifier-part-bm25-tokenization) identifier-part BM25 tokenization shipped in Unreleased. **Detailed designs** (motivation, mechanics, files touched, risks, acceptance criteria) for the items marked with an ID live in [`proposals.md`](./proposals.md) — read it before starting any of them.
 
-### New capabilities
+### New capabilities (detailed designs in [`proposals.md`](./proposals.md))
+| ID | Proposal | Description | Impact | Effort |
+|----|----------|-------------|--------|--------|
+| [S2](./proposals.md#s2-find_symbol-fuzzy-fallback) | **`find_symbol` fuzzy fallback** | Ngram-FTS tier when exact/prefix misses (typos resolve, `fuzzy: true` marked, opt-out). Model-independent. | Medium | Low-Medium |
+| [S3](./proposals.md#s3-pathsurface-boost) | **Path/surface boost** | Small multiplicative post-RRF adjustments (source-root, short-path, test/generated demotion) before rerank. Pure logic, no reindex. | Medium | Low |
+| [S4](./proposals.md#s4-query-expansion-local-llm) | **Query expansion (local LLM)** | Opt-in `expand:true`: Ollama rewrites the query into 2–3 variants (symbol-shaped + rephrased), run through `searchBatch` and merged. | Medium | Low-Medium |
+| [C1](./proposals.md#c1-get_change_impact) | **`get_change_impact`** | "If I change X, what breaks?" — one ranked report joining call-graph callers + imported-by + reference counts (all three already cached). Pure synthesis. | High | Low-Medium |
+| [C2](./proposals.md#c2-public-api-diff--breaking-change-detector) | **Public API diff / breaking changes** | Compare exported symbols between git refs (historical surface re-parsed from `git show`, no index mutation); classified removed/signature-changed/added. | High | Medium-High |
+| [C3](./proposals.md#c3-hotspot--technical-debt-report) | **Hotspot / tech-debt report** | Git churn × size × dead-code/coupling density → ranked hotspot bands ("over-changed and over-coupled"). | Medium | Medium |
+| [C4](./proposals.md#c4-ownership-blame-enrichment) | **Ownership / blame enrichment** | Opt-in per-search `git blame` enrichment: `lastAuthor`/`lastCommitDate`/range churn per result (the stronger form of the recency proposal). | Medium | Low-Medium |
+| [C5](./proposals.md#c5-coupling-metrics) | **Coupling metrics** | fanIn/fanOut/instability per file from the existing dependency-graph cache; hub and change-magnet bands. | Low-Medium | Low |
+| [A1](./proposals.md#a1-get_context_pack) | **`get_context_pack`** | One call = search hits + per-hit file outline + forward imports + context lines under a single pack-level char budget. Collapses an agent's 4–6 round-trips into one. | High | Medium |
+| [A2](./proposals.md#a2-mcp-resources--index-notifications) | **MCP resources + index notifications** | Expose indexes/overview/status as MCP resources; job-completion notifications over stdio (HTTP stays stateless — read-on-demand resources only). | Medium | Low-Medium |
+| [A3](./proposals.md#a3-search-analytics-query-log) | **Search analytics / query log** | Bounded `query_log` in the registry; `cidx stats` surfaces zero-hit queries (index-gap signal) and latency. | Low-Medium | Low |
+| [O1](./proposals.md#o1-cidx-doctor) | **`cidx doctor`** | One read-only diagnostic: daemon/Ollama/model/schema-freshness/orphan-tables/config/disk checks, each `ok`/`warn`/`fail` with a fix hint. | Medium | Low |
+| [O2](./proposals.md#o2-zero-downtime-model-migration) | **Zero-downtime model migration** | Model change → `migrate` job builds a shadow table off to the side and swaps atomically; search keeps serving self-consistent vectors throughout. | Medium | Medium-High |
+| [O3](./proposals.md#o3-table-stats--compact) | **Table stats / compact** | Per-table disk/row/index-age report (`cidx stats`); `cidx compact` via the native optimize API (only if the pinned LanceDB has it). | Low | Low |
+| [O4](./proposals.md#o4-daemon-idle-shutdown) | **Daemon idle shutdown** | Opt-in `daemon.idleTimeoutMinutes`: graceful shutdown after N idle minutes (no jobs, no open MCP session); auto-start covers the next touch. | Low | Low |
+
+### Small capabilities (short proposals, no detailed design yet)
 | Proposal | Description | Impact | Effort |
 |----------|-------------|--------|--------|
-| **Recency signal** | Slight boost for recently changed code (git mtime). | Medium | Low-Medium |
+| **Recency signal** | Slight boost for recently changed code (git mtime). Superseded in spirit by [C4](./proposals.md#c4-ownership-blame-enrichment) — reconcile when one ships. | Medium | Low-Medium |
 | **`maxFileSizeBytes` guard** | Skip oversized data files without relying solely on `.cidxignore`. | Low-Medium | Low |
-| **Combined `search + outline`** | Return a hit's file outline in the same call; saves a turn. | Low-Medium | Low |
+| **Combined `search + outline`** | Return a hit's file outline in the same call; saves a turn. Subsumed by [A1](./proposals.md#a1-get_context_pack) (which adds imports + a budget). | Low-Medium | Low |
 
 ### Suggested order
-1. Recency (depth).
+1. `O1` `cidx doctor` (cheapest, most concrete user benefit).
+2. `A1` `get_context_pack` (agent-UX multiplier; pure composition).
+3. `C1` `get_change_impact` (three cached feeds joined).
+4. `C2` public API diff (highest effort of the five; schedule after the cheap wins).
+5. The rest per `proposals.md`'s table: `C4`, `S3`, `A2`, `C5`, `S2`, `A3`, `O3`, `S4`, `C3`, `O4`, `O2`.
 
 ---
 
