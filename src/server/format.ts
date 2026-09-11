@@ -10,6 +10,7 @@ import type {
   CommitSearchResult,
   CommitHit,
   ContextPack,
+  ChangeImpactReport,
 } from "../core/index-manager";
 import type { OutlineEntry } from "../chunking/chunker";
 
@@ -340,6 +341,87 @@ export function formatCommits(r: CommitSearchResult): string {
   }
   if (r.truncated) {
     lines.push("\n⚠ commit limit hit — older matches exist; pass a higher --limit for more.");
+  }
+  return lines.join("\n");
+}
+
+// ------------------------------------------------------- change impact (C1)
+
+/** One line for a caller entry: symbol + type + location + depth + signature. */
+function impactCallerLine(c: ChangeImpactReport["callers"]["items"][number]): string {
+  const type = c.symbolType ? ` [${c.symbolType}]` : "";
+  const loc = `  ${c.relativeFile || c.file}:${c.startLine}${c.endLine ? `-${c.endLine}` : ""}`;
+  const depth = c.depth > 1 ? `  (depth ${c.depth})` : "";
+  const sig = c.signature ? ` — ${c.signature}` : "";
+  return `${c.symbol}${type}${loc}${depth}${sig}`;
+}
+
+/**
+ * Converts a change-impact report to text, sections in severity order:
+ * direct callers → importers → textual references, with the test files
+ * ("covered by") and the change site's own fan-out called out alongside.
+ */
+export function formatImpact(r: ChangeImpactReport): string {
+  const lines: string[] = [];
+  const a = r.anchor;
+  lines.push(`Change impact — project: ${r.project}`);
+  lines.push(
+    `Anchor: ${a.symbol}${a.symbolType ? ` [${a.symbolType}]` : ""}  ${a.relativeFile || a.file}:${a.startLine}${a.endLine ? `-${a.endLine}` : ""}${a.signature ? ` — ${a.signature}` : ""}`,
+  );
+  lines.push(
+    `Change site: ${r.fanOut.importedFiles} imported file(s), ${r.fanOut.calledSymbols} called symbol(s)` +
+      (r.fanOut.imports.length > 0 ? ` — ${r.fanOut.imports.join(", ")}` : ""),
+  );
+
+  lines.push(
+    `\n▲ Direct callers (${r.callers.total}) — a caller breaks when the signature or behavior changes`,
+  );
+  if (r.callers.items.length === 0) {
+    lines.push("  (no indexed caller within the requested depth)");
+  } else {
+    for (const c of r.callers.items) lines.push(`  ${impactCallerLine(c)}`);
+  }
+
+  lines.push(`\n→ Importers (${r.importers.total}) — the module's exports matter to these files`);
+  if (r.importers.items.length === 0) {
+    lines.push("  (no indexed file imports this file)");
+  } else {
+    for (const i of r.importers.items) {
+      lines.push(`  ${i.relativeFile || i.file}${i.alsoReferences ? "  (also mentions the symbol)" : ""}`);
+    }
+  }
+
+  lines.push(
+    `\n≈ Textual references — ${r.referenceCount} line(s) mention "${a.symbol}"` +
+      (r.references.total > 0 ? ` (${r.references.total} outside test files):` : ""),
+  );
+  if (r.references.items.length === 0) {
+    lines.push("  (no textual reference outside test files)");
+  } else {
+    for (const ref of r.references.items) {
+      const sym = ref.inSymbol ? `  (in ${ref.inSymbolType ?? "symbol"} ${ref.inSymbol})` : "";
+      lines.push(`  ${ref.relativeFile || ref.file}:${ref.line}: ${ref.text}${sym}`);
+    }
+  }
+
+  lines.push(
+    `\n✓ Covered by tests (${r.coveredBy.total}) — exercised, not consumed` +
+      (r.coveredBy.items.length > 0 ? ":" : ""),
+  );
+  if (r.coveredBy.items.length === 0) {
+    lines.push("  (no test file calls, imports or mentions this symbol)");
+  } else {
+    for (const c of r.coveredBy.items) {
+      lines.push(`  ${c.relativeFile || c.file}  (via ${c.via.join(", ")})`);
+    }
+  }
+
+  lines.push(`\n(scanned ${r.scannedSymbols} callable symbol(s) / ${r.scannedChunks} chunk(s))`);
+  if (r.truncated) {
+    lines.push("⚠ a section cap was hit — pass a higher --limit for more.");
+  }
+  if (r.scanTruncated) {
+    lines.push("⚠ the table exceeded its row cap — coverage is partial; reindex for full coverage.");
   }
   return lines.join("\n");
 }

@@ -24,6 +24,7 @@ import {
   formatDeadCode,
   formatCallGraph,
   formatCommits,
+  formatImpact,
 } from "./format";
 import type { JobQueue } from "../core/job-queue";
 import type { IndexManager } from "../core/index-manager";
@@ -426,6 +427,35 @@ function buildServer(deps: McpDeps): Server {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text", text: `Commit search error: ${msg}` }], isError: true };
+      }
+    }
+
+    if (name === "get_change_impact") {
+      const args = rawArgs as {
+        symbol?: string;
+        path?: string;
+        project?: string;
+        depth?: number;
+        limit?: number;
+      };
+      if (!args.symbol && !args.path) {
+        return {
+          content: [{ type: "text", text: "Provide a 'symbol' name and/or a 'path' (at least one is required)." }],
+          isError: true,
+        };
+      }
+      const opts: { symbol?: string; path?: string; project?: string; depth?: number; limit?: number } = {};
+      if (typeof args.symbol === "string") opts.symbol = args.symbol;
+      if (typeof args.path === "string") opts.path = args.path;
+      if (typeof args.project === "string") opts.project = args.project;
+      if (typeof args.depth === "number") opts.depth = args.depth;
+      if (typeof args.limit === "number") opts.limit = args.limit;
+      try {
+        const impact = await deps.manager.getChangeImpact(opts);
+        return { content: [{ type: "text", text: formatImpact(impact) }] };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text", text: `Change-impact error: ${msg}` }], isError: true };
       }
     }
 

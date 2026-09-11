@@ -394,4 +394,40 @@ export const TOOL_DEFINITIONS: Tool[] = [
       required: ["query"],
     },
   },
+  {
+    name: "get_change_impact",
+    description:
+      "ONE ranked answer to 'if I change X, what breaks?'. Joins three views that already exist — " +
+      "the direct callers (call graph), the files that import the symbol's module (dependency graph), " +
+      "and the whole-identifier references (with a few representative file:line hits and a total count) — " +
+      "and ranks them by severity: a consumer that CALLS the symbol outranks a file that merely IMPORTS " +
+      "its module, which outranks a loose textual mention. Each section is capped by 'limit' and reports " +
+      "'total' + 'truncated'. Test files are split out into 'coveredBy' (exercised by a test) instead of " +
+      "counting as production consumers, and 'fanOut' shows how entangled the change site itself is " +
+      "(what its file imports, what the symbol calls). Anchor resolution mirrors get_call_graph: provide " +
+      "a 'symbol' (function/method name, exact/prefix/dotted), a 'path' (its file), or both (disambiguate); " +
+      "at least one is required. LIMITATION: matching is whole-identifier over indexed content, not full " +
+      "LSP resolution, so same-named symbols in different scopes are indistinguishable — treat the report " +
+      "as a review aid, not proof. No schema change, no reindex.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        symbol: {
+          type: "string",
+          description: "A callable symbol name to center the report on (exact, then prefix, then dotted).",
+        },
+        path: {
+          type: "string",
+          description: "Absolute path of the changed file; disambiguates 'symbol', or resolves the file's single callable.",
+        },
+        project: {
+          type: "string",
+          description: "Restrict to this project (optional; inferred from the path, or the single indexed project).",
+        },
+        depth: { type: "number", description: "How many caller levels to follow, 1 = direct callers only (default: 3)." },
+        limit: { type: "number", description: "Cap per section (default: 25); exceeding it sets 'truncated'." },
+      },
+      required: [],
+    },
+  },
 ];
