@@ -1,6 +1,6 @@
 # Status — Done / Proposed / Roadmap
 
-> The living tracker. **When you finish, start, or decide on something, edit this file.** Pair each change with an entry in [`changelog.md`](./changelog.md) and (for behavior) [`features.md`](./features.md).
+> The living tracker. **When you finish, start, or decide on something, edit this file.** Pair each change with an entry in [`changelog.md`](./changelog.md) and (for behavior) [`features.md`](./features.md); a proposal that earns a real design gets fleshed out in [`proposals.md`](./proposals.md) and referenced from here by ID.
 >
 > Current release: **2.4.0** (docstring / comment embedding + doc search legs). Test suite: **296/296** passing (790 expectations).
 
@@ -102,17 +102,42 @@ _(Nothing actively in flight — the docstring / comment embedding proposal is i
 
 ## 💡 Proposed (not yet built)
 
-> Impact / effort are rough, relative estimates. The "dead-code detection" and "call graph" proposals have since shipped (see Code intelligence in [`features.md`](./features.md)); the "Embed docstring / comment separately" proposal shipped in 2.4.0.
+> Impact / effort are rough, relative estimates. The "dead-code detection" and "call graph" proposals have since shipped (see Code intelligence in [`features.md`](./features.md)); the "Embed docstring / comment separately" proposal shipped in 2.4.0. **Detailed designs** (motivation, mechanics, files touched, risks, acceptance criteria) for the items marked with an ID live in [`proposals.md`](./proposals.md) — read it before starting any of them.
 
-### New capabilities
+### New capabilities (detailed designs in [`proposals.md`](./proposals.md))
+| ID | Proposal | Description | Impact | Effort |
+|----|----------|-------------|--------|--------|
+| [S1](./proposals.md#s1-identifier-part-bm25-tokenization) | **Identifier-part BM25 tokenization** | Split identifiers into camelCase/snake_case subparts into a new `id_terms` FTS column — natural-language queries gain code hits via BM25 (the docstring legs' counterpart on the code side). 2.4.0's doc-leg pattern (column gating + legacy paths) reused as-is. | High | Medium |
+| [S2](./proposals.md#s2-find_symbol-fuzzy-fallback) | **`find_symbol` fuzzy fallback** | Ngram-FTS tier when exact/prefix misses (typos resolve, `fuzzy: true` marked, opt-out). Model-independent. | Medium | Low-Medium |
+| [S3](./proposals.md#s3-pathsurface-boost) | **Path/surface boost** | Small multiplicative post-RRF adjustments (source-root, short-path, test/generated demotion) before rerank. Pure logic, no reindex. | Medium | Low |
+| [S4](./proposals.md#s4-query-expansion-local-llm) | **Query expansion (local LLM)** | Opt-in `expand:true`: Ollama rewrites the query into 2–3 variants (symbol-shaped + rephrased), run through `searchBatch` and merged. | Medium | Low-Medium |
+| [C1](./proposals.md#c1-get_change_impact) | **`get_change_impact`** | "If I change X, what breaks?" — one ranked report joining call-graph callers + imported-by + reference counts (all three already cached). Pure synthesis. | High | Low-Medium |
+| [C2](./proposals.md#c2-public-api-diff--breaking-change-detector) | **Public API diff / breaking changes** | Compare exported symbols between git refs (historical surface re-parsed from `git show`, no index mutation); classified removed/signature-changed/added. | High | Medium-High |
+| [C3](./proposals.md#c3-hotspot--technical-debt-report) | **Hotspot / tech-debt report** | Git churn × size × dead-code/coupling density → ranked hotspot bands ("over-changed and over-coupled"). | Medium | Medium |
+| [C4](./proposals.md#c4-ownership-blame-enrichment) | **Ownership / blame enrichment** | Opt-in per-search `git blame` enrichment: `lastAuthor`/`lastCommitDate`/range churn per result (the stronger form of the recency proposal). | Medium | Low-Medium |
+| [C5](./proposals.md#c5-coupling-metrics) | **Coupling metrics** | fanIn/fanOut/instability per file from the existing dependency-graph cache; hub and change-magnet bands. | Low-Medium | Low |
+| [A1](./proposals.md#a1-get_context_pack) | **`get_context_pack`** | One call = search hits + per-hit file outline + forward imports + context lines under a single pack-level char budget. Collapses an agent's 4–6 round-trips into one. | High | Medium |
+| [A2](./proposals.md#a2-mcp-resources--index-notifications) | **MCP resources + index notifications** | Expose indexes/overview/status as MCP resources; job-completion notifications over stdio (HTTP stays stateless — read-on-demand resources only). | Medium | Low-Medium |
+| [A3](./proposals.md#a3-search-analytics-query-log) | **Search analytics / query log** | Bounded `query_log` in the registry; `cidx stats` surfaces zero-hit queries (index-gap signal) and latency. | Low-Medium | Low |
+| [O1](./proposals.md#o1-cidx-doctor) | **`cidx doctor`** | One read-only diagnostic: daemon/Ollama/model/schema-freshness/orphan-tables/config/disk checks, each `ok`/`warn`/`fail` with a fix hint. | Medium | Low |
+| [O2](./proposals.md#o2-zero-downtime-model-migration) | **Zero-downtime model migration** | Model change → `migrate` job builds a shadow table off to the side and swaps atomically; search keeps serving self-consistent vectors throughout. | Medium | Medium-High |
+| [O3](./proposals.md#o3-table-stats--compact) | **Table stats / compact** | Per-table disk/row/index-age report (`cidx stats`); `cidx compact` via the native optimize API (only if the pinned LanceDB has it). | Low | Low |
+| [O4](./proposals.md#o4-daemon-idle-shutdown) | **Daemon idle shutdown** | Opt-in `daemon.idleTimeoutMinutes`: graceful shutdown after N idle minutes (no jobs, no open MCP session); auto-start covers the next touch. | Low | Low |
+
+### Small capabilities (short proposals, no detailed design yet)
 | Proposal | Description | Impact | Effort |
 |----------|-------------|--------|--------|
-| **Recency signal** | Slight boost for recently changed code (git mtime). | Medium | Low-Medium |
+| **Recency signal** | Slight boost for recently changed code (git mtime). Superseded in spirit by [C4](./proposals.md#c4-ownership-blame-enrichment) — reconcile when one ships. | Medium | Low-Medium |
 | **`maxFileSizeBytes` guard** | Skip oversized data files without relying solely on `.cidxignore`. | Low-Medium | Low |
-| **Combined `search + outline`** | Return a hit's file outline in the same call; saves a turn. | Low-Medium | Low |
+| **Combined `search + outline`** | Return a hit's file outline in the same call; saves a turn. Subsumed by [A1](./proposals.md#a1-get_context_pack) (which adds imports + a budget). | Low-Medium | Low |
 
 ### Suggested order
-1. Recency (depth).
+1. `O1` `cidx doctor` (cheapest, most concrete user benefit).
+2. `A1` `get_context_pack` (agent-UX multiplier; pure composition).
+3. `S1` identifier-part BM25 tokenization (biggest search-quality win; doc-leg pattern exists).
+4. `C1` `get_change_impact` (three cached feeds joined).
+5. `C2` public API diff (highest effort of the five; schedule after the cheap wins).
+6. The rest per `proposals.md`'s table: `C4`, `S3`, `A2`, `C5`, `S2`, `A3`, `O3`, `S4`, `C3`, `O4`, `O2`.
 
 ---
 
