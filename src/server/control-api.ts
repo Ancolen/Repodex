@@ -213,6 +213,30 @@ export function startControlApi(
     }
   });
 
+  app.post("/pack", async (req, res) => {
+    const { query, project, limit, maxChars, contextLines } = (req.body ?? {}) as {
+      query?: string;
+      project?: string;
+      limit?: number;
+      maxChars?: number;
+      contextLines?: number;
+    };
+    if (!query) {
+      res.status(400).json({ error: "'query' is required" });
+      return;
+    }
+    const opts: { limit?: number; maxChars?: number; contextLines?: number } = {};
+    if (typeof limit === "number") opts.limit = limit;
+    if (typeof maxChars === "number") opts.maxChars = maxChars;
+    if (typeof contextLines === "number") opts.contextLines = contextLines;
+    try {
+      const pack = await deps.manager.getContextPack(query, project, opts);
+      res.json(pack);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   app.post("/find", async (req, res) => {
     const { name, project, limit, language, symbolType } = (req.body ?? {}) as {
       name?: string;

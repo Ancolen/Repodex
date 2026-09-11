@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, openSync } from "node:fs";
 import { CONFIG, RESOLVED, CONFIG_SOURCE, resolveConfigPath } from "./config";
 import { daemonCommand, bridgeCommand } from "./runtime";
 import { resolveEditor, buildEditorArgs } from "./utils/editor";
+import { formatContextPack } from "./server/format";
 
 const BASE = `http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}`;
 
@@ -348,6 +349,28 @@ function printBatchResults(groups: any[]): void {
     console.log(`## Query: "${g.query}" (${n} result${n === 1 ? "" : "s"})`);
     printResults(g.results ?? []);
   });
+}
+
+async function cmdPack(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
+  await requireDaemon();
+  const query = positionals.join(" ");
+  if (!query) {
+    console.error('Usage: cidx pack "<query>" [--project x] [--limit n] [--max-chars n] [--context n]');
+    process.exit(1);
+  }
+  const body: {
+    query: string;
+    project?: string;
+    limit?: number;
+    maxChars?: number;
+    contextLines?: number;
+  } = { query };
+  if (typeof flags.project === "string") body.project = flags.project;
+  if (typeof flags.limit === "string") body.limit = Number(flags.limit);
+  if (typeof flags["max-chars"] === "string") body.maxChars = Number(flags["max-chars"]);
+  if (typeof flags.context === "string") body.contextLines = Number(flags.context);
+  const pack = await api<any>("POST", "/pack", body);
+  console.log(formatContextPack(pack));
 }
 
 async function cmdFind(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
@@ -863,6 +886,24 @@ const COMMANDS: Record<string, CmdDoc> = {
       'cidx batch "jwt" "session" "cookie" --limit 3',
     ],
   },
+  pack: {
+    usage: 'pack "<query>" [flags]',
+    summary: "Context pack: search hits + per-hit file outline + imports + context lines, in ONE call.",
+    flags: [
+      ["--project <name>", "Search only in this project (if not given, ALL projects)."],
+      ["--limit <n>", "Maximum hits considered for the pack (default: 5)."],
+      ["--max-chars <n>", "Pack-level character budget (default: 6000); hits are dropped whole to fit, top-1 always kept."],
+      ["--context <n>", "Include ±n surrounding lines (read live from the file) around each hit."],
+    ],
+    details: [
+      "Assembles what an agent otherwise burns 4-6 calls on: search, then per-hit outline + imports + context.",
+      "ONE budget over the whole pack — hits are added whole in ranked order while the pack fits; the rest are counted in 'omitted' (never truncated). Internal legs never truncate on top of it.",
+    ],
+    examples: [
+      'cidx pack "retry with backoff" --project api',
+      'cidx pack "job queue worker" --limit 8 --max-chars 4000 --context 3',
+    ],
+  },
   find: {
     usage: "find <symbolName> [flags]",
     summary: "Finds a symbol directly by NAME (exact + prefix). Most precise when you know the exact name.",
@@ -1006,7 +1047,7 @@ const COMMANDS: Record<string, CmdDoc> = {
 
 const HELP_ORDER = [
   "start", "index", "list", "status", "reindex", "sync", "remove",
-  "search", "open", "batch", "find", "refs", "overview", "deps", "deadcode", "callgraph", "commits", "config", "mcp", "stop", "version", "help",
+  "search", "open", "batch", "pack", "find", "refs", "overview", "deps", "deadcode", "callgraph", "commits", "config", "mcp", "stop", "version", "help",
 ];
 
 /** Detailed help for a single command. */
@@ -1161,6 +1202,7 @@ async function main(): Promise<void> {
     case "search": await cmdSearch(positionals, flags); break;
     case "open": await cmdOpen(positionals, flags); break;
     case "batch": await cmdBatch(positionals, flags); break;
+    case "pack": await cmdPack(positionals, flags); break;
     case "find": await cmdFind(positionals, flags); break;
     case "refs": case "references": await cmdRefs(positionals, flags); break;
     case "overview": await cmdOverview(positionals); break;

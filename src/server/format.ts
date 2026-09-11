@@ -9,6 +9,7 @@ import type {
   CallGraphNode,
   CommitSearchResult,
   CommitHit,
+  ContextPack,
 } from "../core/index-manager";
 import type { OutlineEntry } from "../chunking/chunker";
 
@@ -68,6 +69,69 @@ export function formatBatchResults(groups: BatchSearchGroup[]): string {
       return `${header}\n\n${body}`;
     })
     .join("\n\n---\n\n");
+}
+
+/**
+ * Converts a context pack to text: one block per hit — the hit itself plus its
+ * file outline and its forward imports (the legs an agent would otherwise fetch
+ * with separate calls). Mirrors `formatResults` for the hit body, with the legs
+ * in front of it so the shape reads as "where am I, what's around it".
+ */
+export function formatContextPack(pack: ContextPack): string {
+  const lines: string[] = [];
+  const scope = pack.project ? `project: ${pack.project}` : "all projects";
+  const budget =
+    pack.omitted > 0
+      ? ` · ~${pack.totalChars} chars · ${pack.omitted} omitted (budget ${pack.maxChars})`
+      : ` · ~${pack.totalChars} chars${pack.maxChars !== null ? ` of ${pack.maxChars}` : ""}`;
+  lines.push(`Context pack — "${pack.query}" · ${scope} · ${pack.hits.length} hit(s)${budget}`);
+  if (pack.hits.length === 0) {
+    lines.push("\nNo relevant code chunk found.");
+    return lines.join("\n");
+  }
+  pack.hits.forEach((h, i) => {
+    const r = h.hit;
+    const loc =
+      r.startLine !== undefined && r.endLine !== undefined
+        ? `${r.filePath}:${r.startLine}-${r.endLine}`
+        : r.filePath;
+    const sym = r.symbolName ? ` (${r.symbolType ?? "symbol"} ${r.symbolName})` : "";
+    const relevance =
+      r._score !== undefined
+        ? `Relevance (high=good): ${r._score.toFixed(4)}`
+        : r._distance !== undefined
+          ? `Score (low=close): ${r._distance.toFixed(4)}`
+          : "";
+    const meta = [relevance, r._docHit ? "doc hit" : "", r.indexedAt ? `indexed: ${fmtTime(r.indexedAt)}` : ""]
+      .filter(Boolean)
+      .join(" · ");
+    lines.push(`\nHit ${i + 1}: [${r.project}] ${loc}${sym}`);
+    if (meta) lines.push(meta);
+    if (r.signature && r.signature !== r.content.trim()) lines.push(`Signature: ${r.signature}`);
+    if (h.outline && h.outline.length > 0) {
+      lines.push(`Outline (${h.outline.length}):`);
+      for (const o of h.outline) {
+        lines.push(`  L${o.startLine}-${o.endLine}  ${o.symbolType} ${o.symbolName}`);
+      }
+    }
+    if (h.imports && h.imports.length > 0) {
+      lines.push(`Imports (${h.imports.length}${h.importsTruncated ? "+, capped" : ""}):`);
+      for (const e of h.imports) {
+        lines.push(`  → ${e.relativePath ?? e.path ?? e.raw}  (from "${e.raw}")`);
+      }
+    }
+    const before = r.contextBefore?.length
+      ? `--- ${r.contextBefore.length} lines before ---\n${r.contextBefore.join("\n")}\n`
+      : "";
+    const after = r.contextAfter?.length
+      ? `\n--- ${r.contextAfter.length} lines after ---\n${r.contextAfter.join("\n")}`
+      : "";
+    lines.push(`${before}\`\`\`\n${r.content}\n\`\`\`${after}`);
+  });
+  if (pack.omitted > 0) {
+    lines.push(`\n⚠ ${pack.omitted} further hit(s) omitted by the pack budget — raise --max-chars / lower --limit for more.`);
+  }
+  return lines.join("\n");
 }
 
 /** Converts a file's symbol map to text. */
