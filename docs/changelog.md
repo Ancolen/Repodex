@@ -15,7 +15,7 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ### Agent-facing tool ergonomics (post-D1 tool audit)
 
-`bun run typecheck` clean, `bun test` **591/591** (1625 expect). A full audit of every MCP tool — definition and live payload — drove one pass of ergonomics fixes: the toolset now speaks the agent's language end to end (anchor by the path you know, self-correct from the error you get, never a silent cap, never a wasted kilobyte).
+`bun run typecheck` clean, `bun test` **593/593** (1633 expect). A full audit of every MCP tool — definition and live payload — drove one pass of ergonomics fixes: the toolset now speaks the agent's language end to end (anchor by the path you know, self-correct from the error you get, never a silent cap, never a wasted kilobyte).
 
 #### One-anchor project resolution: `project?` / `path?` everywhere
 
@@ -24,6 +24,10 @@ Eight tools that previously demanded the daemon's registered project NAME accept
 #### `find_references` honesty: no silent caps
 
 The reference scan now returns an honest envelope — `{ refs, total, truncated }` — where `total` counts **every distinct occurrence found before the limit cut** (the candidate scan uses the same bounded row cap the dead-code/impact passes pay, instead of a `limit*4` chunk pool that could under-count) and `truncated` says when the limit bit. The rendered text says *"50 of 132 reference(s) (limit reached …)"* instead of a bare "50" that looked complete. Doc artifacts (.md/.mdx/.xml/.rst) — which are indexed chunks, so a changelog mention IS a real occurrence — remain evidence **by default**, and `includeDocs: false` / `--no-docs` answers the code-only "who calls X" question.
+
+#### Search results stop shipping embeddings
+
+`searchIndex` / `searchAll` / `findSymbol` (and every payload that flows from them — `/search`, `/search/batch`, `/find`, `/pack`, the MCP `structuredContent`, the stdio bridge's HTTP hop) now drop the `vector` and `doc_vector` columns at the public boundary (`IndexManager.stripEmbeddings`). Those are ~20 KB of floats per row that only the in-daemon rerank/MMR/doc-leg machinery consumes — a 3-result search goes from ~70 KB of JSON to a few KB. `doc` and `id_terms` stay (they carry real information); the raw rows inside `searchTable*` are untouched, so nothing about retrieval changes.
 
 #### Self-healing errors: the error message carries the fix
 

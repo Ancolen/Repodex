@@ -830,7 +830,7 @@ export class IndexManager {
     const refined = await this.refineAndSlice(rows, query, limit, mode, rerankOn, mmrOn);
     const scoped = refined.map((r) => this.scope(r, name, rec.lastIndexedAt));
     const enriched = await this.enrich(scoped, opts?.contextLines ?? 0);
-    return applyCharBudget(enriched, opts?.maxChars);
+    return this.stripEmbeddings(applyCharBudget(enriched, opts?.maxChars));
   }
 
   /** Search across all projects; results are merged and ranked. */
@@ -862,7 +862,7 @@ export class IndexManager {
     const ranked = this.rankCombined(perTable.flat(), mode);
     const refined = await this.refineAndSlice(ranked, query, limit, mode, rerankOn, mmrOn);
     const enriched = await this.enrich(refined, opts?.contextLines ?? 0);
-    return applyCharBudget(enriched, opts?.maxChars);
+    return this.stripEmbeddings(applyCharBudget(enriched, opts?.maxChars));
   }
 
   /**
@@ -996,7 +996,7 @@ export class IndexManager {
       const rec = this.registry.getIndex(project);
       if (!rec) throw this.indexNotFound(project);
       const rows = await searchSymbol(rec.tableName, name, limit, where);
-      return this.enrich(rows.map((r) => this.scope(r, project, rec.lastIndexedAt)), 0);
+      return this.stripEmbeddings(await this.enrich(rows.map((r) => this.scope(r, project, rec.lastIndexedAt)), 0));
     }
     const indexes = this.registry.listIndexes();
     const perTable = await Promise.all(
@@ -1009,12 +1009,26 @@ export class IndexManager {
         }
       }),
     );
-    return this.enrich(perTable.flat().slice(0, limit), 0);
+    return this.stripEmbeddings(await this.enrich(perTable.flat().slice(0, limit), 0));
   }
 
   /** Wraps a raw row with project + freshness metadata. */
   private scope(r: SearchResult, project: string, indexedAt: number | null): ScopedSearchResult {
     return { ...r, project, indexedAt };
+  }
+
+  /**
+   * Public search results never carry the embedding columns. `vector` and
+   * `doc_vector` are ~20 KB of floats per row that no consumer of a search
+   * RESULT needs: the reranker/MMR/doc-leg machinery consumed them upstream,
+   * inside this class. Dropping them at the public boundary (searchIndex /
+   * searchAll / findSymbol) keeps the control-API JSON, the MCP
+   * `structuredContent` and the CLI payloads small — a 3-result search goes
+   * from ~70 KB to a few KB. `doc` and `id_terms` are kept (they carry real
+   * information); the raw rows inside `searchTable*` are untouched.
+   */
+  private stripEmbeddings(rows: ScopedSearchResult[]): ScopedSearchResult[] {
+    return rows.map(({ vector: _vector, doc_vector: _doc_vector, ...rest }) => rest as ScopedSearchResult);
   }
 
   /**
