@@ -361,6 +361,47 @@ function sanitize(name: string): string {
   return s.length > 0 ? s : "idx";
 }
 
+/**
+ * Closest indexed project name for a mistyped guess: case-insensitive substring
+ * either way, else a shared-prefix ratio. Loose on purpose — this is an
+ * error-message hint, never a resolution.
+ */
+function nearestProjectName(name: string, available: readonly string[]): string | undefined {
+  const q = name.toLowerCase();
+  let best: string | undefined;
+  let bestScore = 0;
+  for (const c of available) {
+    const cl = c.toLowerCase();
+    let score = 0;
+    if (cl.includes(q) || q.includes(cl)) score = 0.9;
+    else {
+      const n = Math.min(q.length, cl.length);
+      let shared = 0;
+      while (shared < n && q[shared] === cl[shared]) shared++;
+      score = (shared * 2) / (q.length + cl.length);
+    }
+    if (score > bestScore) {
+      best = c;
+      bestScore = score;
+    }
+  }
+  return bestScore >= 0.6 ? best : undefined;
+}
+
+/**
+ * The self-healing "unknown project" message: names what IS indexed and, when
+ * the guess is close, the likeliest intended project — an agent reading this
+ * can correct itself in the same turn instead of paying a second `list_indexes`
+ * round-trip. Exported: the control API reuses it for its own 404s.
+ */
+export function indexNotFoundMessage(name: string, available: readonly string[]): string {
+  let msg = `Index not found: ${name}`;
+  if (available.length > 0) msg += ` (available: ${available.join(", ")})`;
+  const hint = nearestProjectName(name, available);
+  if (hint) msg += ` — did you mean '${hint}'?`;
+  return msg;
+}
+
 /** Symbol types that can make/receive a call (the call-graph inventory). */
 const CALLABLE_TYPES = new Set(["function", "method", "constructor"]);
 
@@ -609,7 +650,7 @@ export class IndexManager {
   /** Reindexes an existing project from scratch. */
   reindex(name: string): IndexRecord {
     const rec = this.registry.getIndex(name);
-    if (!rec) throw new Error(`Index not found: ${name}`);
+    if (!rec) throw this.indexNotFound(name);
     if (rec.status === "indexing") return rec; // already in progress
 
     this.registry.setIndexStatus(name, "indexing");
@@ -633,7 +674,7 @@ export class IndexManager {
    */
   syncIndex(name: string): IndexRecord {
     const rec = this.registry.getIndex(name);
-    if (!rec) throw new Error(`Index not found: ${name}`);
+    if (!rec) throw this.indexNotFound(name);
     if (rec.status === "indexing") return rec; // already in progress
 
     // A changed per-project embedding model (.cidx.json) can't be applied
@@ -698,6 +739,44 @@ export class IndexManager {
     return this.registry.getIndex(name);
   }
 
+  /** The self-healing "Index not found" error (names the available projects). */
+  private indexNotFound(name: string): Error {
+    return new Error(indexNotFoundMessage(name, this.registry.listIndexes().map((r) => r.name)));
+  }
+
+  /**
+   * Resolves an optional project anchor — an explicit `project` name, or a
+   * `path` inside an indexed project (prefix match, most-specific wins) — to a
+   * project NAME. The shared engine for every tool that accepts `project?`/
+   * `path?`: the search family passes `allWhenUnset` (nothing given → search
+   * all projects), the per-project report tools pass `false` (nothing given →
+   * the single indexed project, or an error that names them). Every failure
+   * mode is self-healing: the error lists the available projects so the caller
+   * can correct itself without another round-trip.
+   */
+  resolveProjectScope(
+    project?: string,
+    filePath?: string,
+    allWhenUnset: boolean = true,
+  ): string | undefined {
+    if (project) {
+      const rec = this.registry.getIndex(project);
+      if (!rec) throw this.indexNotFound(project);
+      return rec.name;
+    }
+    if (filePath) return this.resolveProjectForFile(path.resolve(filePath)).name;
+    if (allWhenUnset) return undefined;
+    const all = this.registry.listIndexes();
+    if (all.length === 0) throw new Error("No indexed project; index a directory first.");
+    if (all.length > 1) {
+      throw new Error(
+        `Multiple projects are indexed (${all.map((p) => p.name).join(", ")}) — ` +
+          "pass the 'project' (or 'path') argument to pick one.",
+      );
+    }
+    return all[0]!.name;
+  }
+
   /** The job for a project still queued/running (if any) — for progress. */
   activeJob(name: string): Job | null {
     const id = this.jobByIndex.get(name);
@@ -715,7 +794,7 @@ export class IndexManager {
     opts?: SearchOptions,
   ): Promise<ScopedSearchResult[]> {
     const rec = this.registry.getIndex(name);
-    if (!rec) throw new Error(`Index not found: ${name}`);
+    if (!rec) throw this.indexNotFound(name);
     const mode = opts?.mode ?? "hybrid";
     // The query is embedded with the model the table was built with (the record
     // pins it — global config or a .cidx.json per-project override), so vectors
@@ -895,7 +974,7 @@ export class IndexManager {
     const where = buildWhere(filters);
     if (project) {
       const rec = this.registry.getIndex(project);
-      if (!rec) throw new Error(`Index not found: ${project}`);
+      if (!rec) throw this.indexNotFound(project);
       const rows = await searchSymbol(rec.tableName, name, limit, where);
       return this.enrich(rows.map((r) => this.scope(r, project, rec.lastIndexedAt)), 0);
     }
@@ -969,7 +1048,7 @@ export class IndexManager {
     let targets: IndexRecord[];
     if (project) {
       const rec = this.registry.getIndex(project);
-      if (!rec) throw new Error(`Index not found: ${project}`);
+      if (!rec) throw this.indexNotFound(project);
       targets = [rec];
     } else {
       targets = this.registry.listIndexes();
@@ -1032,7 +1111,7 @@ export class IndexManager {
    */
   async repoOverview(name: string): Promise<RepoOverview> {
     const rec = this.registry.getIndex(name);
-    if (!rec) throw new Error(`Index not found: ${name}`);
+    if (!rec) throw this.indexNotFound(name);
 
     const files = this.registry.listCachedFiles(name);
     const meta = await tableMetadata(rec.tableName);
@@ -1192,14 +1271,15 @@ export class IndexManager {
       rec = this.resolveProjectForFile(absFile, opts.project);
     } else if (opts.project) {
       const r = this.registry.getIndex(opts.project);
-      if (!r) throw new Error(`Index not found: ${opts.project}`);
+      if (!r) throw this.indexNotFound(opts.project);
       rec = r;
     } else {
       const all = this.registry.listIndexes();
       if (all.length === 0) throw new Error("No indexed project; index a directory first.");
       if (all.length > 1) {
         throw new Error(
-          `'${symbol}' could belong to multiple projects (${all.map((p) => p.name).join(", ")}); pass --project.`,
+          `'${symbol}' could belong to multiple projects (${all.map((p) => p.name).join(", ")}) — " +
+          "pass the 'project' (or 'path') argument to disambiguate.`,
         );
       }
       rec = all[0]!;
@@ -1266,7 +1346,7 @@ export class IndexManager {
     opts?: CommitQueryOpts,
   ): Promise<CommitSearchResult> {
     const rec = this.registry.getIndex(project);
-    if (!rec) throw new Error(`Index not found: ${project}`);
+    if (!rec) throw this.indexNotFound(project);
     const limit = opts?.limit ?? 50;
     if (!(await isGitRepo(rec.path))) {
       return { project, count: 0, commits: [], truncated: false, notARepo: true };
@@ -1326,14 +1406,15 @@ export class IndexManager {
       rec = this.resolveProjectForFile(absFile, opts.project);
     } else if (opts.project) {
       const r = this.registry.getIndex(opts.project);
-      if (!r) throw new Error(`Index not found: ${opts.project}`);
+      if (!r) throw this.indexNotFound(opts.project);
       rec = r;
     } else {
       const all = this.registry.listIndexes();
       if (all.length === 0) throw new Error("No indexed project; index a directory first.");
       if (all.length > 1) {
         throw new Error(
-          `'${symbol}' could belong to multiple projects (${all.map((p) => p.name).join(", ")}); pass --project.`,
+          `'${symbol}' could belong to multiple projects (${all.map((p) => p.name).join(", ")}) — " +
+          "pass the 'project' (or 'path') argument to disambiguate.`,
         );
       }
       rec = all[0]!;
@@ -1513,7 +1594,7 @@ export class IndexManager {
     opts?: { language?: string; symbolType?: string; minConfidence?: number; limit?: number },
   ): Promise<DeadCodeReport> {
     const rec = this.registry.getIndex(project);
-    if (!rec) throw new Error(`Index not found: ${project}`);
+    if (!rec) throw this.indexNotFound(project);
     const minConfidence = opts?.minConfidence ?? 0;
     const limit = opts?.limit ?? 200;
 
@@ -1661,7 +1742,7 @@ export class IndexManager {
   private resolveProjectForFile(abs: string, project?: string): IndexRecord {
     if (project) {
       const rec = this.registry.getIndex(project);
-      if (!rec) throw new Error(`Index not found: ${project}`);
+      if (!rec) throw this.indexNotFound(project);
       return rec;
     }
     const matches = this.registry.listIndexes().filter((r) => {
@@ -1669,8 +1750,10 @@ export class IndexManager {
       return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
     });
     if (matches.length === 0) {
+      const available = this.registry.listIndexes().map((r) => r.name);
       throw new Error(
-        `No indexed project contains '${abs}'. Pass --project <name> to disambiguate.`,
+        `No indexed project contains '${abs}'` +
+          (available.length > 0 ? ` (available: ${available.join(", ")})` : "") + ".",
       );
     }
     if (matches.length === 1) return matches[0]!;
@@ -1678,7 +1761,8 @@ export class IndexManager {
     matches.sort((a, b) => b.path.length - a.path.length);
     if (matches[0]!.path.length === matches[1]!.path.length) {
       throw new Error(
-        `'${abs}' belongs to multiple projects (${matches.map((m) => m.name).join(", ")}); pass --project.`,
+        `'${abs}' could belong to multiple projects (${matches.map((m) => m.name).join(", ")}) — ` +
+          "pass the 'project' (or a more specific 'path') argument to disambiguate.",
       );
     }
     return matches[0]!;
@@ -2098,7 +2182,7 @@ export class IndexManager {
     },
   ): Promise<ApiDiffResult> {
     const rec = this.registry.getIndex(project);
-    if (!rec) throw new Error(`Index not found: ${project}`);
+    if (!rec) throw this.indexNotFound(project);
     const limit = opts?.limit ?? 200;
     const head = opts?.head ?? WORKING_TREE;
 
@@ -2314,14 +2398,15 @@ export class IndexManager {
       rec = this.resolveProjectForFile(path.resolve(filePath), opts.project);
     } else if (opts.project) {
       const r = this.registry.getIndex(opts.project);
-      if (!r) throw new Error(`Index not found: ${opts.project}`);
+      if (!r) throw this.indexNotFound(opts.project);
       rec = r;
     } else {
       const all = this.registry.listIndexes();
       if (all.length === 0) throw new Error("No indexed project; index a directory first.");
       if (all.length > 1) {
         throw new Error(
-          `check_docs could target multiple projects (${all.map((p) => p.name).join(", ")}); pass project or path.`,
+          `check_docs could target multiple projects (${all.map((p) => p.name).join(", ")}) — " +
+          "pass the 'project' (or 'path') argument.`,
         );
       }
       rec = all[0]!;

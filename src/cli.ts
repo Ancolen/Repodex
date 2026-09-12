@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, openSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, statSync } from "node:fs";
 import { CONFIG, RESOLVED, CONFIG_SOURCE, resolveConfigPath } from "./config";
 import { daemonCommand, bridgeCommand } from "./runtime";
 import { daemonCheck, type DoctorCheck, type DoctorReport } from "./core/doctor";
@@ -454,14 +454,17 @@ async function cmdRefs(positionals: string[], flags: Record<string, string | boo
   }
 }
 
-async function cmdOverview(positionals: string[]): Promise<void> {
+async function cmdOverview(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
   await requireDaemon();
-  const name = positionals[0];
-  if (!name) {
-    console.error("Usage: cidx overview <name>");
-    process.exit(1);
-  }
-  const o = await api<any>("POST", "/overview", { name });
+  // An existing dir path as the positional (or --path) anchors the project; a
+  // bare name is the project name; nothing given → the daemon resolves the
+  // single indexed project (or errors naming them all).
+  const arg = positionals[0];
+  let body: { name?: string | undefined; path?: string | undefined } = {};
+  if (typeof flags.path === "string") body.path = path.resolve(flags.path);
+  else if (arg && existsSync(arg) && statSync(arg).isDirectory()) body.path = path.resolve(arg);
+  else if (arg) body.name = arg;
+  const o = await api<any>("POST", "/overview", body);
   const t = o.lastIndexedAt ? new Date(o.lastIndexedAt).toISOString() : "—";
   console.log(`\nRepo: ${o.name}  [${o.status}]`);
   console.log(`Path: ${o.path}`);
@@ -601,23 +604,26 @@ function printCallGraph(r: any): void {
 
 async function cmdCommits(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
   await requireDaemon();
-  const project = positionals[0];
-  if (!project) {
+  // The first positional is the project NAME, or an existing dir path (which
+  // anchors the project by path, like callgraph/impact do).
+  const arg = positionals[0];
+  if (!arg) {
     console.error(
-      "Usage: cidx commits <project> [query] [--path x] [--author x] [--since x] [--until x] [--limit n] [--files]",
+      "Usage: cidx commits <project|dir> [query] [--path x] [--author x] [--since x] [--until x] [--limit n] [--files]",
     );
     process.exit(1);
   }
+  const isDir = existsSync(arg) && statSync(arg).isDirectory();
   const body: {
-    project: string;
+    project?: string | undefined;
+    path?: string | undefined;
     query?: string;
-    path?: string;
     author?: string;
     since?: string;
     until?: string;
     withFiles?: boolean;
     limit?: number;
-  } = { project };
+  } = isDir ? { path: path.resolve(arg) } : { project: arg };
   // The message query is the 2nd positional (ergonomic) or the --query flag.
   const query = typeof flags.query === "string" ? flags.query : positionals[1];
   if (typeof query === "string" && query.length > 0) body.query = query;
@@ -664,18 +670,29 @@ function printCommits(r: any): void {
 
 async function cmdDeadcode(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
   await requireDaemon();
-  const project = positionals[0];
-  if (!project) {
-    console.error("Usage: cidx deadcode <project> [--language x] [--type x] [--min-confidence n] [--limit n]");
+  // The positional is the project NAME, an existing dir path (anchors by path,
+  // like callgraph/impact do), or absent → the daemon resolves the single
+  // indexed project (or errors naming them all).
+  const arg = positionals[0];
+  if (!arg && typeof flags.path !== "string") {
+    console.error(
+      "Usage: cidx deadcode [project|dir] [--path x] [--language x] [--type x] [--min-confidence n] [--limit n]",
+    );
     process.exit(1);
   }
   const body: {
-    project: string;
+    project?: string | undefined;
+    path?: string | undefined;
     language?: string;
     symbolType?: string;
     minConfidence?: number;
     limit?: number;
-  } = { project };
+  } =
+    typeof flags.path === "string"
+      ? { path: path.resolve(flags.path) }
+      : arg && existsSync(arg) && statSync(arg).isDirectory()
+        ? { path: path.resolve(arg) }
+        : { project: arg };
   if (typeof flags.language === "string") body.language = flags.language;
   if (typeof flags.type === "string") body.symbolType = flags.type;
   if (typeof flags["min-confidence"] === "string") body.minConfidence = Number(flags["min-confidence"]);
@@ -718,21 +735,26 @@ function printDeadCode(r: any): void {
 /** `cidx apidiff <project> <base> [--head x] [--limit n] [--max-files n] [--exported-only] [--all]` */
 async function cmdApiDiff(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
   await requireDaemon();
-  const project = positionals[0];
+  // The first positional is the project NAME or an existing dir path (which
+  // anchors the project by path, like callgraph/impact do); the second is the
+  // 'before' git ref.
+  const arg = positionals[0];
   const base = positionals[1];
-  if (!project || !base) {
-    console.error("Usage: cidx apidiff <project> <base> [--head x] [--limit n] [--max-files n] [--exported-only] [--all]");
+  if (!arg || !base) {
+    console.error("Usage: cidx apidiff <project|dir> <base> [--head x] [--limit n] [--max-files n] [--exported-only] [--all]");
     process.exit(1);
   }
+  const isDir = existsSync(arg) && statSync(arg).isDirectory();
   const body: {
-    project: string;
+    project?: string | undefined;
+    path?: string | undefined;
     base: string;
     head?: string;
     limit?: number;
     maxFiles?: number;
     exportedOnly?: boolean;
     includeUnchanged?: boolean;
-  } = { project, base };
+  } = isDir ? { path: path.resolve(arg), base } : { project: arg, base };
   if (typeof flags.head === "string") body.head = flags.head;
   if (typeof flags.limit === "string") body.limit = Number(flags.limit);
   if (typeof flags["max-files"] === "string") body.maxFiles = Number(flags["max-files"]);
@@ -1037,7 +1059,7 @@ const COMMANDS: Record<string, CmdDoc> = {
     examples: ["cidx refs loginUser", "cidx refs IndexManager --project api"],
   },
   overview: {
-    usage: "overview <name>",
+    usage: "overview [project|dir] [flags]",
     summary: "Structural onboarding summary of a project (languages, symbol types, dirs, entry points).",
     details: [
       "Aggregated from the index (no LLM). Use it to quickly learn 'what is this repo, where to start'.",
@@ -1120,7 +1142,7 @@ const COMMANDS: Record<string, CmdDoc> = {
     examples: ["cidx doccheck .", "cidx doccheck repodex --window", "cidx doccheck api --since v1.2.0"],
   },
   commits: {
-    usage: "commits <project> [query] [flags]",
+    usage: "commits <project|dir> [query] [flags]",
     summary: "Git-history / commit-message search: when/why a feature was added, who changed a file.",
     aliases: ["git-log", "gitlog"],
     flags: [
@@ -1143,7 +1165,7 @@ const COMMANDS: Record<string, CmdDoc> = {
     ],
   },
   deadcode: {
-    usage: "deadcode <project> [flags]",
+    usage: "deadcode [project|dir] [flags]",
     summary: "Potential dead code: zero-reference symbols, scored conservatively (candidates to verify).",
     flags: [
       ["--language <lang>", "Only this language."],
@@ -1161,7 +1183,7 @@ const COMMANDS: Record<string, CmdDoc> = {
     ],
   },
   apidiff: {
-    usage: "apidiff <project> <base> [flags]",
+    usage: "apidiff <project|dir> <base> [flags]",
     summary: "Public-API diff between two git refs: removed / signature-changed / added symbols.",
     aliases: ["api-diff"],
     flags: [
@@ -1463,7 +1485,7 @@ async function main(): Promise<void> {
     case "pack": await cmdPack(positionals, flags); break;
     case "find": await cmdFind(positionals, flags); break;
     case "refs": case "references": await cmdRefs(positionals, flags); break;
-    case "overview": await cmdOverview(positionals); break;
+    case "overview": await cmdOverview(positionals, flags); break;
     case "deps": case "dependencies": await cmdDeps(positionals, flags); break;
     case "deadcode": case "dead-code": await cmdDeadcode(positionals, flags); break;
     case "callgraph": case "call-graph": await cmdCallGraph(positionals, flags); break;

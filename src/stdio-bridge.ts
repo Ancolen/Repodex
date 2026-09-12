@@ -154,6 +154,7 @@ async function main(): Promise<void> {
           const results = await api<Parameters<typeof formatResults>[0]>("POST", "/search", {
             query: args.query,
             project: args.project,
+            path: args.path,
             limit: args.limit,
             mode: args.mode,
             language: args.language,
@@ -171,6 +172,7 @@ async function main(): Promise<void> {
           const groups = await api<Parameters<typeof formatBatchResults>[0]>("POST", "/search/batch", {
             queries: args.queries,
             project: args.project,
+            path: args.path,
             limit: args.limit,
             mode: args.mode,
             language: args.language,
@@ -188,6 +190,7 @@ async function main(): Promise<void> {
           const pack = await api<Parameters<typeof formatContextPack>[0]>("POST", "/pack", {
             query: args.query,
             project: args.project,
+            path: args.path,
             limit: args.limit,
             maxChars: args.maxChars,
             contextLines: args.contextLines,
@@ -202,6 +205,7 @@ async function main(): Promise<void> {
           const results = await api<Parameters<typeof formatResults>[0]>("POST", "/find", {
             name: args.name,
             project: args.project,
+            path: args.path,
             limit: args.limit,
             language: args.language,
             symbolType: args.symbolType,
@@ -239,6 +243,7 @@ async function main(): Promise<void> {
           const refs = await api<Parameters<typeof formatReferences>[0]>("POST", "/references", {
             name: args.name,
             project: args.project,
+            path: args.path,
             limit: args.limit,
             language: args.language,
             symbolType: args.symbolType,
@@ -247,7 +252,8 @@ async function main(): Promise<void> {
         }
         case "get_repo_overview": {
           const overview = await api<Parameters<typeof formatOverview>[0]>("POST", "/overview", {
-            name: args.project,
+            project: args.project,
+            path: args.path,
           });
           return ok(formatOverview(overview));
         }
@@ -273,6 +279,7 @@ async function main(): Promise<void> {
         case "find_dead_code": {
           const report = await api<Parameters<typeof formatDeadCode>[0]>("POST", "/deadcode", {
             project: args.project,
+            path: args.path,
             language: args.language,
             symbolType: args.symbolType,
             minConfidence: args.minConfidence,
@@ -297,6 +304,7 @@ async function main(): Promise<void> {
         case "get_api_diff": {
           const diff = await api<Parameters<typeof formatApiDiff>[0]>("POST", "/apidiff", {
             project: args.project,
+            path: args.path,
             base: args.base,
             head: args.head,
             limit: args.limit,

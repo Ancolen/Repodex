@@ -31,6 +31,11 @@ export const TOOL_DEFINITIONS: Tool[] = [
           type: "string",
           description: "Search only in this project (optional). If not given, all projects are searched.",
         },
+        path: {
+          type: "string",
+          description:
+            "Alternative to 'project': a file/dir inside the project (the owning project is inferred). Ignored when 'project' is also given.",
+        },
         limit: {
           type: "number",
           description: "Maximum number of results to return (default: 5).",
@@ -112,6 +117,11 @@ export const TOOL_DEFINITIONS: Tool[] = [
           type: "string",
           description: "Search only in this project (optional). If not given, all projects are searched.",
         },
+        path: {
+          type: "string",
+          description:
+            "Alternative to 'project': a file/dir inside the project (the owning project is inferred). Ignored when 'project' is also given.",
+        },
         limit: {
           type: "number",
           description: "Maximum number of results PER query (default: 5).",
@@ -154,6 +164,11 @@ export const TOOL_DEFINITIONS: Tool[] = [
       properties: {
         name: { type: "string", description: "Symbol name to search for (e.g. 'loginUser', 'IndexManager')." },
         project: { type: "string", description: "Search only in this project (optional)." },
+        path: {
+          type: "string",
+          description:
+            "Alternative to 'project': a file/dir inside the project (the owning project is inferred). Ignored when 'project' is also given.",
+        },
         limit: { type: "number", description: "Maximum results (default: 20)." },
         language: { type: "string", description: "Filter by language (optional)." },
         symbolType: { type: "string", description: "Filter by symbol type (optional)." },
@@ -169,7 +184,8 @@ export const TOOL_DEFINITIONS: Tool[] = [
   {
     name: "get_index_status",
     description:
-      "Returns the indexing status and live progress (% / file) of a project (or all of them).",
+      "Returns the indexing status and live progress (% / file) of a project (or all of them). " +
+      "An unknown project name is reported with the list of available projects.",
     inputSchema: {
       type: "object",
       properties: {
@@ -218,6 +234,11 @@ export const TOOL_DEFINITIONS: Tool[] = [
       properties: {
         name: { type: "string", description: "Symbol name whose usages to find (e.g. 'loginUser')." },
         project: { type: "string", description: "Search only in this project (optional)." },
+        path: {
+          type: "string",
+          description:
+            "Alternative to 'project': a file/dir inside the project (the owning project is inferred). Ignored when 'project' is also given.",
+        },
         limit: { type: "number", description: "Maximum number of occurrences (default: 50)." },
         language: { type: "string", description: "Filter by language (optional)." },
         symbolType: { type: "string", description: "Filter by the containing symbol's type (optional)." },
@@ -231,13 +252,19 @@ export const TOOL_DEFINITIONS: Tool[] = [
       "Returns a structural onboarding summary of a project: language distribution, symbol-type " +
       "breakdown, top-level directories, likely entry points, and the files with the most symbols. " +
       "Use this when you FIRST enter a project to learn 'what is this repo and where to start'. " +
-      "Aggregated from the index (no LLM); pair it with your own reasoning for a prose summary.",
+      "Aggregated from the index (no LLM); pair it with your own reasoning for a prose summary. " +
+      "When both 'project' and 'path' are omitted and exactly one project is indexed, that project is summarized.",
     inputSchema: {
       type: "object",
       properties: {
-        project: { type: "string", description: "The project name to summarize." },
+        project: { type: "string", description: "The project name to summarize (optional)." },
+        path: {
+          type: "string",
+          description:
+            "Alternative to 'project': a file/dir inside the project (the owning project is inferred). Ignored when 'project' is also given.",
+        },
       },
-      required: ["project"],
+      required: [],
     },
   },
   {
@@ -311,13 +338,18 @@ export const TOOL_DEFINITIONS: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {
-        project: { type: "string", description: "The project to analyze (required)." },
+        project: { type: "string", description: "The project to analyze (optional when 'path' is given, or when exactly one project is indexed)." },
+        path: {
+          type: "string",
+          description:
+            "Alternative to 'project': a file/dir inside the project (the owning project is inferred). Ignored when 'project' is also given.",
+        },
         language: { type: "string", description: "Restrict to this language (optional)." },
         symbolType: { type: "string", description: "Restrict to this symbol type, e.g. 'function' or 'method' (optional)." },
         minConfidence: { type: "number", description: "Minimum confidence (0-100) to report (default: 0)." },
         limit: { type: "number", description: "Maximum number of candidates (default: 200)." },
       },
-      required: ["project"],
+      required: [],
     },
   },
   {
@@ -329,11 +361,17 @@ export const TOOL_DEFINITIONS: Tool[] = [
       "message ('query', case-insensitive regex), by file/path history, by author, and/or by date range " +
       "('since'/'until', git date syntax like '2 weeks ago' or '2024-01-01'). With no filters it returns " +
       "the most recent commits. Returns hash, author, date, subject (+ body), and optionally the changed " +
-      "files ('withFiles'). The project must be a git repo (reported as 'notARepo' otherwise).",
+      "files ('withFiles'). The project must be a git repo (reported as 'notARepo' otherwise). When " +
+      "'project' is omitted and exactly one project is indexed, that project's history is searched. " +
+      "NOTE: 'path' here is the FILE-HISTORY filter — there is deliberately no project anchor by path.",
     inputSchema: {
       type: "object",
       properties: {
-        project: { type: "string", description: "The indexed project to search the git history of (required)." },
+        project: {
+          type: "string",
+          description:
+            "The indexed project to search the git history of (optional when exactly one project is indexed).",
+        },
         query: {
           type: "string",
           description: "Case-insensitive regex matched against the commit message (subject + body).",
@@ -373,6 +411,11 @@ export const TOOL_DEFINITIONS: Tool[] = [
           type: "string",
           description: "Search only in this project (optional). If not given, all projects are searched.",
         },
+        path: {
+          type: "string",
+          description:
+            "Alternative to 'project': a file/dir inside the project (the owning project is inferred). Ignored when 'project' is also given.",
+        },
         limit: {
           type: "number",
           description: "Maximum number of hits considered for the pack (default: 5).",
@@ -410,7 +453,15 @@ export const TOOL_DEFINITIONS: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {
-        project: { type: "string", description: "The indexed project to diff (required)." },
+        project: {
+          type: "string",
+          description: "The indexed project to diff (optional when 'path' is given, or when exactly one project is indexed).",
+        },
+        path: {
+          type: "string",
+          description:
+            "Alternative to 'project': a file/dir inside the project (the owning project is inferred). Ignored when 'project' is also given.",
+        },
         base: {
           type: "string",
           description: "The 'before' git ref: a tag, a SHA, or a branch name (e.g. 'v1.2.0', 'main~3').",
@@ -441,7 +492,7 @@ export const TOOL_DEFINITIONS: Tool[] = [
             "so you never miss them).",
         },
       },
-      required: ["project", "base"],
+      required: ["base"],
     },
   },
   {

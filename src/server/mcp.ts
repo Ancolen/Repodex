@@ -12,6 +12,7 @@ import {
 import { CONFIG } from "../config";
 import { hostGuard } from "./host-guard";
 import { fileOutline } from "../chunking/chunker";
+import { indexNotFoundMessage } from "../core/index-manager";
 import { TOOL_DEFINITIONS } from "./tool-defs";
 import {
   formatResults,
@@ -55,6 +56,7 @@ function buildServer(deps: McpDeps): Server {
       const args = rawArgs as {
         query: string;
         project?: string;
+        path?: string;
         limit?: number;
         mode?: "hybrid" | "vector" | "text";
         language?: string;
@@ -79,8 +81,10 @@ function buildServer(deps: McpDeps): Server {
         doc: args.doc,
       };
       try {
-        const results = args.project
-          ? await deps.manager.searchIndex(args.project, args.query, limit, opts)
+        // 'path' anchors the search to the project containing it; neither → all projects.
+        const project = deps.manager.resolveProjectScope(args.project, args.path);
+        const results = project
+          ? await deps.manager.searchIndex(project, args.query, limit, opts)
           : await deps.manager.searchAll(args.query, limit, opts);
         return { content: [{ type: "text", text: formatResults(results) }] };
       } catch (err) {
@@ -93,6 +97,7 @@ function buildServer(deps: McpDeps): Server {
       const args = rawArgs as {
         queries?: unknown;
         project?: string;
+        path?: string;
         limit?: number;
         mode?: "hybrid" | "vector" | "text";
         language?: string;
@@ -123,9 +128,11 @@ function buildServer(deps: McpDeps): Server {
         doc: args.doc,
       };
       try {
+        // 'path' anchors the search to the project containing it; neither → all projects.
+        const project = deps.manager.resolveProjectScope(args.project, args.path);
         const groups = await deps.manager.searchBatch(
           args.queries as string[],
-          args.project,
+          project,
           limit,
           opts,
         );
@@ -140,6 +147,7 @@ function buildServer(deps: McpDeps): Server {
       const args = rawArgs as {
         query: string;
         project?: string;
+        path?: string;
         limit?: number;
         maxChars?: number;
         contextLines?: number;
@@ -152,7 +160,9 @@ function buildServer(deps: McpDeps): Server {
       if (typeof args.maxChars === "number") opts.maxChars = args.maxChars;
       if (typeof args.contextLines === "number") opts.contextLines = args.contextLines;
       try {
-        const pack = await deps.manager.getContextPack(args.query, args.project, opts);
+        // 'path' anchors the search to the project containing it; neither → all projects.
+        const project = deps.manager.resolveProjectScope(args.project, args.path);
+        const pack = await deps.manager.getContextPack(args.query, project, opts);
         // Readable text for the model + the structured object for JSON consumers.
         return {
           content: [{ type: "text", text: formatContextPack(pack) }],
@@ -168,6 +178,7 @@ function buildServer(deps: McpDeps): Server {
       const args = rawArgs as {
         name: string;
         project?: string;
+        path?: string;
         limit?: number;
         language?: string;
         symbolType?: string;
@@ -176,7 +187,8 @@ function buildServer(deps: McpDeps): Server {
         return { content: [{ type: "text", text: "'name' is required." }], isError: true };
       }
       try {
-        const results = await deps.manager.findSymbol(args.name, args.project, args.limit ?? 20, {
+        const project = deps.manager.resolveProjectScope(args.project, args.path);
+        const results = await deps.manager.findSymbol(args.name, project, args.limit ?? 20, {
           language: args.language,
           symbolType: args.symbolType,
         });
@@ -217,7 +229,18 @@ function buildServer(deps: McpDeps): Server {
         const text = fmt(args.project);
         return text
           ? { content: [{ type: "text", text }] }
-          : { content: [{ type: "text", text: `Index not found: ${args.project}` }], isError: true };
+          : {
+              content: [
+                {
+                  type: "text",
+                  text: indexNotFoundMessage(
+                    args.project,
+                    deps.manager.listIndexes().map((ix) => ix.name),
+                  ),
+                },
+              ],
+              isError: true,
+            };
       }
       const all = deps.manager.listIndexes();
       const text = all.length
@@ -272,6 +295,7 @@ function buildServer(deps: McpDeps): Server {
       const args = rawArgs as {
         name: string;
         project?: string;
+        path?: string;
         limit?: number;
         language?: string;
         symbolType?: string;
@@ -280,7 +304,8 @@ function buildServer(deps: McpDeps): Server {
         return { content: [{ type: "text", text: "'name' is required." }], isError: true };
       }
       try {
-        const refs = await deps.manager.findReferences(args.name, args.project, args.limit ?? 50, {
+        const project = deps.manager.resolveProjectScope(args.project, args.path);
+        const refs = await deps.manager.findReferences(args.name, project, args.limit ?? 50, {
           language: args.language,
           symbolType: args.symbolType,
         });
@@ -292,12 +317,11 @@ function buildServer(deps: McpDeps): Server {
     }
 
     if (name === "get_repo_overview") {
-      const args = rawArgs as { project: string };
-      if (!args.project) {
-        return { content: [{ type: "text", text: "'project' is required." }], isError: true };
-      }
+      const args = rawArgs as { project?: string; path?: string };
       try {
-        const overview = await deps.manager.repoOverview(args.project);
+        // Neither given → the single indexed project, or an error naming them all.
+        const project = deps.manager.resolveProjectScope(args.project, args.path, false)!;
+        const overview = await deps.manager.repoOverview(project);
         return { content: [{ type: "text", text: formatOverview(overview) }] };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -362,15 +386,13 @@ function buildServer(deps: McpDeps): Server {
 
     if (name === "find_dead_code") {
       const args = rawArgs as {
-        project: string;
+        project?: string;
+        path?: string;
         language?: string;
         symbolType?: string;
         minConfidence?: number;
         limit?: number;
       };
-      if (!args.project) {
-        return { content: [{ type: "text", text: "'project' is required." }], isError: true };
-      }
       const opts: {
         language?: string;
         symbolType?: string;
@@ -382,7 +404,9 @@ function buildServer(deps: McpDeps): Server {
       if (typeof args.minConfidence === "number") opts.minConfidence = args.minConfidence;
       if (typeof args.limit === "number") opts.limit = args.limit;
       try {
-        const report = await deps.manager.findDeadCode(args.project, opts);
+        // Neither given → the single indexed project, or an error naming them all.
+        const project = deps.manager.resolveProjectScope(args.project, args.path, false)!;
+        const report = await deps.manager.findDeadCode(project, opts);
         return { content: [{ type: "text", text: formatDeadCode(report) }] };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -392,7 +416,7 @@ function buildServer(deps: McpDeps): Server {
 
     if (name === "search_commits") {
       const args = rawArgs as {
-        project: string;
+        project?: string;
         query?: string;
         path?: string;
         author?: string;
@@ -401,12 +425,6 @@ function buildServer(deps: McpDeps): Server {
         withFiles?: boolean;
         limit?: number;
       };
-      if (!args.project) {
-        return {
-          content: [{ type: "text", text: "'project' is required." }],
-          isError: true,
-        };
-      }
       const opts: {
         query?: string;
         path?: string;
@@ -424,7 +442,10 @@ function buildServer(deps: McpDeps): Server {
       if (typeof args.withFiles === "boolean") opts.withFiles = args.withFiles;
       if (typeof args.limit === "number") opts.limit = args.limit;
       try {
-        const cs = await deps.manager.searchCommits(args.project, opts);
+        // NOTE: 'path' is the file-history filter — there is no project anchor by
+        // path here. Omitted project → the single indexed project, or an error.
+        const project = deps.manager.resolveProjectScope(args.project, undefined, false)!;
+        const cs = await deps.manager.searchCommits(project, opts);
         return { content: [{ type: "text", text: formatCommits(cs) }] };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -435,7 +456,8 @@ function buildServer(deps: McpDeps): Server {
     // ---- public API diff (proposal C2) ----
     if (name === "get_api_diff") {
       const args = rawArgs as {
-        project: string;
+        project?: string;
+        path?: string;
         base: string;
         head?: string;
         limit?: number;
@@ -443,9 +465,9 @@ function buildServer(deps: McpDeps): Server {
         exportedOnly?: boolean;
         includeUnchanged?: boolean;
       };
-      if (!args.project || !args.base) {
+      if (!args.base) {
         return {
-          content: [{ type: "text", text: "'project' and 'base' are required." }],
+          content: [{ type: "text", text: "'base' is required (the 'before' git ref)." }],
           isError: true,
         };
       }
@@ -462,7 +484,9 @@ function buildServer(deps: McpDeps): Server {
       if (typeof args.exportedOnly === "boolean") opts.exportedOnly = args.exportedOnly;
       if (typeof args.includeUnchanged === "boolean") opts.includeUnchanged = args.includeUnchanged;
       try {
-        const diff = await deps.manager.getApiDiff(args.project, args.base, opts);
+        // Neither given → the single indexed project, or an error naming them all.
+        const project = deps.manager.resolveProjectScope(args.project, args.path, false)!;
+        const diff = await deps.manager.getApiDiff(project, args.base, opts);
         return { content: [{ type: "text", text: formatApiDiff(diff) }] };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

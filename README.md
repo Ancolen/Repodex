@@ -161,14 +161,14 @@ PURGE_DATA=1 ./uninstall.sh   # also deletes the ~/.cidx data
 | `batch "<q1>" "<q2>" ... [flags]` | Hybrid search for several queries in one round-trip; results grouped per query |
 | `find <symbolName> [flags]` | Finds a symbol directly by name (exact + prefix) |
 | `refs <symbolName> [flags]` | Finds where a symbol is used (call sites + definition) |
-| `overview <name>` | Structural onboarding summary of a project |
+| `overview [name\|dir]` | Structural onboarding summary of a project |
 | `deps <file> [flags]` | Import graph of a file: what it imports + which indexed files import it |
 | `callgraph <symbol\|file> [flags]` | Call graph: who calls a symbol and what it calls (bounded, cycle-safe trees) |
-| `deadcode <project> [flags]` | Potential dead code: zero-reference symbols, scored conservatively |
-| `commits <project> [query] [flags]` | Git-history / commit-message search (when/why a feature was added, file history) |
+| `deadcode [project\|dir] [flags]` | Potential dead code: zero-reference symbols, scored conservatively |
+| `commits <project\|dir> [query] [flags]` | Git-history / commit-message search (when/why a feature was added, file history) |
 | `pack "<query>" [flags]` | Context pack: search hits + per-hit file outline + imports + context lines, in ONE call |
 | `impact <symbol\|file> [flags]` | Change impact: one ranked answer to "if I change X, what breaks?" |
-| `apidiff <project> <base> [flags]` | Public-API diff between two git refs (breaking symbols surfaced) |
+| `apidiff <project\|dir> <base> [flags]` | Public-API diff between two git refs (breaking symbols surfaced) |
 | `doccheck <project\|path> [flags]` | Doc–code conformance: checks the project's markdown docs against the code (deterministic, no LLM); exit 1 on drift |
 | `doctor` | Read-only diagnostic pass over the whole install (ok/warn/fail + fix hints) |
 | `config [path]` | Shows the active YAML configuration (or its path) |
@@ -327,21 +327,23 @@ For clients that support Streamable HTTP:
 
 ### MCP tools exposed to the agent
 
+Every tool that takes a `project` also takes a **`path`** — a file/dir inside the project, whose owning project is inferred (an explicit `project` wins). Nothing given: the search family searches all projects; the per-project report tools use the single indexed project or error naming them. An unknown project name comes back with the available projects (and the likeliest intended one), so the caller can self-correct in one turn.
+
 - `search_codebase(query, project?, limit?, mode?, language?, symbolType?, pathGlob?, contextLines?, rerank?, mmr?, maxChars?, doc?)` — hybrid search; if `project` is not given, in all projects. `mode` = `hybrid`/`vector`/`text`. Each result carries a derived `signature` + `indexedAt`; `contextLines > 0` adds ±N surrounding lines read live from the file; reranking and MMR diversification are on by default (pass `rerank: false` / `mmr: false` to skip); `maxChars` caps returned text (results kept whole while they fit); docstring/doc-comment search legs are on by default (`doc: false` skips them; doc-hit results carry a `[doc hit]` marker).
 - `search_codebase_batch(queries, project?, limit?, mode?, language?, symbolType?, pathGlob?, contextLines?, rerank?, mmr?, maxChars?, doc?)` — run several queries in one round-trip; results grouped per query (`## Query: "…"` sections). Same options/behavior as `search_codebase`, applied per query.
-- `find_symbol(name, project?, limit?, language?, symbolType?)` — finds a symbol by name (exact + prefix).
-- `find_references(name, project?, limit?, language?, symbolType?)` — finds where a symbol is used (call sites + definition) as `file:line` occurrences.
-- `get_repo_overview(project)` — structural onboarding summary (languages, symbol types, top directories, entry points, largest files).
+- `find_symbol(name, project?, path?, limit?, language?, symbolType?)` — finds a symbol by name (exact + prefix).
+- `find_references(name, project?, path?, limit?, language?, symbolType?)` — finds where a symbol is used (call sites + definition) as `file:line` occurrences.
+- `get_repo_overview(project?, path?)` — structural onboarding summary (languages, symbol types, top directories, entry points, largest files).
 - `list_indexes()` — lists indexed projects and their statuses.
 - `get_index_status(project?)` — indexing status and live progress (% / file).
 - `index_project(path, name?)` — the agent itself starts indexing a new directory (in the background).
 - `get_file_outline(path)` — the symbol map of a file (function/class/method + line ranges).
 - `get_dependencies(path, project?, limit?)` — a file's import graph: what it imports (resolved against the index) + which indexed files import it (reverse). `project` is inferred from the path; import edges are parsed from the file's AST.
 - `get_call_graph(symbol?, path?, project?, direction?, depth?, limit?)` — who calls a symbol and what it calls, as bounded, cycle-safe trees; centers on a symbol name and/or every callable in a file.
-- `find_dead_code(project, language?, symbolType?, minConfidence?, limit?)` — potential dead code: zero-reference symbols scored conservatively, labeled `likely dead` / `uncertain` / `review`; test files and entry points excluded.
-- `search_commits(project, query?, path?, author?, since?, until?, withFiles?, limit?)` — git-history / commit-message search; runs `git log` live in the project directory (no indexing, no embedding).
-- `get_context_pack(query, project?, limit?, maxChars?, contextLines?)` — one call assembling the hybrid-search core plus, per hit, the file's symbol outline, forward imports and surrounding context lines, all under a single pack-level character budget (hits kept whole, top hit always returned, the rest reported as `omitted`).
-- `get_api_diff(project, base, head?)` — public-API diff between two git refs compared as exported-symbol surfaces: symbols classified `removed` / `signature-changed` / `visibility-narrowed` (all breaking), `added`, `unchanged`; the historical side is re-parsed from git with the same tree-sitter recipe. No indexing, no reindex.
+- `find_dead_code(project?, path?, language?, symbolType?, minConfidence?, limit?)` — potential dead code: zero-reference symbols scored conservatively, labeled `likely dead` / `uncertain` / `review`; test files and entry points excluded.
+- `search_commits(project?, query?, path?, author?, since?, until?, withFiles?, limit?)` — git-history / commit-message search; runs `git log` live in the project directory (no indexing, no embedding).
+- `get_context_pack(query, project?, path?, limit?, maxChars?, contextLines?)` — one call assembling the hybrid-search core plus, per hit, the file's symbol outline, forward imports and surrounding context lines, all under a single pack-level character budget (hits kept whole, top hit always returned, the rest reported as `omitted`).
+- `get_api_diff(project?, path?, base, head?)` — public-API diff between two git refs compared as exported-symbol surfaces: symbols classified `removed` / `signature-changed` / `visibility-narrowed` (all breaking), `added`, `unchanged`; the historical side is re-parsed from git with the same tree-sitter recipe. No indexing, no reindex.
 - `get_change_impact(symbol?, path?, project?, depth?, limit?)` — one ranked answer to "if I change X, what breaks?": direct callers (call graph) outrank importing files (dependency graph), which outrank loose textual mentions; test files surface as `coveredBy` instead of production consumers.
 - `check_docs(project?, path?, files?, ignore?, since?, window?, noUndocumented?, ...)` — doc–code conformance checker: every backtick span in the project's markdown docs is classified and resolved against the code, **deterministically** (no Ollama, no LLM). `findings` = drift (only total-resolution misses, confidence ≥ 90); `needsReview` = everything uncertain; `undocumented` = exported symbols no doc mentions (advisory). `since`/`window` restrict the report to docs/code that actually changed; the CLI exits 1 only on drift.
 

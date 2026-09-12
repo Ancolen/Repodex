@@ -8,6 +8,7 @@ import { fileOutline } from "../chunking/chunker";
 import { measureDiskUsage, runDoctor, type DoctorPorts } from "../core/doctor";
 import { countTableRows, listTables, tableColumns } from "../services/db";
 import type { JobQueue } from "../core/job-queue";
+import { indexNotFoundMessage } from "../core/index-manager";
 import type { IndexManager } from "../core/index-manager";
 import type { IndexRecord } from "../core/registry";
 
@@ -141,7 +142,9 @@ export function startControlApi(
   app.get("/indexes/:name", (req, res) => {
     const rec = deps.manager.getIndex(req.params.name);
     if (!rec) {
-      res.status(404).json({ error: `Index not found: ${req.params.name}` });
+      res
+        .status(404)
+        .json({ error: indexNotFoundMessage(req.params.name, deps.manager.listIndexes().map((r) => r.name)) });
       return;
     }
     res.json(viewIndex(deps, rec));
@@ -206,6 +209,7 @@ export function startControlApi(
     const {
       query,
       project,
+      path: projectPath,
       limit,
       mode,
       language,
@@ -219,6 +223,7 @@ export function startControlApi(
     } = (req.body ?? {}) as {
       query?: string;
       project?: string;
+      path?: string;
       limit?: number;
       mode?: "hybrid" | "vector" | "text";
       language?: string;
@@ -236,8 +241,10 @@ export function startControlApi(
     }
     const opts = { mode, language, symbolType, pathGlob, contextLines, rerank, mmr, maxChars, doc };
     try {
-      const results = project
-        ? await deps.manager.searchIndex(project, query, limit ?? 5, opts)
+      // 'path' anchors the search to the project containing it; neither → all projects.
+      const scope = deps.manager.resolveProjectScope(project, projectPath);
+      const results = scope
+        ? await deps.manager.searchIndex(scope, query, limit ?? 5, opts)
         : await deps.manager.searchAll(query, limit ?? 5, opts);
       res.json(results);
     } catch (err) {
@@ -249,6 +256,7 @@ export function startControlApi(
     const {
       queries,
       project,
+      path: projectPath,
       limit,
       mode,
       language,
@@ -262,6 +270,7 @@ export function startControlApi(
     } = (req.body ?? {}) as {
       queries?: unknown;
       project?: string;
+      path?: string;
       limit?: number;
       mode?: "hybrid" | "vector" | "text";
       language?: string;
@@ -279,7 +288,8 @@ export function startControlApi(
     }
     const opts = { mode, language, symbolType, pathGlob, contextLines, rerank, mmr, maxChars, doc };
     try {
-      const groups = await deps.manager.searchBatch(queries as string[], project, limit ?? 5, opts);
+      const scope = deps.manager.resolveProjectScope(project, projectPath);
+      const groups = await deps.manager.searchBatch(queries as string[], scope, limit ?? 5, opts);
       res.json(groups);
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
@@ -287,9 +297,10 @@ export function startControlApi(
   });
 
   app.post("/pack", async (req, res) => {
-    const { query, project, limit, maxChars, contextLines } = (req.body ?? {}) as {
+    const { query, project, path: projectPath, limit, maxChars, contextLines } = (req.body ?? {}) as {
       query?: string;
       project?: string;
+      path?: string;
       limit?: number;
       maxChars?: number;
       contextLines?: number;
@@ -303,7 +314,8 @@ export function startControlApi(
     if (typeof maxChars === "number") opts.maxChars = maxChars;
     if (typeof contextLines === "number") opts.contextLines = contextLines;
     try {
-      const pack = await deps.manager.getContextPack(query, project, opts);
+      const scope = deps.manager.resolveProjectScope(project, projectPath);
+      const pack = await deps.manager.getContextPack(query, scope, opts);
       res.json(pack);
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
@@ -311,9 +323,10 @@ export function startControlApi(
   });
 
   app.post("/find", async (req, res) => {
-    const { name, project, limit, language, symbolType } = (req.body ?? {}) as {
+    const { name, project, path: projectPath, limit, language, symbolType } = (req.body ?? {}) as {
       name?: string;
       project?: string;
+      path?: string;
       limit?: number;
       language?: string;
       symbolType?: string;
@@ -323,7 +336,8 @@ export function startControlApi(
       return;
     }
     try {
-      const results = await deps.manager.findSymbol(name, project, limit ?? 20, {
+      const scope = deps.manager.resolveProjectScope(project, projectPath);
+      const results = await deps.manager.findSymbol(name, scope, limit ?? 20, {
         language,
         symbolType,
       });
@@ -353,9 +367,10 @@ export function startControlApi(
   });
 
   app.post("/references", async (req, res) => {
-    const { name, project, limit, language, symbolType } = (req.body ?? {}) as {
+    const { name, project, path: projectPath, limit, language, symbolType } = (req.body ?? {}) as {
       name?: string;
       project?: string;
+      path?: string;
       limit?: number;
       language?: string;
       symbolType?: string;
@@ -365,7 +380,8 @@ export function startControlApi(
       return;
     }
     try {
-      const results = await deps.manager.findReferences(name, project, limit ?? 50, {
+      const scope = deps.manager.resolveProjectScope(project, projectPath);
+      const results = await deps.manager.findReferences(name, scope, limit ?? 50, {
         language,
         symbolType,
       });
@@ -376,13 +392,17 @@ export function startControlApi(
   });
 
   app.post("/overview", async (req, res) => {
-    const { name } = (req.body ?? {}) as { name?: string };
-    if (!name) {
-      res.status(400).json({ error: "'name' is required" });
-      return;
-    }
+    const { name, project, path: projectPath } = (req.body ?? {}) as {
+      name?: string;
+      project?: string;
+      path?: string;
+    };
+    // 'name' (legacy CLI shape) and 'project' (the MCP tool's arg) are synonyms;
+    // with neither, the single indexed project is summarized (else an error).
+    const wanted = project ?? name;
     try {
-      const overview = await deps.manager.repoOverview(name);
+      const scope = deps.manager.resolveProjectScope(wanted, projectPath, false)!;
+      const overview = await deps.manager.repoOverview(scope);
       res.json(overview);
     } catch (err) {
       res.status(404).json({ error: err instanceof Error ? err.message : String(err) });
@@ -462,10 +482,6 @@ export function startControlApi(
       withFiles?: boolean;
       limit?: number;
     };
-    if (!project) {
-      res.status(400).json({ error: "'project' is required." });
-      return;
-    }
     const opts: {
       query?: string;
       path?: string;
@@ -483,7 +499,10 @@ export function startControlApi(
     if (typeof withFiles === "boolean") opts.withFiles = withFiles;
     if (typeof limit === "number") opts.limit = limit;
     try {
-      const result = await deps.manager.searchCommits(project, opts);
+      // NOTE: 'path' is the file-history filter — no project anchor by path here.
+      // Omitted project → the single indexed project, or an error naming them all.
+      const scope = deps.manager.resolveProjectScope(project, undefined, false)!;
+      const result = await deps.manager.searchCommits(scope, opts);
       res.json(result);
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
@@ -491,17 +510,14 @@ export function startControlApi(
   });
 
   app.post("/deadcode", async (req, res) => {
-    const { project, language, symbolType, minConfidence, limit } = (req.body ?? {}) as {
+    const { project, path: projectPath, language, symbolType, minConfidence, limit } = (req.body ?? {}) as {
       project?: string;
+      path?: string;
       language?: string;
       symbolType?: string;
       minConfidence?: number;
       limit?: number;
     };
-    if (!project) {
-      res.status(400).json({ error: "'project' is required" });
-      return;
-    }
     const opts: {
       language?: string;
       symbolType?: string;
@@ -513,7 +529,9 @@ export function startControlApi(
     if (typeof minConfidence === "number") opts.minConfidence = minConfidence;
     if (typeof limit === "number") opts.limit = limit;
     try {
-      const report = await deps.manager.findDeadCode(project, opts);
+      // Neither given → the single indexed project, or an error naming them all.
+      const scope = deps.manager.resolveProjectScope(project, projectPath, false)!;
+      const report = await deps.manager.findDeadCode(scope, opts);
       res.json(report);
     } catch (err) {
       res.status(404).json({ error: err instanceof Error ? err.message : String(err) });
@@ -524,8 +542,9 @@ export function startControlApi(
 
   /** Public-API diff between two git refs of an indexed project (`cidx apidiff`). */
   app.post("/apidiff", async (req, res) => {
-    const { project, base, head, limit, maxFiles, exportedOnly, includeUnchanged } = (req.body ?? {}) as {
+    const { project, path: projectPath, base, head, limit, maxFiles, exportedOnly, includeUnchanged } = (req.body ?? {}) as {
       project?: string;
+      path?: string;
       base?: string;
       head?: string;
       limit?: number;
@@ -533,8 +552,8 @@ export function startControlApi(
       exportedOnly?: boolean;
       includeUnchanged?: boolean;
     };
-    if (!project || !base) {
-      res.status(400).json({ error: "'project' and 'base' are required." });
+    if (!base) {
+      res.status(400).json({ error: "'base' is required (the 'before' git ref)." });
       return;
     }
     const opts: {
@@ -550,7 +569,9 @@ export function startControlApi(
     if (typeof exportedOnly === "boolean") opts.exportedOnly = exportedOnly;
     if (typeof includeUnchanged === "boolean") opts.includeUnchanged = includeUnchanged;
     try {
-      res.json(await deps.manager.getApiDiff(project, base, opts));
+      // Neither given → the single indexed project, or an error naming them all.
+      const scope = deps.manager.resolveProjectScope(project, projectPath, false)!;
+      res.json(await deps.manager.getApiDiff(scope, base, opts));
     } catch (err) {
       res.status(404).json({ error: err instanceof Error ? err.message : String(err) });
     }
