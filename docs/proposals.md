@@ -20,7 +20,7 @@
 | [O3](#o3-table-stats--compact) | Table stats / compact | Ops | Low | Low |
 | [O4](#o4-daemon-idle-shutdown) | Daemon idle shutdown | Ops | Low | Low |
 
-**Suggested order** (getiri/efor balance, updated for this set): `C4`, `S3`, `A2`, `C5`, `S2`, `A3`, `O3`, `S4`, `C3`, `O4`, `O2`. (`C1` change impact and `C2` API diff shipped — see their tombstones below.)
+**Suggested order** (getiri/efor balance, updated for this set): `C4`, `S3`, `A2`, `C5`, `S2`, `A3`, `O3`, `S4`, `C3`, `O4`, `O2`. (`C1` change impact, `C2` API diff and `D1` `check_docs` shipped — see their tombstones below.)
 
 ---
 
@@ -250,6 +250,8 @@ Dead code says "unused"; hotspots say "over-changed and over-coupled" — the ch
 ### D1. `check_docs` — deterministic doc–code conformance checker
 
 **Impact: High · Effort: Medium**
+
+> Shipped in Unreleased — see [changelog](./changelog.md) and [features](./features.md). As designed (pure engine over injected state, 13 span classes, the ≥90-confidence drift rule, three-layer intent shield, reverse coverage, drift window, `docChunks` cache on `lastIndexedAt`, eight surfaces). Deviations and the full live calibration ("drift 38 → 0", what each false positive taught) are in the changelog entry.
 
 #### Motivation
 

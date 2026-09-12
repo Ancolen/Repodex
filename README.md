@@ -169,6 +169,7 @@ PURGE_DATA=1 ./uninstall.sh   # also deletes the ~/.cidx data
 | `pack "<query>" [flags]` | Context pack: search hits + per-hit file outline + imports + context lines, in ONE call |
 | `impact <symbol\|file> [flags]` | Change impact: one ranked answer to "if I change X, what breaks?" |
 | `apidiff <project> <base> [flags]` | Public-API diff between two git refs (breaking symbols surfaced) |
+| `doccheck <project\|path> [flags]` | Doc–code conformance: checks the project's markdown docs against the code (deterministic, no LLM); exit 1 on drift |
 | `doctor` | Read-only diagnostic pass over the whole install (ok/warn/fail + fix hints) |
 | `config [path]` | Shows the active YAML configuration (or its path) |
 | `mcp` (`stdio`) | Starts the stdio MCP bridge (Claude Desktop etc.) |
@@ -342,6 +343,7 @@ For clients that support Streamable HTTP:
 - `get_context_pack(query, project?, limit?, maxChars?, contextLines?)` — one call assembling the hybrid-search core plus, per hit, the file's symbol outline, forward imports and surrounding context lines, all under a single pack-level character budget (hits kept whole, top hit always returned, the rest reported as `omitted`).
 - `get_api_diff(project, base, head?)` — public-API diff between two git refs compared as exported-symbol surfaces: symbols classified `removed` / `signature-changed` / `visibility-narrowed` (all breaking), `added`, `unchanged`; the historical side is re-parsed from git with the same tree-sitter recipe. No indexing, no reindex.
 - `get_change_impact(symbol?, path?, project?, depth?, limit?)` — one ranked answer to "if I change X, what breaks?": direct callers (call graph) outrank importing files (dependency graph), which outrank loose textual mentions; test files surface as `coveredBy` instead of production consumers.
+- `check_docs(project?, path?, files?, ignore?, since?, window?, noUndocumented?, ...)` — doc–code conformance checker: every backtick span in the project's markdown docs is classified and resolved against the code, **deterministically** (no Ollama, no LLM). `findings` = drift (only total-resolution misses, confidence ≥ 90); `needsReview` = everything uncertain; `undocumented` = exported symbols no doc mentions (advisory). `since`/`window` restrict the report to docs/code that actually changed; the CLI exits 1 only on drift.
 
 ### Index freshness (important for agents)
 

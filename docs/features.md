@@ -65,6 +65,13 @@ What the tool **does today** (version 2.4.0). For what's planned, see [`status.m
   - **Classification.** `removed`, `signature-changed` and `visibility-narrowed` are **BREAKING** and carry the `was:` / `now:` signatures side by side; `added` is non-breaking; `unchanged` is always counted and only listed with `includeUnchanged` / `--all`. A **rename is an honest `removed` + `added` pair** — there is no rename inference, so nothing is silently paired up. "Exported" is recovered from chunk text per language with the same `detectExported` recipe the dead-code scorer uses (factored into `src/core/exported.ts`), which is what makes `visibility-narrowed` (export dropped) detectable.
   - **Signature comparison is per-language and approximate by design**: arity, parameter order and *normalized* parameter names (defaults, type annotations, `&`/`*`/`...` decoration and Python's `self` are cut; Go keeps the first token of `name Type`, Java/C++ the last). Structural differences — type-only changes, overloads, reordered defaults — need review; a side with no comparable parameter list never counts as changed.
   - **Nothing fails silently.** A non-repo project reports `notARepo`; a ref that doesn't resolve reports `unknownRef`; a ref git can't safely be given reports `invalidRef`; a file that can't be read or parsed at a ref is listed in `unparsedFiles` (it contributes **no** symbols — you see the gap). `scannedFiles` + `truncated` surface the file cap (default 1000/side) and the entry cap. `exportedOnly` keeps everything exported on at least one side, so a narrowed symbol is still visible.
+- **Doc–code conformance checker** (`check_docs` / `cidx doccheck`) — "do the docs still tell the truth about the code?" answered **deterministically**: every backtick span in the project's markdown docs is classified and resolved against the index. **No Ollama, no LLM** — byte-for-byte reproducible, ~1 s of CPU on a whole docs corpus.
+  - **Only a total-resolution miss is a finding.** Each span is classified into one of 13 classes (identifier / path / env / endpoint / cmd / flag / dep / kv / model-tag / config-path / composite / artifact / opaque) and resolved against the symbol set, whole-identifier occurrences (with `file:line` evidence), a constant-literal table (`const INDEX_JOB = "index"` — a doc can name a literal *value*), the file universe (indexed files ∪ **every walked file** — the index is an under-approximation of the repo), package.json deps/devDeps/scripts, and per-file symbol membership. Only when a total-resolution class misses outright does it become a **drift** finding at confidence ≥ 90; every shade of doubt lands in the separate **`needsReview`** list (fuzzy near-misses become `did you mean …? (possible rename)`).
+  - **The intent shield.** Changelog / release-notes / **proposals / roadmap** files are `historical` (counted, never findings); fenced code examples and lines under a planned heading (`## 💡 Proposed`, roadmap, todo) never produce findings; prose examples (`e.g. a/b.py`, single-char path segments, same-line twin tokens) demote to review; a vocabulary of things a doc may name without claiming they exist here is skipped — bare extensions (`.md`), `.git/…`, URI paths (`/ping`), `owner/repo:tag` refs, `<placeholders>`, CI labels (`ubuntu-24.04-arm`), other projects' convention files (`project.godot`), `~`-rooted / `../` paths, and `OLLAMA_*` variables that occur nowhere in code. Escape hatch: `<!-- cidx-doccheck-ignore -->` suppresses its own line + the next.
+  - **Reverse coverage.** Exported symbols (`detectExported`; test files / entry points excluded) that **no doc span mentions** are listed as advisory `undocumented` entries (confidence 40, capped, `noUndocumented` opts out) — the check that catches a shipped tool missing from the README.
+  - **Drift window.** `since <ref>` (resolved via `git show -s --format=%at`) or `window: true` (the docs' own last commit) post-filters findings to those whose doc or code side actually changed; every degradation (non-repo, unresolvable ref) is a note, never a silent full scan.
+  - **Freshness is surfaced, not hidden.** The evidence snapshot is one `tableSymbolsWithContent` pass per index version (cached on `lastIndexedAt`), and `checked.indexFreshness` says what the report was built from — the index lags edits by ~1–2 s, so a symbol renamed moments ago can read as drift.
+  - **Per-project tuning.** `.cidx.json` `doccheck` `{ files, ignore }` restricts the doc set or skips files; daemon-side budgets live in `config.yml` `doccheck.maxChars` (default 12000) / `doccheck.undocumentedLimit` (default 25). Exit code: 0 when consistent, **1 only when drift findings exist** (CI-able).
 
 ## Chunking
 
@@ -99,17 +106,22 @@ What the tool **does today** (version 2.4.0). For what's planned, see [`status.m
 
 ## Per-project configuration (`.cidx.json`)
 
-- A project root can carry a **`.cidx.json`** — the per-project counterpart to the global `~/.cidx/config.yml`. Three optional fields, validated independently (an invalid field is dropped with a warning; a file with no valid fields is ignored; invalid JSON warns and is skipped — indexing never fails because of it):
+- A project root can carry a **`.cidx.json`** — the per-project counterpart to the global `~/.cidx/config.yml`. Four optional fields, validated independently (an invalid field is dropped with a warning; a file with no valid fields is ignored; invalid JSON warns and is skipped — indexing never fails because of it):
   ```json
   {
     "languages": ["typescript", "gdscript"],
     "ignore": ["vendor/**", "*.gen.ts"],
-    "embedModel": "qwen3-embedding:8b-q8_0"
+    "embedModel": "qwen3-embedding:8b-q8_0",
+    "doccheck": {
+      "files": ["docs/**/*.md"],
+      "ignore": ["docs/drafts/**"]
+    }
   }
   ```
 - **`languages`** — an allowlist of language labels (the same labels as the `language` search filter: `typescript`, `python`, `gdscript`, `markdown`, …). Files whose extension produces no label are dropped while the filter is active. Filtered-out files are absent from the file list, so the **deleted-file cleanup prunes them on the next sync**; the watcher removes them live on file events.
 - **`ignore`** — extra ignore patterns layered on top of `.gitignore` + `.cidxignore` (same `ignore`-package semantics).
 - **`embedModel`** — a per-project embedding model. The record's `embedModel` is pinned at `createIndex`, a **`sync` escalates to a full reindex** when the project config's model differs (vectors from two models can't share a table), and the **watcher skips writes** for a project whose model changed until it is reindexed. Queries are embedded with the model the table was built with, so search stays self-consistent. (Caveat: `searchAll` across projects using different models mixes distances from different embedding spaces.)
+- **`doccheck`** — `{ files: string[], ignore: string[] }` tuning for `check_docs` / `cidx doccheck`: `files` replaces the default doc set (`*.md` + `docs/**/*.md`, root-anchored globs), `ignore` skips extra doc files/globs on top of `.gitignore`/`.cidxignore`. Read fresh on every check, same as the rest of the file.
 - Read **fresh on every index job and watcher event** — editing `.cidx.json` takes effect on the next sync/reindex (or immediately for watcher events), no daemon restart.
 
 ## Transports
@@ -154,6 +166,7 @@ What the tool **does today** (version 2.4.0). For what's planned, see [`status.m
 | `get_change_impact(symbol?, path?, project?, depth?, limit?)` | One ranked answer to "if I change X, what breaks?": direct callers → module importers → textual references, each section capped with `total`/`truncated`; test files reported separately as "covered by"; `fanOut` shows the change site's own entanglement. ≥1 of symbol/path required. |
 | `search_commits(project, query?, path?, author?, since?, until?, withFiles?, limit?)` | Git-history / commit-message search ("when/why was X added", file history). Live `git log` — no indexing, no embedding. `withFiles` appends changed files; `notARepo` when the project isn't a git repo. |
 | `get_api_diff(project, base, head?, limit?, maxFiles?, exportedOnly?, includeUnchanged?)` | Public-API diff between two git refs: `removed` / `signature-changed` / `visibility-narrowed` (BREAKING, with `was:`/`now:` signatures) / `added` / `unchanged`. The base ref is re-parsed from git; `head` defaults to the working tree as indexed. `notARepo` / `unknownRef` / `unparsedFiles` are reported, never thrown or skipped. |
+| `check_docs(project?, path?, files?, ignore?, limit?, maxChars?, undocumentedLimit?, noUndocumented?, since?, window?)` | Doc–code conformance: every backtick span in the project's markdown docs is classified and resolved against the index — deterministically, no Ollama. `findings` are drift (confidence ≥ 90, only total-resolution misses); `needsReview` holds everything uncertain; `undocumented` lists exported symbols no doc mentions (advisory). `since` / `window` limit the report to docs or code that changed; `checked.indexFreshness` surfaces the snapshot age. Exit 1 (CLI) only on drift. |
 | `list_indexes()` | Indexed projects + statuses. |
 | `get_index_status(project?)` | Indexing status + live progress. |
 | `index_project(path, name?)` | Agent starts indexing a new directory (background). |
@@ -161,6 +174,6 @@ What the tool **does today** (version 2.4.0). For what's planned, see [`status.m
 ## CLI commands (summary)
 
 `start [dir]` · `index <dir> [--name x]` · `list` · `status [name]` · `reindex <name>` · `sync <name>` · `remove <name>` ·
-`search "<query>" [flags]` · `open "<query>" [flags]` · `batch "<q1>" "<q2>" ...` · `pack "<query>" [flags]` · `find <name> [flags]` · `refs <name> [flags]` · `deps <file> [flags]` · `callgraph <symbol|file> [flags]` · `impact <symbol|file> [flags]` · `apidiff <project> <base> [--head x] [flags]` · `commits <project> [query] [flags]` · `deadcode <name> [flags]` · `overview <name>` · `doctor` · `mcp` · `config [path]` · `stop` · `version` · `help [cmd]`
+`search "<query>" [flags]` · `open "<query>" [flags]` · `batch "<q1>" "<q2>" ...` · `pack "<query>" [flags]` · `find <name> [flags]` · `refs <name> [flags]` · `deps <file> [flags]` · `callgraph <symbol|file> [flags]` · `impact <symbol|file> [flags]` · `apidiff <project> <base> [--head x] [flags]` · `commits <project> [query] [flags]` · `deadcode <name> [flags]` · `doccheck <project|path> [flags]` · `overview <name>` · `doctor` · `mcp` · `config [path]` · `stop` · `version` · `help [cmd]`
 
 > Full details: `cidx help` / `cidx help <command>`.
