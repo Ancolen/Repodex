@@ -23,7 +23,7 @@ Eight tools that previously demanded the daemon's registered project NAME accept
 
 #### `find_references` honesty: no silent caps
 
-The reference scan now returns an honest envelope — `{ refs, total, truncated }` — where `total` counts **every distinct occurrence found before the limit cut** (the candidate scan uses the same bounded row cap the dead-code/impact passes pay, instead of a `limit*4` chunk pool that could under-count) and `truncated` says when the limit bit. The rendered text says *"50 of 132 reference(s) (limit reached …)"* instead of a bare "50" that looked complete. Doc artifacts (.md/.mdx/.xml/.rst) — which are indexed chunks, so a changelog mention IS a real occurrence — remain evidence **by default**, and `includeDocs: false` / `--no-docs` answers the code-only "who calls X" question.
+The reference scan now returns an honest envelope — `{ refs, total, truncated }` — where `total` counts **every distinct occurrence found before the limit cut** (the candidate scan uses the same bounded row cap the dead-code/impact passes pay, instead of a `limit*4` chunk pool that could under-count) and `truncated` says when the limit bit. The rendered text says *"50 of 132 reference(s) (limit reached …)"* instead of a bare "50" that looked complete. Doc artifacts (.md/.mdx/.xml/.rst) — which are indexed chunks, so a changelog mention IS a real occurrence — remain evidence **by default**, and `includeDocs: false` / `--no-docs` answers the code-only "who calls X" question (the gate is wired through every layer — MCP → control API → stdio bridge → CLI — cross-checked so no arg is silently dropped).
 
 #### Search results stop shipping embeddings
 
