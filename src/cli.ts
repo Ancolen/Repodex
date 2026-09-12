@@ -356,7 +356,9 @@ async function cmdPack(positionals: string[], flags: Record<string, string | boo
   await requireDaemon();
   const query = positionals.join(" ");
   if (!query) {
-    console.error('Usage: cidx pack "<query>" [--project x] [--limit n] [--max-chars n] [--context n]');
+    console.error(
+      'Usage: cidx pack "<query>" [--project x] [--limit n] [--max-chars n] [--context n] [--language x] [--type x] [--path glob]',
+    );
     process.exit(1);
   }
   const body: {
@@ -365,11 +367,17 @@ async function cmdPack(positionals: string[], flags: Record<string, string | boo
     limit?: number;
     maxChars?: number;
     contextLines?: number;
+    language?: string;
+    symbolType?: string;
+    pathGlob?: string;
   } = { query };
   if (typeof flags.project === "string") body.project = flags.project;
   if (typeof flags.limit === "string") body.limit = Number(flags.limit);
   if (typeof flags["max-chars"] === "string") body.maxChars = Number(flags["max-chars"]);
   if (typeof flags.context === "string") body.contextLines = Number(flags.context);
+  if (typeof flags.language === "string") body.language = flags.language;
+  if (typeof flags.type === "string") body.symbolType = flags.type;
+  if (typeof flags.path === "string") body.pathGlob = flags.path;
   const pack = await api<any>("POST", "/pack", body);
   console.log(formatContextPack(pack));
 }
@@ -1020,6 +1028,9 @@ const COMMANDS: Record<string, CmdDoc> = {
       ["--limit <n>", "Maximum hits considered for the pack (default: 5)."],
       ["--max-chars <n>", "Pack-level character budget (default: 6000); hits are dropped whole to fit, top-1 always kept."],
       ["--context <n>", "Include ±n surrounding lines (read live from the file) around each hit."],
+      ["--language <lang>", "Filter the underlying search by language (labels via 'cidx overview' or get_repo_overview)."],
+      ["--type <t>", "Filter the underlying search by symbol type (e.g. function, class)."],
+      ["--path <glob>", "Filter the underlying search by file path glob (e.g. 'src/*')."],
     ],
     details: [
       "Assembles what an agent otherwise burns 4-6 calls on: search, then per-hit outline + imports + context.",

@@ -297,22 +297,35 @@ export function startControlApi(
   });
 
   app.post("/pack", async (req, res) => {
-    const { query, project, path: projectPath, limit, maxChars, contextLines } = (req.body ?? {}) as {
+    const { query, project, path: projectPath, limit, maxChars, contextLines, language, symbolType, pathGlob } = (req.body ?? {}) as {
       query?: string;
       project?: string;
       path?: string;
       limit?: number;
       maxChars?: number;
       contextLines?: number;
+      language?: string;
+      symbolType?: string;
+      pathGlob?: string;
     };
     if (!query) {
       res.status(400).json({ error: "'query' is required" });
       return;
     }
-    const opts: { limit?: number; maxChars?: number; contextLines?: number } = {};
+    const opts: {
+      limit?: number;
+      maxChars?: number;
+      contextLines?: number;
+      language?: string;
+      symbolType?: string;
+      pathGlob?: string;
+    } = {};
     if (typeof limit === "number") opts.limit = limit;
     if (typeof maxChars === "number") opts.maxChars = maxChars;
     if (typeof contextLines === "number") opts.contextLines = contextLines;
+    if (typeof language === "string") opts.language = language;
+    if (typeof symbolType === "string") opts.symbolType = symbolType;
+    if (typeof pathGlob === "string") opts.pathGlob = pathGlob;
     try {
       const scope = deps.manager.resolveProjectScope(project, projectPath);
       const pack = await deps.manager.getContextPack(query, scope, opts);

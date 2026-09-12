@@ -175,7 +175,8 @@ export function formatReferences(result: ReferenceResult): string {
 }
 
 /** Converts a repository overview to an agent-friendly onboarding summary. */
-export function formatOverview(o: RepoOverview): string {  const lines: string[] = [];
+export function formatOverview(o: RepoOverview): string {
+  const lines: string[] = [];
   lines.push(`Repo: ${o.name}  [${o.status}]`);
   lines.push(`Path: ${o.path}`);
   lines.push(

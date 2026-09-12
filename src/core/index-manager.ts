@@ -896,6 +896,8 @@ export class IndexManager {
    *
    * 1. **Search core** — `searchIndex`/`searchAll` EXACTLY as today (hybrid +
    *    rerank + MMR + doc legs + the shared query cache): reused, never reimplemented.
+   *    The search filters (`language` / `symbolType` / `pathGlob`) pass straight
+   *    through, so a pack can be scoped like a search call.
    * 2. **Per-hit enrichment, one pass** — the usual `signature`/`indexedAt`/context
    *    lines, plus the hit file's outline capped to the hit's neighborhood and the
    *    hit file's forward imports resolved to indexed files only. Outline/imports
@@ -912,14 +914,26 @@ export class IndexManager {
   async getContextPack(
     query: string,
     project?: string,
-    opts?: { limit?: number; maxChars?: number; contextLines?: number },
+    opts?: {
+      limit?: number;
+      maxChars?: number;
+      contextLines?: number;
+      /** Metadata filters, passed straight into the search core (SearchFilters). */
+      language?: string | undefined;
+      symbolType?: string | undefined;
+      pathGlob?: string | undefined;
+    },
   ): Promise<ContextPack> {
     const limit = opts?.limit ?? PACK_DEFAULT_LIMIT;
     const contextLines = opts?.contextLines ?? 0;
     // No `maxChars` here on purpose: the pack budget is applied once, below.
+    const searchOpts: SearchOptions = { contextLines };
+    if (opts?.language !== undefined) searchOpts.language = opts.language;
+    if (opts?.symbolType !== undefined) searchOpts.symbolType = opts.symbolType;
+    if (opts?.pathGlob !== undefined) searchOpts.pathGlob = opts.pathGlob;
     const results = project
-      ? await this.searchIndex(project, query, limit, { contextLines })
-      : await this.searchAll(query, limit, { contextLines });
+      ? await this.searchIndex(project, query, limit, searchOpts)
+      : await this.searchAll(query, limit, searchOpts);
 
     // Per-hit legs, one pass: outlines/imports keyed per file, the indexed-file
     // index built once per project (hits can share a file or a project).

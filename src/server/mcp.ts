@@ -151,14 +151,27 @@ function buildServer(deps: McpDeps): Server {
         limit?: number;
         maxChars?: number;
         contextLines?: number;
+        language?: string;
+        symbolType?: string;
+        pathGlob?: string;
       };
       if (!args.query) {
         return { content: [{ type: "text", text: "'query' is required." }], isError: true };
       }
-      const opts: { limit?: number; maxChars?: number; contextLines?: number } = {};
+      const opts: {
+        limit?: number;
+        maxChars?: number;
+        contextLines?: number;
+        language?: string;
+        symbolType?: string;
+        pathGlob?: string;
+      } = {};
       if (typeof args.limit === "number") opts.limit = args.limit;
       if (typeof args.maxChars === "number") opts.maxChars = args.maxChars;
       if (typeof args.contextLines === "number") opts.contextLines = args.contextLines;
+      if (typeof args.language === "string") opts.language = args.language;
+      if (typeof args.symbolType === "string") opts.symbolType = args.symbolType;
+      if (typeof args.pathGlob === "string") opts.pathGlob = args.pathGlob;
       try {
         // 'path' anchors the search to the project containing it; neither → all projects.
         const project = deps.manager.resolveProjectScope(args.project, args.path);
@@ -337,7 +350,7 @@ function buildServer(deps: McpDeps): Server {
       try {
         const opts = typeof args.limit === "number" ? { limit: args.limit } : undefined;
         const dep = await deps.manager.getDependencies(args.path, args.project, opts);
-        return { content: [{ type: "text", text: formatDependencies(dep) }] };
+        return { content: [{ type: "text", text: formatDependencies(dep) }], structuredContent: { dependencies: dep } };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text", text: `Dependency error: ${msg}` }], isError: true };
@@ -407,7 +420,7 @@ function buildServer(deps: McpDeps): Server {
         // Neither given → the single indexed project, or an error naming them all.
         const project = deps.manager.resolveProjectScope(args.project, args.path, false)!;
         const report = await deps.manager.findDeadCode(project, opts);
-        return { content: [{ type: "text", text: formatDeadCode(report) }] };
+        return { content: [{ type: "text", text: formatDeadCode(report) }], structuredContent: { deadCode: report } };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text", text: `Dead-code error: ${msg}` }], isError: true };
@@ -446,7 +459,7 @@ function buildServer(deps: McpDeps): Server {
         // path here. Omitted project → the single indexed project, or an error.
         const project = deps.manager.resolveProjectScope(args.project, undefined, false)!;
         const cs = await deps.manager.searchCommits(project, opts);
-        return { content: [{ type: "text", text: formatCommits(cs) }] };
+        return { content: [{ type: "text", text: formatCommits(cs) }], structuredContent: { commits: cs } };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text", text: `Commit search error: ${msg}` }], isError: true };
@@ -487,7 +500,7 @@ function buildServer(deps: McpDeps): Server {
         // Neither given → the single indexed project, or an error naming them all.
         const project = deps.manager.resolveProjectScope(args.project, args.path, false)!;
         const diff = await deps.manager.getApiDiff(project, args.base, opts);
-        return { content: [{ type: "text", text: formatApiDiff(diff) }] };
+        return { content: [{ type: "text", text: formatApiDiff(diff) }], structuredContent: { apiDiff: diff } };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text", text: `API diff error: ${msg}` }], isError: true };
@@ -516,7 +529,7 @@ function buildServer(deps: McpDeps): Server {
       if (typeof args.limit === "number") opts.limit = args.limit;
       try {
         const impact = await deps.manager.getChangeImpact(opts);
-        return { content: [{ type: "text", text: formatImpact(impact) }] };
+        return { content: [{ type: "text", text: formatImpact(impact) }], structuredContent: { impact } };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text", text: `Change-impact error: ${msg}` }], isError: true };
@@ -567,7 +580,7 @@ function buildServer(deps: McpDeps): Server {
       if (typeof args.window === "boolean") opts.window = args.window;
       try {
         const report = await deps.manager.checkDocs(opts);
-        return { content: [{ type: "text", text: formatDocCheck(report) }] };
+        return { content: [{ type: "text", text: formatDocCheck(report) }], structuredContent: { docCheck: report } };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text", text: `Doc-check error: ${msg}` }], isError: true };

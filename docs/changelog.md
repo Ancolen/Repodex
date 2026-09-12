@@ -15,7 +15,7 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ### Agent-facing tool ergonomics (post-D1 tool audit)
 
-`bun run typecheck` clean, `bun test` **593/593** (1633 expect). A full audit of every MCP tool — definition and live payload — drove one pass of ergonomics fixes: the toolset now speaks the agent's language end to end (anchor by the path you know, self-correct from the error you get, never a silent cap, never a wasted kilobyte).
+`bun run typecheck` clean, `bun test` **595/595** (1635 expect). A full audit of every MCP tool — definition and live payload — drove one pass of ergonomics fixes: the toolset now speaks the agent's language end to end (anchor by the path you know, self-correct from the error you get, never a silent cap, never a wasted kilobyte).
 
 #### One-anchor project resolution: `project?` / `path?` everywhere
 
@@ -32,6 +32,25 @@ The reference scan now returns an honest envelope — `{ refs, total, truncated 
 #### Self-healing errors: the error message carries the fix
 
 Every "unknown project" failure is produced by one shared builder (`indexNotFoundMessage`) that names **the available projects and the likeliest intended one** — `Index not found: repodex-wrong (available: Repodex, projects) — did you mean 'Repodex'?` — so an agent corrects itself in the same turn instead of paying a `list_indexes` round-trip. The ambiguity errors say the same thing in tool-neutral words: *"pass the 'project' (or 'path') argument to disambiguate"* replaces the old CLI-flavored *"pass --project"* that made no sense over MCP. Control-API 404s for `/indexes/:name` reuse the same builder.
+
+#### `get_context_pack` gains the search filters
+
+The pack's underlying search now accepts the same narrowing filters as `search_codebase` — `language`, `symbolType`, `pathGlob` — through every surface (MCP, control API `/pack`, stdio bridge, `cidx pack --language/--type/--path`). Same pack budget, same assembly; the filters just decide which hits are considered before the outline/imports/context legs run.
+
+#### Report tools return `structuredContent`
+
+The five report tools (`find_dead_code`, `search_commits`, `get_api_diff`, `get_change_impact`, `check_docs`) plus `get_dependencies` now return **both** content types: the rendered text (for the model) and the raw JSON report under `structuredContent` (for anything that wants to consume the payload programmatically). The pack already did this (`{ pack }`); the reports follow. `get_context_pack` also gains `language`/`symbolType`/`pathGlob` filters — same schema as `search_codebase`, applied to the pack's underlying search.
+
+#### `deriveSignature` no longer cuts at an object-type brace
+
+The signature enrichment used to break a declaration head at **any** `{` — so `async checkDocs(opts: {` rendered as a half-cut `async checkDocs(opts: …`. Now a `{` that follows `:`/`,`/`(`/`=` opens an inline object **type**, not the body: the collector keeps gathering lines until the real body brace (Allman-style lone `{` on its own line still ends the head), and the final cut skips type-literal braces. Head cap raised 3 → 6 lines so multi-line parameter lists survive intact.
+
+#### Description touch-ups (the agent-readable contract)
+
+- `get_file_outline` now says it reads the file **live from disk** — instant, not index-lagged; the companion rescue when the ~1–2 s freshness lag would show stale content.
+- `search_codebase` / `search_codebase_batch` say that `mode: 'text'` (pure BM25) works **without the embedding model** — the fallback when embedding is unavailable.
+- `language` / `symbolType` filters point at `get_repo_overview`'s `languageDistribution` / `symbolTypeBreakdown` as the source of valid labels, instead of leaving the agent guessing.
+- `formatOverview`'s stray same-line `{` (a formatting slip, no behavior change).
 
 ### `check_docs` — doc–code conformance checker (proposal D1)
 

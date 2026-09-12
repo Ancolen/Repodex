@@ -28,6 +28,20 @@ describe("deriveSignature", () => {
     expect(sig.includes("{")).toBe(false);
   });
 
+  test("an inline object-TYPE brace does not end the head (the checkDocs case)", () => {
+    // `async checkDocs(opts: {` — the brace opens the parameter's object type,
+    // not the body; the head continues until the real body brace.
+    const sig = deriveSignature(
+      "async checkDocs(opts: {\n    project?: string;\n    path?: string;\n}): Promise<DocCheckReport> {\n  x;",
+    );
+    expect(sig).toBe("async checkDocs(opts: { project?: string; path?: string; }): Promise<DocCheckReport>");
+  });
+
+  test("an Allman-style lone body brace still ends the head", () => {
+    const sig = deriveSignature("function f()\n{\n  return 1;\n}");
+    expect(sig).toBe("function f()");
+  });
+
   test("empty content yields empty signature", () => {
     expect(deriveSignature("")).toBe("");
     expect(deriveSignature("   \n  ")).toBe("");

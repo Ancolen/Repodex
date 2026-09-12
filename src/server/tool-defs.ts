@@ -44,15 +44,18 @@ export const TOOL_DEFINITIONS: Tool[] = [
           type: "string",
           enum: ["hybrid", "vector", "text"],
           description:
-            "Search mode: 'hybrid' (default; vector+BM25), 'vector' (pure semantic), 'text' (pure BM25/exact term).",
+            "Search mode: 'hybrid' (default; vector+BM25), 'vector' (pure semantic), 'text' (pure BM25/exact term). " +
+            "'text' needs no embedding model and no query vector — use it as the fallback when embedding is unavailable.",
         },
         language: {
           type: "string",
-          description: "Only results in this language (e.g. 'python', 'typescript').",
+          description:
+            "Only results in this language (e.g. 'python', 'typescript'). Valid labels are listed by get_repo_overview (languageDistribution).",
         },
         symbolType: {
           type: "string",
-          description: "Only results of this symbol type (e.g. 'function', 'class', 'method').",
+          description:
+            "Only results of this symbol type (e.g. 'function', 'class', 'method'). Valid labels are listed by get_repo_overview (symbolTypeBreakdown).",
         },
         pathGlob: {
           type: "string",
@@ -129,7 +132,8 @@ export const TOOL_DEFINITIONS: Tool[] = [
         mode: {
           type: "string",
           enum: ["hybrid", "vector", "text"],
-          description: "Search mode: 'hybrid' (default), 'vector' (pure semantic), 'text' (pure BM25).",
+          description:
+            "Search mode: 'hybrid' (default), 'vector' (pure semantic), 'text' (pure BM25 — needs no embedding model).",
         },
         language: { type: "string", description: "Only results in this language." },
         symbolType: { type: "string", description: "Only results of this symbol type." },
@@ -212,7 +216,9 @@ export const TOOL_DEFINITIONS: Tool[] = [
   {
     name: "get_file_outline",
     description:
-      "Returns the symbol map (function/class/method + line ranges) of a source file.",
+      "Returns the symbol map (function/class/method + line ranges) of a source file. " +
+      "The file is read live from disk, so it reflects your JUST-SAVED edits instantly — use it " +
+      "(or a direct file read) when the ~1-2s index lag would otherwise show stale content.",
     inputSchema: {
       type: "object",
       properties: {
@@ -442,6 +448,18 @@ export const TOOL_DEFINITIONS: Tool[] = [
           description:
             "If > 0, include up to this many surrounding lines (read live from the file on disk) " +
             "before/after each hit chunk. Default 0.",
+        },
+        language: {
+          type: "string",
+          description: "Filter the underlying search by language (labels via get_repo_overview).",
+        },
+        symbolType: {
+          type: "string",
+          description: "Filter the underlying search by symbol type (e.g. 'function', 'class').",
+        },
+        pathGlob: {
+          type: "string",
+          description: "Filter the underlying search by file path glob (e.g. 'src/*').",
         },
       },
       required: ["query"],

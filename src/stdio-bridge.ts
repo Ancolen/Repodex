@@ -194,6 +194,9 @@ async function main(): Promise<void> {
             limit: args.limit,
             maxChars: args.maxChars,
             contextLines: args.contextLines,
+            language: args.language,
+            symbolType: args.symbolType,
+            pathGlob: args.pathGlob,
           });
           // Readable text for the model + the structured object for JSON consumers.
           return {
