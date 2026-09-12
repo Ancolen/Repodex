@@ -1,6 +1,7 @@
 import type {
   ScopedSearchResult,
   SymbolReference,
+  ReferenceResult,
   RepoOverview,
   BatchSearchGroup,
   DependencyResult,
@@ -145,8 +146,9 @@ export function formatOutline(outline: OutlineEntry[]): string {
   return outline.map((o) => `L${o.startLine}-${o.endLine}  ${o.symbolType} ${o.symbolName}`).join("\n");
 }
 
-/** Converts symbol references (usages) to text grouped by file. */
-export function formatReferences(refs: SymbolReference[]): string {
+/** Converts a reference-scan result (usages) to text grouped by file, honest about its cap. */
+export function formatReferences(result: ReferenceResult): string {
+  const refs = result.refs;
   if (refs.length === 0) return "No references found.";
   const byFile = new Map<string, SymbolReference[]>();
   for (const r of refs) {
@@ -166,7 +168,10 @@ export function formatReferences(refs: SymbolReference[]): string {
       .join("\n");
     blocks.push(`${head}\n${lines}`);
   }
-  return `${refs.length} reference(s):\n\n${blocks.join("\n\n")}`;
+  const heading = result.truncated
+    ? `${refs.length} of ${result.total} reference(s) (limit reached — pass a higher --limit for more):\n\n`
+    : `${refs.length} reference(s):\n\n`;
+  return heading + blocks.join("\n\n");
 }
 
 /** Converts a repository overview to an agent-friendly onboarding summary. */

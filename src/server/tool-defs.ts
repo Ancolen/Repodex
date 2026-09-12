@@ -228,7 +228,11 @@ export const TOOL_DEFINITIONS: Tool[] = [
       "returning file:line occurrences with the matching source line. Complements 'find_symbol' " +
       "(which finds only the definition); use this for impact/refactor analysis ('who calls X'). " +
       "Practical matcher: whole-identifier matches over indexed chunks (not full LSP resolution), " +
-      "so it may include same-named symbols from different scopes. If 'project' is not given, searches all projects.",
+      "so it may include same-named symbols from different scopes. If 'project' is not given, searches all projects. " +
+      "The result is honest about its cap: 'total' counts every distinct occurrence found and " +
+      "'truncated' says when 'limit' bit (the rendered text says 'N of M reference(s)'). " +
+      "Doc artifacts (.md/.mdx/.xml/.rst) count as evidence by default — pass includeDocs:false " +
+      "for a code-only 'who calls X' answer.",
     inputSchema: {
       type: "object",
       properties: {
@@ -239,7 +243,13 @@ export const TOOL_DEFINITIONS: Tool[] = [
           description:
             "Alternative to 'project': a file/dir inside the project (the owning project is inferred). Ignored when 'project' is also given.",
         },
-        limit: { type: "number", description: "Maximum number of occurrences (default: 50)." },
+        limit: { type: "number", description: "Maximum number of occurrences kept (default: 50); 'total' is never capped." },
+        includeDocs: {
+          type: "boolean",
+          description:
+            "Doc artifacts (.md/.mdx/.xml/.rst) count as evidence by default (they are indexed chunks too). " +
+            "Pass false to keep only code-file occurrences.",
+        },
         language: { type: "string", description: "Filter by language (optional)." },
         symbolType: { type: "string", description: "Filter by the containing symbol's type (optional)." },
       },

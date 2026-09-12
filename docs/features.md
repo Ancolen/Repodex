@@ -17,7 +17,7 @@ What the tool **does today** (version 2.4.0). For what's planned, see [`status.m
   - `text` — pure BM25 (no embedding model needed; works on old / incompatible indexes too).
 - **Filters** — `language`, `symbolType`, `pathGlob` (on `search`); `language` / `symbolType` also on `find`.
 - **`find_symbol`** — finds a symbol by name (exact + prefix); no vectors, fully precise, model-independent.
-- **`find_references`** — finds where a symbol is **used** (call sites + definition) as `file:line` occurrences. Pragmatic whole-identifier matcher (not full LSP).
+- **`find_references`** — finds where a symbol is **used** (call sites + definition) as `file:line` occurrences. Pragmatic whole-identifier matcher (not full LSP). Honest about its cap: `total` counts every distinct occurrence found and `truncated` says when `limit` bit. Doc artifacts count as evidence by default (`includeDocs: false` / `--no-docs` for a code-only answer).
 - **`get_repo_overview`** — structural onboarding summary: language distribution, symbol-type breakdown, top-level directories, likely entry points, largest files. No LLM, no reindex.
 - **`get_file_outline`** — the symbol map of a file (function / class / method + line ranges).
 - **Rich results** — every result carries a derived `signature`, an `indexedAt` freshness stamp, and an optional `--context N` window of surrounding lines read live from disk.

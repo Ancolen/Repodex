@@ -1049,6 +1049,7 @@ const COMMANDS: Record<string, CmdDoc> = {
     flags: [
       ["--project <name>", "Search only in this project (if not given, all)."],
       ["--limit <n>", "Maximum occurrences (default: 50)."],
+      ["--no-docs", "Exclude doc artifacts (.md/.xml/...) from the occurrences."],
       ["--language <lang>", "Filter by language."],
       ["--type <type>", "Filter by the containing symbol's type."],
     ],

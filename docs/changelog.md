@@ -15,11 +15,15 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ### Agent-facing tool ergonomics (post-D1 tool audit)
 
-`bun run typecheck` clean, `bun test` **587/587** (1614 expect). A full audit of every MCP tool — definition and live payload — drove one pass of ergonomics fixes: the toolset now speaks the agent's language end to end (anchor by the path you know, self-correct from the error you get, never a silent cap, never a wasted kilobyte).
+`bun run typecheck` clean, `bun test` **591/591** (1625 expect). A full audit of every MCP tool — definition and live payload — drove one pass of ergonomics fixes: the toolset now speaks the agent's language end to end (anchor by the path you know, self-correct from the error you get, never a silent cap, never a wasted kilobyte).
 
 #### One-anchor project resolution: `project?` / `path?` everywhere
 
 Eight tools that previously demanded the daemon's registered project NAME accept a **`path` anchor** — `search_codebase`, `search_codebase_batch`, `find_symbol`, `find_references`, `get_context_pack`, `get_repo_overview`, `find_dead_code`, `get_api_diff` — plus the search family's `path` on the control API and stdio bridge. A path anchors to the project that contains it (prefix match, most-specific wins — the `get_dependencies` semantics, factored into `IndexManager.resolveProjectScope`). An explicit `project` always wins. Nothing given: the search family searches **all projects** (unchanged); the per-project report tools fall back to **the single indexed project** or error naming them. `get_repo_overview`'s `project` is optional, `find_dead_code`'s and `get_api_diff`'s no longer required, and `search_commits` gets the single-project fallback (its `path` stays the file-history filter — no project anchor by path, deliberately). The CLI follows the `callgraph` convention: a positional that is an existing directory anchors by path (`cidx deadcode .`, `cidx commits . "msg"`, `cidx apidiff . v1.2.0`, `cidx overview .`), and `cidx deadcode` with no anchor resolves the lone project.
+
+#### `find_references` honesty: no silent caps
+
+The reference scan now returns an honest envelope — `{ refs, total, truncated }` — where `total` counts **every distinct occurrence found before the limit cut** (the candidate scan uses the same bounded row cap the dead-code/impact passes pay, instead of a `limit*4` chunk pool that could under-count) and `truncated` says when the limit bit. The rendered text says *"50 of 132 reference(s) (limit reached …)"* instead of a bare "50" that looked complete. Doc artifacts (.md/.mdx/.xml/.rst) — which are indexed chunks, so a changelog mention IS a real occurrence — remain evidence **by default**, and `includeDocs: false` / `--no-docs` answers the code-only "who calls X" question.
 
 #### Self-healing errors: the error message carries the fix
 

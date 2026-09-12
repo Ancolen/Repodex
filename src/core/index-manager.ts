@@ -220,6 +220,26 @@ export interface SymbolReference {
   inSymbolType?: string;
 }
 
+/** Optional behavior of the reference scan (`find_references`). */
+export interface ReferencesOpts extends SearchFilters {
+  /**
+   * Include doc artifacts (.md/.mdx/.xml/.rst) as reference evidence. Docs are
+   * indexed as chunks, so a mention in the changelog IS a real occurrence — but
+   * a "who calls X" question usually wants code only. Default true.
+   */
+  includeDocs?: boolean | undefined;
+}
+
+/** Result of `findReferences`: the kept references plus the honesty counters. */
+export interface ReferenceResult {
+  /** Distinct occurrences (deduped by file:line), capped at the call's `limit`. */
+  refs: SymbolReference[];
+  /** Distinct occurrences found BEFORE the limit cut — the honest total. */
+  total: number;
+  /** `total` exceeded the kept list (raise `limit` for more). */
+  truncated: boolean;
+}
+
 /** Aggregated structural snapshot of a project (for agent onboarding). */
 export interface RepoOverview {
   name: string;
@@ -1035,16 +1055,19 @@ export class IndexManager {
    * the token (LIKE scan), then keep only WHOLE-identifier matches per line. This
    * leans on the existing schema (content + symbolName + line ranges) and finds
    * both the definition and call sites. `find_symbol` finds the definition only;
-   * this answers "where is it used".
+   * this answers "where is it used". The result is honest about its caps: `total`
+   * counts every distinct occurrence found BEFORE the limit cut and `truncated`
+   * says when the limit bit — no silent caps.
    */
   async findReferences(
     name: string,
     project?: string,
     limit = 50,
-    filters?: SearchFilters,
-  ): Promise<SymbolReference[]> {
-    if (!name) return [];
-    const where = buildWhere(filters);
+    opts?: ReferencesOpts,
+  ): Promise<ReferenceResult> {
+    if (!name) return { refs: [], total: 0, truncated: false };
+    const includeDocs = opts?.includeDocs !== false;
+    const where = buildWhere(opts);
     let targets: IndexRecord[];
     if (project) {
       const rec = this.registry.getIndex(project);
@@ -1054,20 +1077,20 @@ export class IndexManager {
       targets = this.registry.listIndexes();
     }
 
-    // Fetch a generous candidate pool per table; line-level expansion narrows it.
-    const pool = Math.max(limit * 4, 50);
+    // Candidate scan: the same bounded row cap the dead-code/impact passes pay.
+    // Line-level expansion narrows it; the total is counted BEFORE the limit cut.
     const perTable = await Promise.all(
       targets.map(async (rec) => {
         try {
-          const chunks = await searchContent(rec.tableName, name, pool, where);
-          return this.expandReferences(chunks, rec.name, name);
+          const chunks = await searchContent(rec.tableName, name, 200000, where);
+          return this.expandReferences(chunks, rec.name, name, includeDocs);
         } catch {
           return [] as SymbolReference[];
         }
       }),
     );
 
-    // Dedup by file:line (overlapping chunks can repeat a line) and cap.
+    // Dedup by file:line (overlapping chunks can repeat a line), sort, then cap.
     const seen = new Set<string>();
     const refs: SymbolReference[] = [];
     for (const ref of perTable.flat()) {
@@ -1079,14 +1102,22 @@ export class IndexManager {
     refs.sort((a, b) =>
       a.filePath === b.filePath ? a.line - b.line : a.filePath < b.filePath ? -1 : 1,
     );
-    return refs.slice(0, limit);
+    return { refs: refs.slice(0, limit), total: refs.length, truncated: refs.length > limit };
   }
 
   /** Expands matching chunks into per-line references (whole-identifier matches). */
-  private expandReferences(chunks: SearchResult[], project: string, name: string): SymbolReference[] {
+  private expandReferences(
+    chunks: SearchResult[],
+    project: string,
+    name: string,
+    includeDocs: boolean,
+  ): SymbolReference[] {
     const out: SymbolReference[] = [];
     for (const c of chunks) {
       if (typeof c.content !== "string") continue;
+      // Doc artifacts (.md/.mdx/.xml/.rst) are evidence by default; a "who calls
+      // X" question usually wants code only (`includeDocs: false`).
+      if (!includeDocs && isDocPath(c.filePath)) continue;
       const base = typeof c.startLine === "number" ? c.startLine : 1;
       for (const m of matchIdentifierLines(c.content, base, name)) {
         const ref: SymbolReference = {

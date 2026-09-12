@@ -16,7 +16,7 @@ A single long-lived daemon manages **multiple projects**. By sending commands to
 - 🗂️ **Multi-project** — each project lives in its own isolated LanceDB table (`idx_<name>`); search a single project or all projects.
 - 🔎 **Hybrid search** — semantic **vector** + **BM25** exact-term, merged with **RRF**. `hybrid` / `vector` / `text` modes; `language` / `symbolType` / `pathGlob` filters; **reranker on by default** for precision and **MMR** to drop near-duplicate results; `--max-chars` caps returned text; **docstring search legs** match intent queries against each symbol's docstring/doc-comment (`[doc hit]` markers).
 - 🎯 **`find_symbol`** — finds a symbol directly by its name (exact + prefix); requires no vector, fully precise.
-- 🔗 **`find_references`** — finds where a symbol is **used** (call sites + definition) as `file:line` occurrences; complements `find_symbol` for impact/refactor analysis.
+- 🔗 **`find_references`** — finds where a symbol is **used** (call sites + definition) as `file:line` occurrences; complements `find_symbol` for impact/refactor analysis. Honest about its cap (`total`/`truncated`); doc artifacts count as evidence unless `includeDocs: false`.
 - 🧭 **`get_repo_overview`** — a structural onboarding summary of a project (language distribution, symbol-type breakdown, top-level directories, likely entry points, largest files); aggregated from the index with no LLM.
 - 🧠 **Code intelligence** — `get_dependencies` (a file's import graph: what it imports + who imports it), `get_call_graph` (who calls a symbol and what it calls, as bounded trees), `find_dead_code` (potential dead symbols, scored conservatively), and `search_commits` (git-history / commit-message search — "when/why was X added", file history). All are derived from the existing index or run `git log` live — **no reindex, no schema change**.
 - 🪟 **Rich results** — each search result carries a derived `signature`, the `indexedAt` freshness stamp, and an optional `--context N` window of surrounding lines read live from the file.
@@ -160,7 +160,7 @@ PURGE_DATA=1 ./uninstall.sh   # also deletes the ~/.cidx data
 | `search "<query>" [flags]` | Hybrid search (semantic + BM25), filterable; `--context N` for surrounding lines |
 | `batch "<q1>" "<q2>" ... [flags]` | Hybrid search for several queries in one round-trip; results grouped per query |
 | `find <symbolName> [flags]` | Finds a symbol directly by name (exact + prefix) |
-| `refs <symbolName> [flags]` | Finds where a symbol is used (call sites + definition) |
+| `refs <symbolName> [flags]` | Finds where a symbol is used (call sites + definition); `--no-docs` excludes doc files |
 | `overview [name\|dir]` | Structural onboarding summary of a project |
 | `deps <file> [flags]` | Import graph of a file: what it imports + which indexed files import it |
 | `callgraph <symbol\|file> [flags]` | Call graph: who calls a symbol and what it calls (bounded, cycle-safe trees) |
@@ -332,7 +332,7 @@ Every tool that takes a `project` also takes a **`path`** — a file/dir inside 
 - `search_codebase(query, project?, limit?, mode?, language?, symbolType?, pathGlob?, contextLines?, rerank?, mmr?, maxChars?, doc?)` — hybrid search; if `project` is not given, in all projects. `mode` = `hybrid`/`vector`/`text`. Each result carries a derived `signature` + `indexedAt`; `contextLines > 0` adds ±N surrounding lines read live from the file; reranking and MMR diversification are on by default (pass `rerank: false` / `mmr: false` to skip); `maxChars` caps returned text (results kept whole while they fit); docstring/doc-comment search legs are on by default (`doc: false` skips them; doc-hit results carry a `[doc hit]` marker).
 - `search_codebase_batch(queries, project?, limit?, mode?, language?, symbolType?, pathGlob?, contextLines?, rerank?, mmr?, maxChars?, doc?)` — run several queries in one round-trip; results grouped per query (`## Query: "…"` sections). Same options/behavior as `search_codebase`, applied per query.
 - `find_symbol(name, project?, path?, limit?, language?, symbolType?)` — finds a symbol by name (exact + prefix).
-- `find_references(name, project?, path?, limit?, language?, symbolType?)` — finds where a symbol is used (call sites + definition) as `file:line` occurrences.
+- `find_references(name, project?, path?, limit?, includeDocs?, language?, symbolType?)` — finds where a symbol is used (call sites + definition) as `file:line` occurrences. Honest about its cap (`total`/`truncated`); doc artifacts count as evidence unless `includeDocs: false`.
 - `get_repo_overview(project?, path?)` — structural onboarding summary (languages, symbol types, top directories, entry points, largest files).
 - `list_indexes()` — lists indexed projects and their statuses.
 - `get_index_status(project?)` — indexing status and live progress (% / file).
