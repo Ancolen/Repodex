@@ -504,7 +504,7 @@ export function inspectConfigFile(
       path: filePath,
       status: "warn",
       message: "invalid JSON — cidx ignores this file",
-      hint: `fix the JSON syntax in ${PROJECT_CONFIG_FILE} (fields: languages, ignore, embedModel)`,
+      hint: `fix the JSON syntax in ${PROJECT_CONFIG_FILE} (fields: languages, ignore, embedModel, doccheck)`,
     };
   }
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
@@ -512,7 +512,7 @@ export function inspectConfigFile(
       path: filePath,
       status: "warn",
       message: "not a JSON object — cidx ignores this file",
-      hint: `${PROJECT_CONFIG_FILE} must be an object (fields: languages, ignore, embedModel)`,
+      hint: `${PROJECT_CONFIG_FILE} must be an object (fields: languages, ignore, embedModel, doccheck)`,
     };
   }
   const keys = Object.keys(raw as Record<string, unknown>);
@@ -526,7 +526,7 @@ export function inspectConfigFile(
     path: filePath,
     status: "warn",
     message: "no valid fields — cidx ignores this file",
-    hint: `${PROJECT_CONFIG_FILE} fields are: languages (string[]), ignore (string[]), embedModel (string)`,
+    hint: `${PROJECT_CONFIG_FILE} fields are: languages (string[]), ignore (string[]), embedModel (string), doccheck (object: files, ignore)`,
   };
 }
 

@@ -179,3 +179,23 @@ export async function gitShowFile(baseDir: string, ref: string, relPath: string)
     return null;
   }
 }
+
+/**
+ * Commit time of `<ref>` as epoch milliseconds (`git show -s --format=%at`).
+ * `ref` is guarded by `safeGitRef` and passed as a literal argv element. Returns
+ * null when the ref does not resolve or git fails — never throws.
+ */
+export async function gitCommitTimeAt(baseDir: string, ref: string): Promise<number | null> {
+  if (!safeGitRef(ref)) return null;
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", baseDir, "show", "-s", "--format=%at", ref], {
+      timeout: 10000,
+      encoding: "utf8",
+    });
+    const first = stdout.trim().split("\n")[0] ?? "";
+    const secs = Number.parseInt(first, 10);
+    return Number.isFinite(secs) ? secs * 1000 : null;
+  } catch {
+    return null;
+  }
+}

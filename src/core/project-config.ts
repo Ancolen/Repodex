@@ -11,7 +11,8 @@ import { TEXT_LANG_BY_EXT } from "../chunking/chunker";
  * {
  *   "languages":   ["typescript", "python"],  // allowlist of language labels
  *   "ignore":      ["vendor/**", "*.gen.ts"], // extra ignore patterns
- *   "embedModel":  "qwen3-embedding:8b-q8_0"  // per-project embedding model
+ *   "embedModel":  "qwen3-embedding:8b-q8_0", // per-project embedding model
+ *   "doccheck":    { "files": ["docs/**"], "ignore": ["drafts/**"] }
  * }
  *
  * Applied at index time (full index/sync and watcher writes). Changes only take
@@ -28,6 +29,20 @@ export interface ProjectConfig {
   ignore?: string[];
   /** Per-project embedding model override (Ollama tag). */
   embedModel?: string;
+  /**
+   * Per-project `doccheck` block (proposal D1): narrows which documentation
+   * files the doc–code conformance checker looks at. It never changes what is
+   * checked — only the doc set.
+   */
+  doccheck?: DocCheckConfig;
+}
+
+/** Per-project `doccheck` options (`.cidx.json`). Both fields optional. */
+export interface DocCheckConfig {
+  /** Restrict the checked doc set (project-relative, root-anchored globs). Absent → the default set. */
+  files?: string[];
+  /** Doc files/globs to skip on top of the ignore machinery. */
+  ignore?: string[];
 }
 
 /** The project config file name, looked up at the project root. */
@@ -67,8 +82,27 @@ export function parseProjectConfig(raw: unknown, source: string): ProjectConfig 
       console.error(`[project-config] '${source}': 'embedModel' must be a non-empty string; skipping it.`);
     }
   }
+  if (obj.doccheck !== undefined) {
+    if (isDocCheckConfig(obj.doccheck)) {
+      out.doccheck = obj.doccheck;
+      valid = true;
+    } else {
+      console.error(`[project-config] '${source}': 'doccheck' must be an object of string arrays (files, ignore); skipping it.`);
+    }
+  }
 
   return valid ? out : undefined;
+}
+
+/** Shape check for the `doccheck` block: an object whose fields, when present, are non-empty string arrays. */
+function isDocCheckConfig(raw: unknown): raw is DocCheckConfig {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return false;
+  const o = raw as Record<string, unknown>;
+  const strArr = (v: unknown): v is string[] =>
+    Array.isArray(v) && v.every((x) => typeof x === "string" && x.length > 0);
+  if (o.files !== undefined && !strArr(o.files)) return false;
+  if (o.ignore !== undefined && !strArr(o.ignore)) return false;
+  return o.files !== undefined || o.ignore !== undefined;
 }
 
 /**

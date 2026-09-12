@@ -81,14 +81,15 @@ import {
   type ApiDiffEntry,
 } from "./apidiff";
 import { gitRefExists, safeGitRef } from "../services/git";
+// Shared file-kind heuristics (dead code + reverse doc coverage use the same recipe).
+import {
+  DEAD_CANDIDATE_TYPES,
+  ENTRY_POINT_NAMES,
+  isTestFile,
+  isEntryPointFile,
+} from "./filekinds";
 
 const INDEX_JOB = "index";
-
-/** File basenames (without extension) commonly used as project entry points. */
-const ENTRY_POINT_NAMES = new Set([
-  "main", "index", "app", "cli", "server", "program", "__main__",
-  "mod", "lib", "entry", "bootstrap", "start",
-]);
 
 export interface IndexJobPayload {
   target: IndexTarget;
@@ -346,33 +347,11 @@ function sanitize(name: string): string {
   return s.length > 0 ? s : "idx";
 }
 
-/** Symbol types worth checking for dead code (skip `code`/`impl`/anonymous). */
-const DEAD_CANDIDATE_TYPES = new Set([
-  "function", "method", "class", "interface", "enum", "struct", "trait", "record",
-]);
-
 /** Symbol types that can make/receive a call (the call-graph inventory). */
 const CALLABLE_TYPES = new Set(["function", "method", "constructor"]);
 
 /** Empty adjacency, reused to render depth-0 root nodes via `traverseCallGraph`. */
 const EMPTY_ADJ: Map<string, Set<string>> = new Map();
-
-/** Test-file patterns: symbols here are exercised indirectly, so never dead. */
-function isTestFile(filePath: string): boolean {
-  const base = path.basename(filePath).toLowerCase();
-  const norm = filePath.replace(/\\/g, "/");
-  if (/^test_/.test(base)) return true; // test_*.py / test_*.go
-  if (/_test\.[a-z0-9]+$/.test(base)) return true; // foo_test.go
-  if (/\.(test|spec)\.[a-z0-9]+$/.test(base)) return true; // foo.test.ts / bar.spec.js
-  if (/(^|\/)(tests?|__tests?__|spec)\//.test(norm)) return true; // tests/, __tests__/, spec/
-  return false;
-}
-
-/** Entry-point files (main/index/app/…): their symbols are called by the runtime. */
-function isEntryPointFile(filePath: string): boolean {
-  const base = path.basename(filePath, path.extname(filePath)).toLowerCase();
-  return ENTRY_POINT_NAMES.has(base);
-}
 
 /** A cached, mtime-keyed import graph for one project (reverse deps are on-demand). */
 interface DepGraph {

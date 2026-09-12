@@ -91,6 +91,13 @@ export interface IndexerConfig {
       topK: number;
     };
   };
+  /** Doc–code conformance checker (proposal D1) — deterministic, no LLM. */
+  doccheck: {
+    /** Per-call char budget over the rendered findings (kept whole, in ranked order). */
+    maxChars: number;
+    /** Max `undocumented` symbol entries reported per call. */
+    undocumentedLimit: number;
+  };
 }
 
 const DEFAULTS: IndexerConfig = {
@@ -144,6 +151,7 @@ const DEFAULTS: IndexerConfig = {
     rerank: { enabled: true, model: "qwen3-reranker-q8", topK: 20, concurrency: 4, numCtx: 1024 },
     mmr: { enabled: true, lambda: 0.5, topK: 20 },
   },
+  doccheck: { maxChars: 12000, undocumentedLimit: 25 },
 };
 
 /** Editable default YAML template (written if the file does not exist). */
@@ -193,6 +201,10 @@ search:
     enabled: true              # diversify the top results (Maximal Marginal Relevance)
     lambda: 0.5                # 1.0 = pure relevance, 0.0 = pure diversity
     topK: 20                   # how many candidates to diversify over before slicing to limit
+
+doccheck:
+  maxChars: ${DEFAULTS.doccheck.maxChars}          # per-call char budget over the rendered findings (kept whole)
+  undocumentedLimit: ${DEFAULTS.doccheck.undocumentedLimit}   # max undocumented-symbol entries per report
 
 watcher:
   debounceMs: ${DEFAULTS.watcher.debounceMs}        # reindexing delay after a file change
@@ -357,6 +369,13 @@ export const RESOLVED: IndexerConfig = {
       topK: num(process.env.MMR_TOP_K) ?? y.search?.mmr?.topK ?? DEFAULTS.search.mmr.topK,
     },
   },
+  doccheck: {
+    maxChars: num(process.env.DOC_CHECK_MAX_CHARS) ?? y.doccheck?.maxChars ?? DEFAULTS.doccheck.maxChars,
+    undocumentedLimit:
+      num(process.env.DOC_CHECK_UNDOCUMENTED) ??
+      y.doccheck?.undocumentedLimit ??
+      DEFAULTS.doccheck.undocumentedLimit,
+  },
 };
 
 /**
@@ -397,6 +416,9 @@ export const CONFIG = {
   MMR_ENABLED: RESOLVED.search.mmr.enabled,
   MMR_LAMBDA: RESOLVED.search.mmr.lambda,
   MMR_TOP_K: RESOLVED.search.mmr.topK,
+
+  DOC_CHECK_MAX_CHARS: RESOLVED.doccheck.maxChars,
+  DOC_CHECK_UNDOCUMENTED: RESOLVED.doccheck.undocumentedLimit,
 
   HOST: RESOLVED.server.host,
   MCP_PORT: RESOLVED.server.mcpPort,

@@ -148,3 +148,41 @@ export function applyPackBudget<T extends PackEntry>(entries: T[], maxChars?: nu
   }
   return { hits, totalChars: used, omitted: entries.length - hits.length };
 }
+
+// ------------------------------------------------------- size-keyed budget
+
+/** What applyBudgetBySize reports back. */
+export interface SizedBudgetResult<T> {
+  /** The kept rows, in original order (the first row is always present). */
+  kept: T[];
+  /** Rows dropped whole to fit the budget (they are NOT truncated). */
+  omitted: number;
+}
+
+/**
+ * Generic sibling of `applyCharBudget` for rows whose rendered size is not
+ * derivable from their own fields (the caller supplies `sizeOf`). Rows are kept
+ * whole, in order, while the running total fits; the first row is always kept
+ * (even if it alone exceeds the budget) and a later, smaller row is not admitted
+ * past a higher-ranked one that didn't fit. No-op when `maxChars` is
+ * unset/non-finite/<=0 — every row passes through and `omitted` is 0.
+ */
+export function applyBudgetBySize<T>(
+  rows: readonly T[],
+  maxChars: number | undefined,
+  sizeOf: (item: T) => number,
+): SizedBudgetResult<T> {
+  if (rows.length === 0) return { kept: [], omitted: 0 };
+  if (maxChars === undefined || !Number.isFinite(maxChars) || maxChars <= 0) {
+    return { kept: [...rows], omitted: 0 };
+  }
+  const kept: T[] = [];
+  let used = 0;
+  for (const r of rows) {
+    const size = sizeOf(r);
+    if (kept.length > 0 && used + size > maxChars) break;
+    kept.push(r);
+    used += size;
+  }
+  return { kept, omitted: rows.length - kept.length };
+}
