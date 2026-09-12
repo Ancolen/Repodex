@@ -126,13 +126,13 @@ export interface DocCheckState {
 /** Options for the pure engine run (the caller fills daemon-side defaults). */
 export interface DocCheckOpts {
   /** Max drift findings kept (they are confidence-sorted, not silently truncated). */
-  limit?: number;
+  limit?: number | undefined;
   /** Char budget over rendered findings (kept whole, first always kept). */
-  maxChars?: number;
+  maxChars?: number | undefined;
   /** Max `undocumented` entries. */
-  undocumentedLimit?: number;
+  undocumentedLimit?: number | undefined;
   /** Disable reverse coverage entirely. */
-  noUndocumented?: boolean;
+  noUndocumented?: boolean | undefined;
 }
 
 /** One resolved span verdict (internal, before findings are materialized). */
@@ -220,6 +220,8 @@ export interface DocCheckReport {
   /** Items dropped whole by the char budget (never truncated mid-item). */
   omitted: number;
   maxChars: number | null;
+  /** True when reverse coverage was turned off (`noUndocumented`) — the empty list means nothing then. */
+  undocumentedDisabled?: boolean | undefined;
   notes: string[];
 }
 
@@ -308,8 +310,8 @@ const CONFIG_LITERALS = new Set([
 const PLANNED_HEADING_RE =
   /\b(proposal|proposals|proposed|planned|roadmap|not yet|in progress|todo|draft|wip|future)\b|💡|🚧|🏗/i;
 
-/** Historical files: everything in them already happened — never a current claim. */
-const HISTORICAL_FILE_RE = /(^|\/)(changelog|changes|release-?notes|history)(\.|$)/i;
+/** Historical files: everything in them already happened — never a current claim. Exported for the daemon-side DocFile builder. */
+export const HISTORICAL_FILE_RE = /(^|\/)(changelog|changes|release-?notes|history)(\.|$)/i;
 
 const IGNORE_MARKER = "<!-- cidx-doccheck-ignore -->";
 
@@ -1433,6 +1435,7 @@ export function runDocCheck(state: DocCheckState, opts: DocCheckOpts = {}): DocC
     undocumented,
     omitted,
     maxChars: maxChars === undefined ? null : maxChars,
+    undocumentedDisabled: opts.noUndocumented === true,
     notes,
   };
 }

@@ -15,6 +15,7 @@ import type {
   ApiChangeKind,
   ChangeImpactReport,
 } from "../core/index-manager";
+import type { DocCheckReport, DocFinding, UndocumentedEntry } from "../core/doccheck";
 import type { OutlineEntry } from "../chunking/chunker";
 
 /** Formats an epoch-ms timestamp as a compact ISO string (or "—"). */
@@ -499,6 +500,84 @@ export function formatImpact(r: ChangeImpactReport): string {
   }
   if (r.scanTruncated) {
     lines.push("⚠ the table exceeded its row cap — coverage is partial; reindex for full coverage.");
+  }
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------- doc check (D1)
+
+/** One rendered finding line: id, confidence, kind, location, message (+ suggestion/evidence). */
+function docCheckFindingLine(f: DocFinding): string {
+  let s = `  ${f.id} [${f.confidence}] ${f.kind} — ${f.doc.path}:${f.doc.line}`;
+  s += `\n      ${f.doc.excerpt}`;
+  s += `\n      ${f.message}`;
+  if (f.suggestion) s += `\n      → suggestion: ${f.suggestion}`;
+  if (f.evidence && f.evidence.length > 0) {
+    const ev = f.evidence
+      .slice(0, 3)
+      .map((e) => `${e.path}${e.line !== undefined ? `:${e.line}` : ""}${e.symbol ? ` (${e.symbol})` : ""}`)
+      .join(", ");
+    s += `\n      evidence: ${ev}`;
+  }
+  return s;
+}
+
+/**
+ * Converts a doc–code conformance report to text, sections in severity order:
+ * drift findings → needs review → undocumented. Deterministic input →
+ * deterministic output (same report, same bytes).
+ */
+export function formatDocCheck(r: DocCheckReport): string {
+  const lines: string[] = [];
+  const c = r.checked;
+  const freshness = c.indexFreshness === null ? "never" : new Date(c.indexFreshness).toISOString();
+  lines.push(`Doc–code conformance — project: ${r.project}`);
+  lines.push(`Docs: ${c.docs} checked / ${c.spans} span(s), ${c.claims} resolved against the index (index: ${freshness})`);
+  if (c.window) {
+    lines.push(
+      `Window: since ${c.window.since} — ${c.window.docsChanged} doc file(s), ${c.window.codeChanged} code file(s) changed`,
+    );
+  }
+  const skipped = Object.entries(c.skipped)
+    .filter(([, n]) => n > 0)
+    .map(([k, n]) => `${k}: ${n}`)
+    .join(", ");
+  if (skipped) lines.push(`Skipped (never findings): ${skipped}`);
+
+  lines.push(`\n✗ drift (${r.verdict.findings}) — the doc contradicts the code`);
+  if (r.findings.length === 0) {
+    lines.push("  (none — docs and code agree on every resolvable claim)");
+  } else {
+    for (const f of r.findings) lines.push(docCheckFindingLine(f));
+  }
+
+  lines.push(`\n? needs review (${r.verdict.needsReview}) — the checker is unsure, NOT a failure`);
+  if (r.needsReview.length === 0) {
+    lines.push("  (nothing unresolved)");
+  } else {
+    for (const f of r.needsReview) lines.push(docCheckFindingLine(f));
+  }
+
+  if (!r.undocumentedDisabled) {
+    lines.push(`\n◌ undocumented (${r.verdict.undocumented}) — exported, but no doc mentions them (advisory)`);
+    if (r.undocumented.length === 0) {
+      lines.push("  (every exported symbol is mentioned somewhere)");
+    } else {
+      for (const u of r.undocumented) {
+        lines.push(`  ${u.symbolName} [${u.symbolType}] — ${u.relativePath}:${u.line}`);
+      }
+    }
+  }
+
+  if (r.notes.length > 0) {
+    lines.push(`\nNotes:`);
+    for (const n of r.notes) lines.push(`  - ${n}`);
+  }
+  if (r.omitted > 0) {
+    lines.push(`⚠ ${r.omitted} item(s) omitted by the char budget (kept whole, never truncated).`);
+  }
+  if (c.truncated) {
+    lines.push("⚠ the doc set or the table hit its cap — coverage is partial.");
   }
   return lines.join("\n");
 }

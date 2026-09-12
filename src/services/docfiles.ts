@@ -33,9 +33,9 @@ export interface DocDiscovery {
 
 export interface DocDiscoveryOpts {
   /** Restrict the doc set (project-relative, root-anchored globs). */
-  files?: string[];
+  files?: string[] | undefined;
   /** Extra doc files/globs to skip (on top of .gitignore/.cidxignore). */
-  ignore?: string[];
+  ignore?: string[] | undefined;
 }
 
 /**

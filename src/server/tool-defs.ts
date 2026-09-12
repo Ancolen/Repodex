@@ -480,4 +480,39 @@ export const TOOL_DEFINITIONS: Tool[] = [
       required: [],
     },
   },
+  {
+    name: "check_docs",
+    description:
+      "DETERMINISTIC doc–code conformance check (no LLM, no Ollama, byte-for-byte reproducible): " +
+      "extracts backtick claims from the project's markdown docs and resolves every one against the " +
+      "index — identifiers (symbols + whole-identifier occurrences + constant literals), paths (the " +
+      "indexed file set), npm dependencies, HTTP endpoints, CLI commands/flags, environment variables, " +
+      "config keys, model tags and `file → symbol` composite claims. A reference a TOTAL-resolution " +
+      "class fails to resolve with confidence ≥ 90 is reported as a hard `drift` finding; every " +
+      "residual doubt is demoted into `needsReview` instead — the checker never guesses. Historical " +
+      "files (changelog), planned regions (proposals/roadmap headings) and fenced examples are counted, " +
+      "never accused. Also reports `undocumented`: exported symbols no doc mentions (advisory, capped, " +
+      "disable with noUndocumented). Optional drift window: `since` (a git ref) or `window: true` " +
+      "(changes since the docs' last commit) keeps only findings whose doc or code side actually " +
+      "changed — with a degradation note instead of a silent full scan when the anchor does not " +
+      "resolve. FRESHNESS: evidence comes from the index, which lags edits by ~1-2s — a symbol " +
+      "renamed moments ago may read as drift until the watcher syncs; `checked.indexFreshness` shows " +
+      "what the report was built from. No schema change, no reindex.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "The project to check (optional; inferred from 'path', or the single indexed project)." },
+        path: { type: "string", description: "A file/dir inside the project to check (alternative to 'project')." },
+        files: { type: "array", items: { type: "string" }, description: "Restrict the doc set (project-relative, root-anchored globs, e.g. ['docs/**/*.md']). Default: root *.md + docs/**." },
+        ignore: { type: "array", items: { type: "string" }, description: "Doc files/globs to skip (also picked up from .cidx.json 'doccheck.ignore')." },
+        limit: { type: "number", description: "Max findings/review items kept (default 100)." },
+        maxChars: { type: "number", description: "Char budget over the rendered findings (kept whole; default from config, 12000)." },
+        undocumentedLimit: { type: "number", description: "Max undocumented-symbol entries (default 25)." },
+        noUndocumented: { type: "boolean", description: "Skip reverse coverage (exported symbols no doc mentions) entirely." },
+        since: { type: "string", description: "A git ref; keep only findings whose doc or code side changed since that commit." },
+        window: { type: "boolean", description: "Anchor the drift window at the docs' own last commit instead of 'since'." },
+      },
+      required: [],
+    },
+  },
 ];

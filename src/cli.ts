@@ -6,7 +6,7 @@ import { CONFIG, RESOLVED, CONFIG_SOURCE, resolveConfigPath } from "./config";
 import { daemonCommand, bridgeCommand } from "./runtime";
 import { daemonCheck, type DoctorCheck, type DoctorReport } from "./core/doctor";
 import { resolveEditor, buildEditorArgs } from "./utils/editor";
-import { formatContextPack, formatApiDiff, formatImpact } from "./server/format";
+import { formatContextPack, formatApiDiff, formatImpact, formatDocCheck } from "./server/format";
 
 const BASE = `http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}`;
 
@@ -769,6 +769,53 @@ async function cmdImpact(positionals: string[], flags: Record<string, string | b
   console.log(formatImpact(r));
 }
 
+// -------------------------------------------------- doc conformance (D1)
+
+/**
+ * `cidx doccheck [project|path] [--since ref] [--window] [--files a,b] [--ignore a,b]
+ *  [--limit n] [--max-chars n] [--no-undocumented]`
+ *
+ * Deterministic doc–code conformance check. Exit code 1 only when there are
+ * drift findings (CI/hook-friendly); needsReview/undocumented never set it.
+ */
+async function cmdDoccheck(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
+  await requireDaemon();
+  const arg = positionals[0];
+  const body: {
+    project?: string;
+    path?: string;
+    files?: string[];
+    ignore?: string[];
+    limit?: number;
+    maxChars?: number;
+    undocumentedLimit?: number;
+    noUndocumented?: boolean;
+    since?: string;
+    window?: boolean;
+  } = {};
+  // A positional that exists on disk → path mode; otherwise a project name.
+  if (arg) {
+    if (existsSync(arg)) body.path = path.resolve(arg);
+    else body.project = arg;
+  }
+  if (typeof flags.project === "string") body.project = flags.project;
+  if (typeof flags.since === "string") body.since = flags.since;
+  if (flags.window === true) body.window = true;
+  if (typeof flags.files === "string" && flags.files.length > 0) {
+    body.files = flags.files.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+  }
+  if (typeof flags.ignore === "string" && flags.ignore.length > 0) {
+    body.ignore = flags.ignore.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+  }
+  if (typeof flags.limit === "string") body.limit = Number(flags.limit);
+  if (typeof flags["max-chars"] === "string") body.maxChars = Number(flags["max-chars"]);
+  if (typeof flags["undocumented-limit"] === "string") body.undocumentedLimit = Number(flags["undocumented-limit"]);
+  if (flags["no-undocumented"] === true) body.noUndocumented = true;
+  const r = await api<any>("POST", "/doccheck", body);
+  console.log(formatDocCheck(r));
+  if ((r.findings ?? []).length > 0) process.exit(1);
+}
+
 async function cmdMcp(): Promise<void> {
   // Starts the stdio bridge, taking over stdio (MCP client ↔ bridge).
   const proc = Bun.spawn({
@@ -1050,6 +1097,28 @@ const COMMANDS: Record<string, CmdDoc> = {
       "cidx impact src/core/impact.ts --depth 2",
     ],
   },
+  doccheck: {
+    usage: "doccheck [project|path] [flags]",
+    summary: "Doc–code conformance: resolves markdown claims against the index (deterministic, no LLM).",
+    aliases: ["check-docs", "checkdocs"],
+    flags: [
+      ["--since <ref>", "Drift window: keep only findings whose doc or code side changed since that commit."],
+      ["--window", "Anchor the drift window at the docs' own last commit."],
+      ["--files <a,b>", "Restrict the doc set (root-anchored globs; default: root *.md + docs/**)."],
+      ["--ignore <a,b>", "Doc files/globs to skip."],
+      ["--limit <n>", "Max findings/review items kept (default 100)."],
+      ["--max-chars <n>", "Char budget over rendered findings (kept whole)."],
+      ["--no-undocumented", "Skip the 'exported but undocumented' advisory section."],
+    ],
+    details: [
+      "Identifier/path/dep/endpoint/cmd/flag/env/config claims from backtick spans, resolved against",
+      "the indexed code; a total-resolution miss at confidence >= 90 is a hard drift finding, every",
+      "doubt goes to 'needs review'. Historical files, planned regions and fenced examples are never",
+      "accused. Exit code 1 only when there are drift findings (CI/hook-friendly).",
+      "Evidence comes from the index (lags edits by ~1-2s) — see checked.indexFreshness.",
+    ],
+    examples: ["cidx doccheck .", "cidx doccheck repodex --window", "cidx doccheck api --since v1.2.0"],
+  },
   commits: {
     usage: "commits <project> [query] [flags]",
     summary: "Git-history / commit-message search: when/why a feature was added, who changed a file.",
@@ -1158,7 +1227,7 @@ const COMMANDS: Record<string, CmdDoc> = {
 
 const HELP_ORDER = [
   "start", "index", "list", "status", "reindex", "sync", "remove",
-  "search", "open", "batch", "pack", "find", "refs", "overview", "deps", "deadcode", "callgraph", "commits", "apidiff", "impact", "doctor", "config", "mcp", "stop", "version", "help",
+  "search", "open", "batch", "pack", "find", "refs", "overview", "deps", "deadcode", "callgraph", "commits", "apidiff", "impact", "doccheck", "doctor", "config", "mcp", "stop", "version", "help",
 ];
 
 /** Detailed help for a single command. */
@@ -1174,6 +1243,7 @@ function printCommandHelp(name: string): void {
     : name === "change-impact" ? "impact"
     : name === "git-log" || name === "gitlog" ? "commits"
     : name === "api-diff" ? "apidiff"
+    : name === "check-docs" || name === "checkdocs" ? "doccheck"
     : name;
   const doc = COMMANDS[key];
   if (!doc) {
@@ -1398,6 +1468,7 @@ async function main(): Promise<void> {
     case "deadcode": case "dead-code": await cmdDeadcode(positionals, flags); break;
     case "callgraph": case "call-graph": await cmdCallGraph(positionals, flags); break;
     case "impact": case "change-impact": await cmdImpact(positionals, flags); break;
+    case "doccheck": case "check-docs": case "checkdocs": await cmdDoccheck(positionals, flags); break;
     case "commits": case "git-log": case "gitlog": await cmdCommits(positionals, flags); break;
     case "apidiff": case "api-diff": await cmdApiDiff(positionals, flags); break;
     case "doctor": await cmdDoctor(); break;

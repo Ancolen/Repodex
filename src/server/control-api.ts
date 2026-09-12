@@ -586,6 +586,66 @@ export function startControlApi(
     }
   });
 
+  /** Doc–code conformance check — deterministic, no Ollama (`cidx doccheck`). */
+  app.post("/doccheck", async (req, res) => {
+    const {
+      project,
+      path: filePath,
+      files,
+      ignore,
+      limit,
+      maxChars,
+      undocumentedLimit,
+      noUndocumented,
+      since,
+      window,
+    } = (req.body ?? {}) as {
+      project?: string;
+      path?: string;
+      files?: string[];
+      ignore?: string[];
+      limit?: number;
+      maxChars?: number;
+      undocumentedLimit?: number;
+      noUndocumented?: boolean;
+      since?: string;
+      window?: boolean;
+    };
+    if (!project && !filePath) {
+      res.status(400).json({ error: "Provide a 'project' name and/or a 'path' (at least one is required)." });
+      return;
+    }
+    const opts: {
+      project?: string;
+      path?: string;
+      files?: string[];
+      ignore?: string[];
+      limit?: number;
+      maxChars?: number;
+      undocumentedLimit?: number;
+      noUndocumented?: boolean;
+      since?: string;
+      window?: boolean;
+    } = {};
+    if (typeof project === "string") opts.project = project;
+    if (typeof filePath === "string") opts.path = filePath;
+    if (Array.isArray(files)) opts.files = files.filter((f): f is string => typeof f === "string");
+    if (Array.isArray(ignore)) opts.ignore = ignore.filter((f): f is string => typeof f === "string");
+    if (typeof limit === "number") opts.limit = limit;
+    if (typeof maxChars === "number") opts.maxChars = maxChars;
+    if (typeof undocumentedLimit === "number") opts.undocumentedLimit = undocumentedLimit;
+    if (typeof noUndocumented === "boolean") opts.noUndocumented = noUndocumented;
+    if (typeof since === "string") opts.since = since;
+    if (typeof window === "boolean") opts.window = window;
+    try {
+      res.json(await deps.manager.checkDocs(opts));
+    } catch (err) {
+      // An unknown project name is a 404 (like /deadcode); anything else is a bad request.
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(msg.startsWith("Index not found") || msg.startsWith("No indexed project") ? 404 : 400).json({ error: msg });
+    }
+  });
+
   app.post("/shutdown", (_req, res) => {
     res.json({ stopping: true });
     setTimeout(() => void deps.onShutdown(), 50);

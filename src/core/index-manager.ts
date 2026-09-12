@@ -80,7 +80,21 @@ import {
   type ApiDiffCounts,
   type ApiDiffEntry,
 } from "./apidiff";
-import { gitRefExists, safeGitRef } from "../services/git";
+import { gitRefExists, safeGitRef, gitCommitTimeAt } from "../services/git";
+// D1 — doc–code conformance: the pure engine + the fs half.
+import {
+  extractDocSpans,
+  runDocCheck,
+  isDocPath,
+  HISTORICAL_FILE_RE,
+  type DocCheckChunk,
+  type DocCheckReport,
+  type DocCheckState,
+  type DocFile,
+  type DocSymbol,
+} from "./doccheck";
+export type { DocCheckReport, DocFinding, UndocumentedEntry } from "./doccheck";
+import { collectDocFiles, listRootFiles, readProjectManifest } from "../services/docfiles";
 // Shared file-kind heuristics (dead code + reverse doc coverage use the same recipe).
 import {
   DEAD_CANDIDATE_TYPES,
@@ -380,6 +394,18 @@ interface CallGraphCacheEntry {
   truncated: boolean;
 }
 
+/** A cached doc-check snapshot for one project (rebuilt when the index changes). */
+interface DocChunkCacheEntry {
+  /** `IndexRecord.lastIndexedAt`; a change invalidates the cache. */
+  lastIndexedAt: number | null;
+  /** Code chunks with project-relative posix paths (doc artifacts excluded). */
+  chunks: DocCheckChunk[];
+  /** Reverse-coverage candidate symbols, deduped by (name, file). */
+  symbols: DocSymbol[];
+  /** True when `tableSymbolsWithContent` hit its row cap. */
+  truncated: boolean;
+}
+
 /** Converts a ResolvedDep into the edge shape we return. */
 function toEdge(dep: ResolvedDep, projectRoot: string): DependencyEdge {
   const edge: DependencyEdge = {
@@ -516,6 +542,8 @@ export class IndexManager {
   private depGraphCache = new Map<string, DepGraphCacheEntry>();
   /** On-demand call-graph adjacency, one entry per project (keyed on lastIndexedAt). */
   private callGraphCache = new Map<string, CallGraphCacheEntry>();
+  /** On-demand doc-check snapshot (chunks + symbols), keyed on lastIndexedAt. */
+  private docChunkCache = new Map<string, DocChunkCacheEntry>();
 
   constructor(
     private registry: Registry,
@@ -658,6 +686,7 @@ export class IndexManager {
     this.jobByIndex.delete(name);
     this.depGraphCache.delete(name);
     this.callGraphCache.delete(name);
+    this.docChunkCache.delete(name);
     return true;
   }
 
@@ -1728,6 +1757,72 @@ export class IndexManager {
     return graph;
   }
 
+  /**
+   * D1 — the doc-check snapshot for one project, cached on `lastIndexedAt`
+   * (same discipline as `buildCallGraph`): one `tableSymbolsWithContent` pass
+   * per index version. Chunks keep project-relative posix paths; doc artifacts
+   * (.md/.json/.xml/.rst) are dropped — a documentation claim must be proven by
+   * code, never by another document. Also collects the reverse-coverage
+   * inventory: real candidate symbols, deduped by (name, file), min start line.
+   */
+  private async docChunks(rec: IndexRecord): Promise<DocChunkCacheEntry> {
+    const cached = this.docChunkCache.get(rec.name);
+    if (cached && cached.lastIndexedAt === rec.lastIndexedAt) return cached;
+
+    const rows = await tableSymbolsWithContent(rec.tableName);
+    const truncated = rows.length >= 200000;
+    const chunks: DocCheckChunk[] = [];
+    const symbols = new Map<string, DocSymbol>();
+    for (const r of rows) {
+      if (typeof r.filePath !== "string" || typeof r.content !== "string" || r.content.length === 0) continue;
+      const rel = path.relative(rec.path, r.filePath);
+      if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) continue;
+      const relPosix = rel.replace(/\\/g, "/");
+      if (isDocPath(relPosix)) continue;
+      const c: DocCheckChunk = {
+        filePath: relPosix,
+        startLine: typeof r.startLine === "number" ? r.startLine : 1,
+        content: r.content,
+      };
+      if (typeof r.symbolName === "string" && r.symbolName) c.symbolName = r.symbolName;
+      if (typeof r.symbolType === "string" && r.symbolType) c.symbolType = r.symbolType;
+      chunks.push(c);
+
+      if (
+        c.symbolName &&
+        c.symbolType &&
+        DEAD_CANDIDATE_TYPES.has(c.symbolType) &&
+        typeof r.endLine === "number"
+      ) {
+        const key = `${c.symbolName}\0${relPosix}`;
+        const line = c.startLine;
+        const ex = symbols.get(key);
+        if (!ex) {
+          symbols.set(key, {
+            symbolName: c.symbolName,
+            symbolType: c.symbolType,
+            language: typeof r.language === "string" ? r.language : "",
+            relativePath: relPosix,
+            line,
+            content: c.content,
+          });
+        } else {
+          if (line < ex.line) ex.line = line;
+          if (c.content.length > ex.content.length) ex.content = c.content;
+          if (r.language) ex.language = r.language;
+        }
+      }
+    }
+    const entry: DocChunkCacheEntry = {
+      lastIndexedAt: rec.lastIndexedAt,
+      chunks,
+      symbols: [...symbols.values()],
+      truncated,
+    };
+    this.docChunkCache.set(rec.name, entry);
+    return entry;
+  }
+
   /** Searches a table according to the chosen mode (hybrid/vector/text). */
   private async searchOnTable(
     table: string,
@@ -2185,6 +2280,201 @@ export class IndexManager {
         this.registry.setIndexStatus(t.indexName, "error", msg);
       }
       throw err;
+    }
+  }
+
+  // ---------------------------------------------------- doc–code conformance (D1)
+
+  /**
+   * Deterministic doc–code conformance check (proposal D1): assemble the pure
+   * engine's state (docs from disk, code chunks from the cached snapshot, the
+   * path universe from the indexed file set + root listing + manifest) and run
+   * it. NO Ollama calls — same state in, same report out. Optional drift
+   * window (`since` ref or `window: true`) post-filters findings to those whose
+   * doc or code side actually changed since the anchor; anything that degrades
+   * is reported in `notes`, never silently widened.
+   */
+  async checkDocs(opts: {
+    project?: string;
+    path?: string;
+    files?: string[];
+    ignore?: string[];
+    limit?: number;
+    maxChars?: number;
+    undocumentedLimit?: number;
+    noUndocumented?: boolean;
+    since?: string;
+    window?: boolean;
+  } = {}): Promise<DocCheckReport> {
+    // Project resolution (the getCallGraph pattern): from a file path, an
+    // explicit name, or the single indexed project.
+    let rec: IndexRecord;
+    const filePath = opts.path?.trim();
+    if (filePath) {
+      rec = this.resolveProjectForFile(path.resolve(filePath), opts.project);
+    } else if (opts.project) {
+      const r = this.registry.getIndex(opts.project);
+      if (!r) throw new Error(`Index not found: ${opts.project}`);
+      rec = r;
+    } else {
+      const all = this.registry.listIndexes();
+      if (all.length === 0) throw new Error("No indexed project; index a directory first.");
+      if (all.length > 1) {
+        throw new Error(
+          `check_docs could target multiple projects (${all.map((p) => p.name).join(", ")}); pass project or path.`,
+        );
+      }
+      rec = all[0]!;
+    }
+
+    // Per-project doc set: explicit args win, then `.cidx.json doccheck`.
+    const cfg = readProjectConfig(rec.path);
+    const files = opts.files ?? cfg?.doccheck?.files;
+    const ignore = [...(opts.ignore ?? []), ...(cfg?.doccheck?.ignore ?? [])];
+
+    const [discovery, manifest, snapshot] = await Promise.all([
+      collectDocFiles(rec.path, { files, ignore }),
+      readProjectManifest(rec.path),
+      this.docChunks(rec),
+    ]);
+
+    // Read the docs (unreadable files are reported in notes, never fatal).
+    const docs: DocFile[] = [];
+    const notes: string[] = [];
+    let docsUnreadable = 0;
+    for (const abs of discovery.files) {
+      const relPosix = path.relative(rec.path, abs).replace(/\\/g, "/");
+      let text: string;
+      try {
+        text = await readFile(abs, "utf-8");
+      } catch {
+        docsUnreadable++;
+        notes.push(`unreadable doc skipped: ${relPosix}`);
+        continue;
+      }
+      docs.push({
+        relPath: relPosix,
+        lines: text.split("\n"),
+        fileClass: HISTORICAL_FILE_RE.test(relPosix) ? "historical" : "current",
+        suppressed: new Set<number>(),
+      });
+    }
+
+    // The path-claim universe: indexed files ∪ checked docs ∪ root names.
+    const repoFiles = new Set<string>(docs.map((d) => d.relPath));
+    for (const f of this.registry.listCachedFiles(rec.name)) {
+      const rel = path.relative(rec.path, f).replace(/\\/g, "/");
+      if (rel && !rel.startsWith("..")) repoFiles.add(rel);
+    }
+
+    const state: DocCheckState = {
+      project: rec.name,
+      projectRoot: rec.path,
+      docs,
+      chunks: snapshot.chunks,
+      repoFiles,
+      rootNames: new Set(listRootFiles(rec.path)),
+      manifest,
+      exportedSymbols: snapshot.symbols,
+      lastIndexedAt: rec.lastIndexedAt,
+    };
+
+    const report = runDocCheck(state, {
+      limit: opts.limit,
+      maxChars: opts.maxChars ?? CONFIG.DOC_CHECK_MAX_CHARS,
+      undocumentedLimit: opts.undocumentedLimit ?? CONFIG.DOC_CHECK_UNDOCUMENTED,
+      noUndocumented: opts.noUndocumented,
+    });
+
+    report.checked.truncated = discovery.truncated || snapshot.truncated;
+    if (docsUnreadable > 0) report.checked.docsUnreadable = docsUnreadable;
+    if (notes.length > 0) report.notes.push(...notes);
+
+    if (opts.since || opts.window) {
+      await this.applyDocCheckWindow(rec, report, docs, opts.since, !!opts.window);
+    }
+    return report;
+  }
+
+  /**
+   * Drift-window post-filter: keep a finding only when its doc file changed
+   * since the anchor OR its evidence file did. The anchor is `since` (a git
+   * ref, resolved to its commit time) or, with `window: true`, the most recent
+   * commit that touched any checked doc. Anything that fails to resolve
+   * degrades to the full scan with a note — never a silent no-op.
+   */
+  private async applyDocCheckWindow(
+    rec: IndexRecord,
+    report: DocCheckReport,
+    docs: DocFile[],
+    since: string | undefined,
+    window: boolean,
+  ): Promise<void> {
+    const isRepo = await isGitRepo(rec.path);
+    if (!isRepo) {
+      report.notes.push("window requested but the project is not a git repo — full scan");
+      return;
+    }
+
+    let anchor: number | null = null;
+    let anchorLabel = "";
+    if (since) {
+      const ref = safeGitRef(since);
+      anchor = ref ? await gitCommitTimeAt(rec.path, ref) : null;
+      if (anchor === null) {
+        report.notes.push(`since '${since}' did not resolve to a commit — full scan`);
+      } else {
+        anchorLabel = ref!;
+      }
+    }
+    if (window) {
+      // The most recent commit that touched any checked doc.
+      let newest = 0;
+      const changed = new Set<string>();
+      for (const d of docs) {
+        const hits = await searchGitLog(rec.path, { path: d.relPath, limit: 1 });
+        const ts = hits[0]?.timestamp ?? 0;
+        if (ts > 0) changed.add(d.relPath);
+        if (ts > newest) newest = ts;
+      }
+      if (newest === 0) {
+        report.notes.push("window requested but no doc commit was found — full scan");
+      } else if (anchor === null || newest > anchor) {
+        anchor = newest;
+        anchorLabel = `last doc commit (${new Date(newest).toISOString()})`;
+      }
+    }
+
+    if (anchor === null) return; // degraded to full scan; the note explains why
+
+    const gitSince = `@${Math.floor(anchor / 1000)}`;
+    const codeHits = await searchGitLog(rec.path, { since: gitSince, withFiles: true, limit: 1000 });
+    const codeChanged = new Set<string>();
+    for (const h of codeHits) for (const f of h.files ?? []) codeChanged.add(f.replace(/\\/g, "/"));
+    const docsChanged = new Set<string>();
+    for (const d of docs) {
+      const hits = await searchGitLog(rec.path, { path: d.relPath, since: gitSince, limit: 1 });
+      if (hits.length > 0) docsChanged.add(d.relPath);
+    }
+
+    const keep = (f: { doc: { path: string }; evidence?: { path: string }[] }): boolean => {
+      if (docsChanged.has(f.doc.path)) return true;
+      if (!f.evidence || f.evidence.length === 0) return false;
+      return f.evidence.some((e) => codeChanged.has(e.path));
+    };
+    const findingsBefore = report.findings.length;
+    const reviewBefore = report.needsReview.length;
+    report.findings = report.findings.filter(keep);
+    report.needsReview = report.needsReview.filter(keep);
+    report.checked.window = {
+      since: anchorLabel || new Date(anchor).toISOString(),
+      docsChanged: docsChanged.size,
+      codeChanged: codeChanged.size,
+    };
+    if (report.findings.length !== findingsBefore || report.needsReview.length !== reviewBefore) {
+      report.notes.push(
+        `drift window: ${findingsBefore - report.findings.length} finding(s) and ${reviewBefore - report.needsReview.length} review item(s) predate the window`,
+      );
     }
   }
 

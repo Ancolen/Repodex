@@ -1,4 +1,4 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -652,5 +652,158 @@ describe("root + manifest helpers", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+// ------------------------------------------------- 3. the engine (IndexManager)
+
+/**
+ * `IndexManager.checkDocs` over a REAL fixture project: the fixture's sqlite
+ * registry and LanceDB table live on the throw-away root pinned by the `[test]`
+ * preload (see tests/apidiff.test.ts for the full rationale). No Ollama — the
+ * vectors are dummies, `check_docs` never embeds.
+ */
+const { randomUUID } = await import("node:crypto");
+const db2 = await import("../src/services/db");
+const CFG = (await import("../src/config")).CONFIG;
+const { Registry: Registry2 } = await import("../src/core/registry");
+const { JobQueue: JobQueue2 } = await import("../src/core/job-queue");
+const { IndexManager: IndexManager2 } = await import("../src/core/index-manager");
+const { chunkCode: chunkCode2 } = await import("../src/chunking/chunker");
+const { isolatedHome: isolatedHome2 } = await import("./helpers/isolated-cidx-home");
+
+describe("IndexManager.checkDocs — engine over a real fixture", () => {
+  const HOME2 = isolatedHome2;
+  const PROJECT = mkdtempSync(path.join(os.tmpdir(), "cidx-doccheck-proj-"));
+  const DB_PATH2 = path.join(HOME2, `doccheck-${randomUUID()}.db`);
+  const TABLE = "idx_doccheck_fixture";
+  const LAST_INDEXED_AT = 1700000000000;
+
+  const README = [
+    "# Fixture",
+    "",
+    "Startup calls `madeUpGhostFn` before the engine boots.",
+    "Everything funnels through `realEngine`.",
+    "",
+    "See `src/lib.ts` for the details.",
+  ].join("\n");
+
+  const LIB = [
+    "export function realEngine(input: string): string {",
+    "  return input.trim();",
+    "}",
+  ].join("\n");
+
+  let registry2: InstanceType<typeof Registry2>;
+  let manager2: InstanceType<typeof IndexManager2>;
+
+  beforeAll(async () => {
+    expect(CFG.DB_DIR.startsWith(HOME2)).toBe(true);
+    await db2.initDB();
+    mkdirSync(path.join(PROJECT, "docs"), { recursive: true });
+    mkdirSync(path.join(PROJECT, "src"), { recursive: true });
+    writeFileSync(path.join(PROJECT, "README.md"), README);
+    writeFileSync(path.join(PROJECT, "docs", "guide.md"), "# Guide\nUse `realEngine` everywhere.\n");
+    writeFileSync(path.join(PROJECT, "src", "lib.ts"), LIB);
+
+    registry2 = new Registry2(DB_PATH2);
+    registry2.upsertIndex({
+      name: "docfix",
+      path: PROJECT,
+      tableName: TABLE,
+      status: "ready",
+      fileCount: 1,
+      chunkCount: 1,
+      embedModel: null,
+      embedDim: null,
+      lastIndexedAt: LAST_INDEXED_AT,
+      createdAt: 1,
+      error: null,
+    });
+    registry2.setFileMtime("docfix", path.join(PROJECT, "src", "lib.ts"), 1);
+
+    const abs = path.join(PROJECT, "src", "lib.ts");
+    const chunks = await chunkCode2(abs, LIB);
+    await db2.insertChunks(
+      TABLE,
+      chunks.map((c, i) => ({
+        id: `lib.ts#${i}`,
+        filePath: abs,
+        content: c.content,
+        vector: [0.1, 0.2, 0.3],
+        language: c.language ?? null,
+        symbolName: c.symbolName ?? null,
+        symbolType: c.symbolType ?? null,
+        startLine: c.startLine,
+        endLine: c.endLine,
+        doc: null,
+        doc_vector: null,
+        id_terms: null,
+      })),
+    );
+    manager2 = new IndexManager2(registry2, new JobQueue2());
+  });
+
+  afterAll(() => {
+    manager2?.stopAll?.();
+    registry2?.close();
+    rmSync(DB_PATH2, { force: true });
+    rmSync(PROJECT, { recursive: true, force: true });
+  });
+
+  test("resolves a real project from a path and finds the planted drift", async () => {
+    const report = await manager2.checkDocs({ path: PROJECT, noUndocumented: true });
+    expect(report.project).toBe("docfix");
+    expect(report.checked.docs).toBe(2); // README.md + docs/guide.md
+    expect(report.verdict.consistent).toBe(false);
+    const drift = report.findings.find((f) => f.kind === "identifier");
+    expect(drift).toBeDefined();
+    expect(drift!.message).toContain("madeUpGhostFn");
+    expect(drift!.doc.path).toBe("README.md");
+    // The resolvable claims really resolved:
+    expect(report.checked.claims).toBeGreaterThanOrEqual(2);
+  });
+
+  test("surfaces index freshness and the source path claim", async () => {
+    const report = await manager2.checkDocs({ path: PROJECT, noUndocumented: true });
+    expect(report.checked.indexFreshness).toBe(LAST_INDEXED_AT);
+    const pathClaim = report.findings.filter((f) => f.kind === "path");
+    expect(pathClaim).toHaveLength(0); // src/lib.ts resolves via the cached file set
+  });
+
+  test("unknown project name throws, like every other engine entry point", async () => {
+    await expect(manager2.checkDocs({ project: "does-not-exist" })).rejects.toThrow("Index not found");
+  });
+
+  test("a project with no markdown yields a valid empty report, not a crash", async () => {
+    const bare = mkdtempSync(path.join(os.tmpdir(), "cidx-doccheck-bare-"));
+    try {
+      registry2.upsertIndex({
+        name: "docbare",
+        path: bare,
+        tableName: "idx_doccheck_bare",
+        status: "ready",
+        fileCount: 0,
+        chunkCount: 0,
+        embedModel: null,
+        embedDim: null,
+        lastIndexedAt: null,
+        createdAt: 1,
+        error: null,
+      });
+      const report = await manager2.checkDocs({ project: "docbare" });
+      expect(report.checked.docs).toBe(0);
+      expect(report.checked.spans).toBe(0);
+      expect(report.verdict.consistent).toBe(true);
+      expect(report.checked.indexFreshness).toBeNull();
+    } finally {
+      rmSync(bare, { recursive: true, force: true });
+    }
+  });
+
+  test("the drift window degrades to a full scan with a note on a non-repo project", async () => {
+    const report = await manager2.checkDocs({ path: PROJECT, noUndocumented: true, window: true });
+    expect(report.notes.some((n) => n.includes("not a git repo"))).toBe(true);
+    expect(report.checked.window).toBeUndefined();
+    expect(report.findings.length).toBe(1); // nothing was filtered away
   });
 });

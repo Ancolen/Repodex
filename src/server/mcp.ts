@@ -26,6 +26,7 @@ import {
   formatCommits,
   formatApiDiff,
   formatImpact,
+  formatDocCheck,
 } from "./format";
 import type { JobQueue } from "../core/job-queue";
 import type { IndexManager } from "../core/index-manager";
@@ -495,6 +496,57 @@ function buildServer(deps: McpDeps): Server {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text", text: `Change-impact error: ${msg}` }], isError: true };
+      }
+    }
+
+    // ---- doc–code conformance (proposal D1) ----
+    if (name === "check_docs") {
+      const args = rawArgs as {
+        project?: string;
+        path?: string;
+        files?: string[];
+        ignore?: string[];
+        limit?: number;
+        maxChars?: number;
+        undocumentedLimit?: number;
+        noUndocumented?: boolean;
+        since?: string;
+        window?: boolean;
+      };
+      if (!args.project && !args.path) {
+        return {
+          content: [{ type: "text", text: "Provide a 'project' name and/or a 'path' (at least one is required)." }],
+          isError: true,
+        };
+      }
+      const opts: {
+        project?: string;
+        path?: string;
+        files?: string[];
+        ignore?: string[];
+        limit?: number;
+        maxChars?: number;
+        undocumentedLimit?: number;
+        noUndocumented?: boolean;
+        since?: string;
+        window?: boolean;
+      } = {};
+      if (typeof args.project === "string") opts.project = args.project;
+      if (typeof args.path === "string") opts.path = args.path;
+      if (Array.isArray(args.files)) opts.files = args.files.filter((f): f is string => typeof f === "string");
+      if (Array.isArray(args.ignore)) opts.ignore = args.ignore.filter((f): f is string => typeof f === "string");
+      if (typeof args.limit === "number") opts.limit = args.limit;
+      if (typeof args.maxChars === "number") opts.maxChars = args.maxChars;
+      if (typeof args.undocumentedLimit === "number") opts.undocumentedLimit = args.undocumentedLimit;
+      if (typeof args.noUndocumented === "boolean") opts.noUndocumented = args.noUndocumented;
+      if (typeof args.since === "string") opts.since = args.since;
+      if (typeof args.window === "boolean") opts.window = args.window;
+      try {
+        const report = await deps.manager.checkDocs(opts);
+        return { content: [{ type: "text", text: formatDocCheck(report) }] };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text", text: `Doc-check error: ${msg}` }], isError: true };
       }
     }
 

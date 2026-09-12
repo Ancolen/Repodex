@@ -37,6 +37,7 @@ import {
   formatCommits,
   formatApiDiff,
   formatImpact,
+  formatDocCheck,
 } from "./server/format";
 
 const BASE = `http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}`;
@@ -314,6 +315,22 @@ async function main(): Promise<void> {
             limit: args.limit,
           });
           return ok(formatImpact(impact));
+        }
+        // ---- doc–code conformance (proposal D1) ----
+        case "check_docs": {
+          const report = await api<Parameters<typeof formatDocCheck>[0]>("POST", "/doccheck", {
+            project: args.project,
+            path: args.path,
+            files: args.files,
+            ignore: args.ignore,
+            limit: args.limit,
+            maxChars: args.maxChars,
+            undocumentedLimit: args.undocumentedLimit,
+            noUndocumented: args.noUndocumented,
+            since: args.since,
+            window: args.window,
+          });
+          return ok(formatDocCheck(report));
         }
         default:
           return fail(`Unknown tool: ${name}`);
