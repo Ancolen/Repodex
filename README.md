@@ -166,6 +166,10 @@ PURGE_DATA=1 ./uninstall.sh   # also deletes the ~/.cidx data
 | `callgraph <symbol\|file> [flags]` | Call graph: who calls a symbol and what it calls (bounded, cycle-safe trees) |
 | `deadcode <project> [flags]` | Potential dead code: zero-reference symbols, scored conservatively |
 | `commits <project> [query] [flags]` | Git-history / commit-message search (when/why a feature was added, file history) |
+| `pack "<query>" [flags]` | Context pack: search hits + per-hit file outline + imports + context lines, in ONE call |
+| `impact <symbol\|file> [flags]` | Change impact: one ranked answer to "if I change X, what breaks?" |
+| `apidiff <project> <base> [flags]` | Public-API diff between two git refs (breaking symbols surfaced) |
+| `doctor` | Read-only diagnostic pass over the whole install (ok/warn/fail + fix hints) |
 | `config [path]` | Shows the active YAML configuration (or its path) |
 | `mcp` (`stdio`) | Starts the stdio MCP bridge (Claude Desktop etc.) |
 | `stop` | Stops the daemon |
@@ -335,6 +339,9 @@ For clients that support Streamable HTTP:
 - `get_call_graph(symbol?, path?, project?, direction?, depth?, limit?)` — who calls a symbol and what it calls, as bounded, cycle-safe trees; centers on a symbol name and/or every callable in a file.
 - `find_dead_code(project, language?, symbolType?, minConfidence?, limit?)` — potential dead code: zero-reference symbols scored conservatively, labeled `likely dead` / `uncertain` / `review`; test files and entry points excluded.
 - `search_commits(project, query?, path?, author?, since?, until?, withFiles?, limit?)` — git-history / commit-message search; runs `git log` live in the project directory (no indexing, no embedding).
+- `get_context_pack(query, project?, limit?, maxChars?, contextLines?)` — one call assembling the hybrid-search core plus, per hit, the file's symbol outline, forward imports and surrounding context lines, all under a single pack-level character budget (hits kept whole, top hit always returned, the rest reported as `omitted`).
+- `get_api_diff(project, base, head?)` — public-API diff between two git refs compared as exported-symbol surfaces: symbols classified `removed` / `signature-changed` / `visibility-narrowed` (all breaking), `added`, `unchanged`; the historical side is re-parsed from git with the same tree-sitter recipe. No indexing, no reindex.
+- `get_change_impact(symbol?, path?, project?, depth?, limit?)` — one ranked answer to "if I change X, what breaks?": direct callers (call graph) outrank importing files (dependency graph), which outrank loose textual mentions; test files surface as `coveredBy` instead of production consumers.
 
 ### Index freshness (important for agents)
 
