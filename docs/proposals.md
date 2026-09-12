@@ -13,6 +13,7 @@
 | [C3](#c3-hotspot--technical-debt-report) | Hotspot / technical-debt report | Code intelligence | Medium | Medium |
 | [C4](#c4-ownership-blame-enrichment) | Ownership / blame enrichment | Code intelligence | Medium | Low-Medium |
 | [C5](#c5-coupling-metrics) | Coupling metrics | Code intelligence | Low-Medium | Low |
+| [D1](#d1-check_docs--deterministic-doccode-conformance-checker) | `check_docs` — doc–code conformance | Documentation | High | Medium |
 | [A2](#a2-mcp-resources--index-notifications) | MCP resources + index notifications | Agent UX | Medium | Low-Medium |
 | [A3](#a3-search-analytics-query-log) | Search analytics / query log | Agent UX | Low-Medium | Low |
 | [O2](#o2-zero-downtime-model-migration) | Zero-downtime model migration | Ops | Medium | Medium-High |
@@ -241,6 +242,74 @@ Dead code says "unused"; hotspots say "over-changed and over-coupled" — the ch
 
 - Pure graph-metric tests (fanIn/fanOut/instability math, external exclusion, caps).
 - Fixture project: known hub file ranks top fan-in.
+
+---
+
+## Documentation
+
+### D1. `check_docs` — deterministic doc–code conformance checker
+
+**Impact: High · Effort: Medium**
+
+#### Motivation
+
+Docs drift silently: code is renamed, defaults change, routes are added — and `CLAUDE.md`/`README.md` keep describing the old world until someone notices. Today the only check is a full Claude session (subagents, hundreds of thousands of tokens per sweep). A calibration prototype run against this very repo settled both questions:
+
+- **Reach**: 8 doc files, 3,038 backticked references, **58% mechanically checkable** with deterministic gates — no model, ~1 s of CPU, zero Claude tokens.
+- **Yield**: **5 real drifts, 0 false positives after adjudication** — a phantom symbol (`mergeWithDocLegs`, really `IndexManager.mergeWithExtraLegs`), four shipped control-API routes missing from CLAUDE.md's list (`/pack /apidiff /impact /doctor`), four shipped MCP tools unnamed in CLAUDE.md and three missing from README's tool list, plus the `docs/` file list. All fixed in the commit that precedes this proposal's implementation.
+
+The two adjudicated non-findings taught as much as the findings: CLAUDE's "16 embedded grammars" was **correct** (a prototype regex missed `c_sharp`), and "index is the only registered job type" was **true** (registered behind the `INDEX_JOB` constant) — so the tool needs constant resolution, conservative gates, and an adjudication-friendly output, or it trains users to ignore it.
+
+#### Design
+
+**Layering** (the `doctor.ts` contract): a **pure engine** `src/core/doccheck.ts` — every input is injected plain data, a check never turns its own read failure into a crash (it reports `skipped`) — plus fs helpers `src/services/docfiles.ts` (doc discovery, root listing, `package.json` manifest) and one orchestration method `IndexManager.checkDocs(opts)`. No Ollama call anywhere; byte-for-byte reproducible. Wired through the full 8 layers as `check_docs` (MCP) / `POST /doccheck` / `cidx doccheck`.
+
+**Anchor**: `project`/`path` optional, at least one required (the `get_call_graph` resolution: explicit `project` → `getIndex`; a `path` → `resolveProjectForFile` most-specific-prefix; neither → single-project inference, 0/2+ → explanatory throw).
+
+**Doc discovery** (`docfiles.ts`): fs walk reusing `buildIgnore`/`isPathIgnored` (never forked), `.md`/`.mdx` only, default root-anchored `["*.md", "docs/**/*.md"]`, capped (depth 6, 200 files, `truncated` surfaced). `package.json` → `{deps, devDeps, scripts}` manifest; root basenames (LICENSE, NOTICE, …). Per-project `.cidx.json → doccheck: { files?, ignore? }` narrows the set (independent-field validation, same pattern as `languages`/`ignore`/`embedModel`).
+
+**Spans and classes**: every backticked span is classified, then checked against injected state:
+
+| Class | Check | Drift confidence |
+|---|---|---|
+| `identifier` | symbol-definition set ∪ whole-identifier occurrence ∪ **constants table** (`INDEX_JOB = "index"` lesson); dotted `a.b` → whole → bare last segment → all segments; miss → fuzzy nearest neighbor ("renamed?" + similarity) | 95 (92 with suggestion) |
+| `path` | root-rel → `src/` prefix → doc-relative → unique suffix over the indexed file set; glob ≥1 hit ok, 0 hits → suspected (aspirational); `./config.yml` → config-literal skip; `dist/…` → artifact skip | 95; ambiguous suffix → suspected 70 |
+| `env` | root file → external list/prefixes → occurrence → constants | 95 |
+| `endpoint` | `VERB /route`: every literal route segment must occur (`:param` skipped) | 93 |
+| `cmd`/`flag` | `bun run X` → manifest scripts; `bun run src/cli.ts <cmd>` → path + cmd occurrence; `cidx <cmd>` → occurrence; `--flag` → occurrence (external list skipped) | 95 / 92 |
+| `dep` | `@scope/pkg[@ver]` → package.json (version-prefix compare when pinned; mismatch → suspected 80, never drift) | 95 |
+| `kv` / `model-tag` / `config-path` | key/segment occurrence; `config-path` miss → suspected 85 (the FP-est class — deliberately not drift) | — |
+| `composite` | `path → symbol`: resolve path, then whole-word symbol membership in that file | 94 |
+
+**Evidence source is the index itself**: one `tableSymbolsWithContent` read per project, cached on `lastIndexedAt` (the call-graph cache precedent, invalidated in `removeIndex`), with `.md`/`.json`/`.xml`/`.rst` character-fallback chunks **dropped** (a doc claim must never be proven by another doc). The name lookup is the `countReferences` recipe — `buildNameRegex` group-scanned combined whole-identifier regexes (`NAME_REGEX_CAP`), so no token is silently dropped past the cap.
+
+**Intent classification — the FP lesson**: `changelog*`-shaped files are `historical` (spans counted, findings never emitted); lines under headings matching proposed/planned/not-yet-built/🚧 are `planned`; fenced code blocks and prose-example tokens (`getUserNme`, `_private`, `a/b.py`) are `example`; `<subdir>/` shorthands like `db/` are skipped as unresolvable-without-context. Inline `<!-- cidx-doccheck-ignore -->` (own + next line) is the escape hatch. **Hard rule**: only `missing` from a total-resolution class becomes `drift` (confidence ≥ 90); every uncertainty is demoted to `needsReview` (< 90). When in doubt, don't emit a finding.
+
+**Reverse coverage (generic)**: exported-looking symbols (the `detectExported` + `findDeadCode` pre-filter recipe — test files and entry points excluded) that appear **nowhere** in the checked corpus → an `undocumented` section (`review`, confidence 40, capped at 25, `noUndocumented` opt-out). Not a hard finding — docs may intentionally omit internals — but it is exactly the check that would have caught four shipped tools being absent from CLAUDE.md.
+
+**Drift window**: `since` (a git ref — `safeGitRef` + a new `gitCommitTimeAt` — or a date) or `window: true` (anchor = the most recent commit touching any checked doc). Findings are filtered to those whose doc file or evidence file changed since the anchor; `checked.window` surfaces the set; every degrade (non-repo, unresolvable ref, no doc history) lands in `notes[]` — never a silent full sweep.
+
+**Report**: `{ checked: {docs[], spans, claims, indexFreshness, window?, skipped?}, verdict: {consistent, findings, needsReview, undocumented}, findings, needsReview, undocumented, omitted, maxChars, notes }`, budgeted via a new size-generic `applyBudgetBySize` (`applyCharBudget` stays untouched) with `maxChars` default 12000. Stable `D-<n>` ids in doc order; `indexFreshness` + the FRESHNESS caveat in the tool description cover the just-renamed-symbol race. Exit code mirrors `cidx doctor`: 1 only when `findings.length > 0`.
+
+**Later phases (out of D1a scope)**: D1b adds a local instruct-model semantic judge (`doccheck.judgeModel`) over the claims deterministic checks cannot reach, reusing the `rerank.ts` logprob machinery, with low-confidence verdicts flowing into `needsReview`; D1c adds a watch/loop mode via a `doccheck` job type. The report schema already carries both hooks.
+
+#### Files touched
+
+`src/core/doccheck.ts` (new, pure), `src/services/docfiles.ts` (new), `src/core/index-manager.ts` (`checkDocs` + chunk cache + invalidation), `src/core/project-config.ts` (`doccheck` block + the two `doctor.ts` hint strings that enumerate the fields), `src/config.ts` (`doccheck.maxChars`/`undocumentedLimit`), `src/utils/budget.ts` (`applyBudgetBySize`), `src/services/git.ts` (`gitCommitTimeAt`), the 8-layer wiring (`tool-defs.ts`, `mcp.ts`, `control-api.ts`, `stdio-bridge.ts`, `cli.ts`, `format.ts`), `tests/doccheck.test.ts` (new).
+
+#### Risks
+
+- False positives are the whole product — a wrong historical/planned/example classification trains users to ignore the tool. Mitigated by the prototype-validated gates, the drift⇒≥90 rule, and the ignore marker.
+- Index freshness reads as drift (~1-2 s lag): `indexFreshness` surfaced, FRESHNESS caveat in the tool description, drift window as the cheap remedy.
+- Path resolution runs over the indexed-file set + root listing (not a full walk): an ignored/untracked source file reads as missing — ambiguous suffix matches demote to `suspected`, limitation documented.
+- `lastIndexedAt` is null mid-index: the cache key degenerates; `indexFreshness: null` is surfaced, indexing status does not block (call-graph semantics).
+
+#### Acceptance
+
+- `bun run typecheck` clean; `bun test` green with the new suite (`tests/doccheck.test.ts`, ~30 tests: classification table, per-class gates, intent filtering, budget, reverse coverage, doc walk mkdtemp fixture, engine tests over a temp table).
+- Live run on this repo after the drift-fix commit: **0 `drift` findings** (`verdict.consistent`), `needsReview`/`undocumented` populated; exit 1 when drift findings exist (doctor convention).
+- MCP smoke: `tools/list` shows 17 tools; `tools/call check_docs` returns the formatted report; `POST /doccheck` returns the JSON.
+- No schema change, no reindex, no Ollama call anywhere in the path.
 
 ---
 
