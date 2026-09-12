@@ -366,7 +366,7 @@ function surfaceFromChunks(chunks: Chunk[], language: string, relPath: string): 
         startLine: c.startLine,
         endLine: c.endLine,
         content: c.content,
-        signature: deriveSignature(c.content),
+        signature: deriveSignature(c.content, language),
         exported: detectExported(c.symbolName, c.symbolType, language, c.content),
       });
     } else {
@@ -374,7 +374,7 @@ function surfaceFromChunks(chunks: Chunk[], language: string, relPath: string): 
       prev.endLine = Math.max(prev.endLine, c.endLine);
       if (c.content.length > prev.content.length) {
         prev.content = c.content;
-        prev.signature = deriveSignature(c.content);
+        prev.signature = deriveSignature(c.content, language);
         prev.exported = detectExported(c.symbolName, c.symbolType, language, c.content);
       }
     }
@@ -452,7 +452,7 @@ export function surfaceFromIndexRows(projectRoot: string, rows: IndexedSymbolRow
         startLine: r.startLine,
         endLine: r.endLine,
         content,
-        signature: deriveSignature(content),
+        signature: deriveSignature(content, language),
         exported: detectExported(name, st, language, content),
       });
     } else {
@@ -460,7 +460,7 @@ export function surfaceFromIndexRows(projectRoot: string, rows: IndexedSymbolRow
       prev.endLine = Math.max(prev.endLine, r.endLine);
       if (content.length > prev.content.length) {
         prev.content = content;
-        prev.signature = deriveSignature(content);
+        prev.signature = deriveSignature(content, language);
         prev.exported = detectExported(name, st, language, content);
       }
     }

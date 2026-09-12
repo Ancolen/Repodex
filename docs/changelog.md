@@ -15,7 +15,7 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ### Agent-facing tool ergonomics (post-D1 tool audit)
 
-`bun run typecheck` clean, `bun test` **595/595** (1635 expect). A full audit of every MCP tool — definition and live payload — drove one pass of ergonomics fixes: the toolset now speaks the agent's language end to end (anchor by the path you know, self-correct from the error you get, never a silent cap, never a wasted kilobyte).
+`bun run typecheck` clean, `bun test` **603/603** (1644 expect). A full audit of every MCP tool — definition and live payload — drove one pass of ergonomics fixes: the toolset now speaks the agent's language end to end (anchor by the path you know, self-correct from the error you get, never a silent cap, never a wasted kilobyte).
 
 #### One-anchor project resolution: `project?` / `path?` everywhere
 
@@ -44,6 +44,8 @@ The five report tools (`find_dead_code`, `search_commits`, `get_api_diff`, `get_
 #### `deriveSignature` no longer cuts at an object-type brace
 
 The signature enrichment used to break a declaration head at **any** `{` — so `async checkDocs(opts: {` rendered as a half-cut `async checkDocs(opts: …`. Now a `{` that follows `:`/`,`/`(`/`=` opens an inline object **type**, not the body: the collector keeps gathering lines until the real body brace (Allman-style lone `{` on its own line still ends the head), and the final cut skips type-literal braces. Head cap raised 3 → 6 lines so multi-line parameter lists survive intact.
+
+The signature is also no longer the **doc comment sitting above the declaration**: a chunk spans its preceding doc comment too, so the first line of e.g. `applyBudgetBySize` rendered the whole JSDoc. `deriveSignature` now takes the chunk's `language` and skips leading comments, docstrings and decorator/attribute lines per a per-language style table (`COMMENT_STYLES` — `//` + block comments for the C family, `#` for Python/Ruby/GDScript, `"""` docstrings, `@`-decorators for Python/Java/Kotlin/Swift/Scala/GDScript, `#[…]` for Rust, `[…]` for C#). Languages without a style (markdown — where `#` is a heading, not a comment — and unknown labels) keep the exact legacy first-line behavior; all four consumers (enrichment, dead-code, call graph, api diff) pass the language through.
 
 #### Description touch-ups (the agent-readable contract)
 

@@ -11,22 +11,123 @@ export function escapeRegExp(s: string): string {
 const SIGNATURE_MAX = 200;
 
 /**
+ * Comment conventions per indexed language: what a leading comment / docstring
+ * / decorator looks like, so the signature is the declaration head — never the
+ * doc comment that happens to sit above it (a chunk spans its preceding doc
+ * comment too). Languages absent from this table (text formats like markdown,
+ * unknown languages) keep the legacy first-line behavior.
+ */
+interface CommentStyle {
+  /** Line-comment prefixes (`//`, `#`). */
+  line: string[];
+  /** Block comment delimiters (the C-style slash-star pair). */
+  block?: { open: string; close: string };
+  /** Bare docstring openers (`"""` — the opener may close on its own line). */
+  docstring?: string[];
+  /** `@`-decorator lines (Python, Java annotations, Kotlin, …). */
+  decorators?: boolean;
+  /** `[...]`-attribute lines (C#). */
+  attribute?: boolean;
+}
+
+const COMMENT_STYLES: Record<string, CommentStyle> = {
+  javascript: { line: ["//"], block: { open: "/*", close: "*/" } },
+  typescript: { line: ["//"], block: { open: "/*", close: "*/" } },
+  tsx: { line: ["//"], block: { open: "/*", close: "*/" } },
+  go: { line: ["//"], block: { open: "/*", close: "*/" } },
+  // Rust has no `#` comments — a leading `#` is only `#[derive]`-style attributes.
+  rust: { line: ["//", "#"], block: { open: "/*", close: "*/" } },
+  java: { line: ["//"], block: { open: "/*", close: "*/" }, decorators: true },
+  c: { line: ["//"], block: { open: "/*", close: "*/" } },
+  cpp: { line: ["//"], block: { open: "/*", close: "*/" } },
+  php: { line: ["//", "#"], block: { open: "/*", close: "*/" } },
+  ruby: { line: ["#"] },
+  kotlin: { line: ["//"], block: { open: "/*", close: "*/" }, decorators: true },
+  swift: { line: ["//"], block: { open: "/*", close: "*/" }, decorators: true },
+  scala: { line: ["//"], block: { open: "/*", close: "*/" }, decorators: true },
+  c_sharp: { line: ["//"], block: { open: "/*", close: "*/" }, attribute: true },
+  python: { line: ["#"], docstring: ['"""', "'''"], decorators: true },
+  gdscript: { line: ["#"], docstring: ['"""', "'''"], decorators: true },
+};
+
+/**
+ * Index of the first line that can open a declaration head: blank lines are
+ * always skipped, and — when the chunk's language has a known comment style —
+ * so are leading comments, docstrings and decorator/attribute lines. Without a
+ * style the first non-blank line is returned (legacy behavior).
+ */
+function firstDeclarationLine(lines: string[], style: CommentStyle | undefined): number {
+  let i = 0;
+  while (i < lines.length) {
+    const t = lines[i]!.trim();
+    if (t === "") {
+      i++;
+      continue;
+    }
+    if (!style) return i;
+    if (style.decorators && t.startsWith("@")) {
+      i++;
+      continue;
+    }
+    if (style.attribute && t.startsWith("[")) {
+      i++;
+      continue;
+    }
+    if (style.line.some((p) => t.startsWith(p))) {
+      i++;
+      continue;
+    }
+    if (style.block && t.startsWith(style.block.open)) {
+      const close = style.block.close;
+      const end = t.indexOf(close);
+      if (end >= 0) {
+        // Code on the closer's own line (`/* x */ fn f()`) IS the declaration —
+        // leave the line for the head collector.
+        if (/[^*\s]/.test(t.slice(end + close.length))) return i;
+        i++; // a self-contained comment line
+        continue;
+      }
+      i++; // opener only — consume until the closer line
+      while (i < lines.length && !lines[i]!.includes(close)) i++;
+      i++;
+      continue;
+    }
+    if (style.docstring) {
+      const quote = style.docstring.find((q) => t.startsWith(q));
+      if (quote) {
+        if (t.slice(quote.length).includes(quote)) {
+          i++; // single-line docstring
+        } else {
+          i++;
+          while (i < lines.length && !lines[i]!.includes(quote)) i++;
+          i++;
+        }
+        continue;
+      }
+    }
+    return i;
+  }
+  return i;
+}
+
+/**
  * Derives a short, human-readable signature from a code chunk's content.
  *
- * Strategy (language-agnostic, best-effort):
- *  - Skip leading blank lines.
- *  - Collect lines starting at the first non-blank one until the declaration
- *    "head" ends — i.e. a line that opens a body (`{`), a Python-style block
- *    (trailing `:`), or an arrow (`=>`) — capped at 3 lines.
+ * Strategy (best-effort, language-aware where the chunk carries a label):
+ *  - Skip leading blank lines; for a language with a known comment style, skip
+ *    leading comments, docstrings and decorator/attribute lines too — the
+ *    signature is the declaration head, not the doc comment above it.
+ *  - Collect lines starting there until the declaration "head" ends — i.e. a
+ *    line that opens a body (`{`), a Python-style block (trailing `:`), or an
+ *    arrow (`=>`) — capped at 6 lines.
  *  - Strip the trailing body opener and collapse whitespace.
  *
  * This yields e.g. `function loginUser(req, res)` or `def greet(name)` from the
  * full chunk, so an agent sees the declaration without reading the whole block.
  */
-export function deriveSignature(content: string): string {
+export function deriveSignature(content: string, language?: string | null | undefined): string {
   const lines = content.split("\n");
-  let i = 0;
-  while (i < lines.length && lines[i]!.trim() === "") i++;
+  const i = firstDeclarationLine(lines, language ? COMMENT_STYLES[language] : undefined);
   if (i >= lines.length) return "";
 
   const collected: string[] = [];

@@ -8,7 +8,7 @@ This folder is the **canonical, living documentation** for the project. The root
 
 - **Current version:** `2.4.0` (docstring / comment embedding + doc search legs)
 - **Status:** core architecture, hybrid search (now with rerank / MMR / docstring legs), multi-language chunking (incl. Godot), and all robustness/security fixes are **complete and stable**. See [`status.md`](./status.md) for the full done / not-done breakdown.
-- **Test suite:** `bun test` — 595/595 passing (1635 expectations).
+- **Test suite:** `bun test` — 603/603 passing (1644 expectations).
 
 ## Documentation map
 

@@ -179,7 +179,7 @@ function makeNode(
   };
   if (m?.language) node.language = m.language;
   if (m?.content) {
-    const sig = deriveSignature(m.content);
+    const sig = deriveSignature(m.content, m.language);
     if (sig) node.signature = sig;
   }
   return node;

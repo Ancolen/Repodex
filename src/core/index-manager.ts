@@ -1053,7 +1053,7 @@ export class IndexManager {
   private async enrich(rows: ScopedSearchResult[], contextLines: number): Promise<ScopedSearchResult[]> {
     for (const r of rows) {
       if (typeof r.content === "string" && r.content.length > 0) {
-        r.signature = deriveSignature(r.content);
+        r.signature = deriveSignature(r.content, r.language);
       }
     }
     if (contextLines > 0) {
@@ -1782,7 +1782,7 @@ export class IndexManager {
         category: scored.category,
       };
       if (c.language) res.language = c.language;
-      const sig = deriveSignature(c.content);
+      const sig = deriveSignature(c.content, c.language);
       if (sig) res.signature = sig;
       results.push(res);
     }

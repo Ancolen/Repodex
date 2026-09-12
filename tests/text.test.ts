@@ -42,6 +42,50 @@ describe("deriveSignature", () => {
     expect(sig).toBe("function f()");
   });
 
+  test("a leading JSDoc block comment is not the signature (typescript)", () => {
+    const sig = deriveSignature(
+      "/**\n * Generic sibling of applyCharBudget.\n * @param maxChars budget\n */\nexport function applyBudgetBySize(rows: Row[], maxChars: number): void {",
+      "typescript",
+    );
+    expect(sig).toBe("export function applyBudgetBySize(rows: Row[], maxChars: number): void");
+  });
+
+  test("a single-line block comment then the declaration (typescript)", () => {
+    const sig = deriveSignature("/* keep in sync */\nfunction f(a: number) {\n  return a;\n}", "typescript");
+    expect(sig).toBe("function f(a: number)");
+  });
+
+  test("line comments above the declaration are skipped (go)", () => {
+    const sig = deriveSignature("// NOTE: retry with backoff.\n//go:noinline\nfunc Retry(fn func() error) error {\n\treturn fn()\n}", "go");
+    expect(sig).toBe("func Retry(fn func() error) error");
+  });
+
+  test("a Python decorator + comment never becomes the signature", () => {
+    const sig = deriveSignature('@app.get("/x")\n# handler for /x\ndef handler(req: Request):\n    return ok()', "python");
+    expect(sig).toBe("def handler(req: Request)");
+  });
+
+  test("a bare module docstring opens nothing (python)", () => {
+    const sig = deriveSignature('"""Module docstring.\n\nMore text.\n"""\ndef f():', "python");
+    expect(sig).toBe("def f()");
+  });
+
+  test("a Rust attribute line is not the signature", () => {
+    const sig = deriveSignature("#[derive(Debug, Clone)]\npub struct Point {\n    x: f64,\n}", "rust");
+    expect(sig).toBe("pub struct Point");
+  });
+
+  test("a C# attribute line is not the signature", () => {
+    const sig = deriveSignature("[Fact]\npublic void Parses_Input() {\n}", "c_sharp");
+    expect(sig).toBe("public void Parses_Input()");
+  });
+
+  test("languages without a comment style keep the legacy first-line behavior", () => {
+    // markdown: `#` is a heading, not a comment — legacy head collection applies untouched.
+    expect(deriveSignature("# Title\n\nSome prose.", "markdown")).toBe("# Title Some prose.");
+    expect(deriveSignature("# Title\n\nSome prose.")).toBe("# Title Some prose.");
+  });
+
   test("empty content yields empty signature", () => {
     expect(deriveSignature("")).toBe("");
     expect(deriveSignature("   \n  ")).toBe("");

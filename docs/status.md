@@ -2,7 +2,7 @@
 
 > The living tracker. **When you finish, start, or decide on something, edit this file.** Pair each change with an entry in [`changelog.md`](./changelog.md) and (for behavior) [`features.md`](./features.md); a proposal that earns a real design gets fleshed out in [`proposals.md`](./proposals.md) and referenced from here by ID.
 >
-> Current release: **2.4.0** (docstring / comment embedding + doc search legs). Unreleased: **S1** (identifier-part BM25 tokenization), **A1** (`get_context_pack`), **O1** (`cidx doctor`), **C1** (`get_change_impact`), **C2** (`get_api_diff`), **D1** (`check_docs` doc–code conformance). Test suite: **595/595** passing (1635 expectations).
+> Current release: **2.4.0** (docstring / comment embedding + doc search legs). Unreleased: **S1** (identifier-part BM25 tokenization), **A1** (`get_context_pack`), **O1** (`cidx doctor`), **C1** (`get_change_impact`), **C2** (`get_api_diff`), **D1** (`check_docs` doc–code conformance). Test suite: **603/603** passing (1644 expectations).
 
 ## Legend
 
@@ -86,7 +86,7 @@
 - ✅ **Search results stop shipping embeddings** — `vector`/`doc_vector` (~20 KB of floats/row, in-daemon rerank/MMR-only) are dropped at the public boundary (`stripEmbeddings`); `doc`/`id_terms` stay.
 - ✅ **`get_context_pack` filters** — `language`/`symbolType`/`pathGlob` (same schema as `search_codebase`) on every surface, including `cidx pack --language/--type/--path`.
 - ✅ **`structuredContent` for report tools** — dead-code, commits, api-diff, impact, doccheck, dependencies return the raw JSON report alongside the rendered text (pack already did).
-- ✅ **Signature derivation fix** — a `{` after `:`/`,`/`(`/`=` opens an inline object **type**, not the body; multi-line heads like `async checkDocs(opts: { … }): Promise<T>` render whole (cap 3 → 6 lines).
+- ✅ **Signature derivation fix** — a `{` after `:`/`,`/`(`/`=` opens an inline object **type**, not the body; multi-line heads like `async checkDocs(opts: { … }): Promise<T>` render whole (cap 3 → 6 lines). Leading doc comments, docstrings and decorators/attributes are skipped per language (`COMMENT_STYLES`), so a signature is the declaration head — markdown and unknown labels keep the legacy first-line behavior.
 
 ### Robustness & security (v3)
 - ✅ Shrinking-file stale-chunk fix (delete by `filePath`, not `id`).
