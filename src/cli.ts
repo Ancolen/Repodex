@@ -6,7 +6,7 @@ import { CONFIG, RESOLVED, CONFIG_SOURCE, resolveConfigPath } from "./config";
 import { daemonCommand, bridgeCommand } from "./runtime";
 import { daemonCheck, type DoctorCheck, type DoctorReport } from "./core/doctor";
 import { resolveEditor, buildEditorArgs } from "./utils/editor";
-import { formatContextPack, formatApiDiff, formatImpact, formatDocCheck } from "./server/format";
+import { formatContextPack, formatReferences, formatApiDiff, formatImpact, formatDocCheck } from "./server/format";
 
 const BASE = `http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}`;
 
@@ -436,30 +436,16 @@ async function cmdRefs(positionals: string[], flags: Record<string, string | boo
   await requireDaemon();
   const name = positionals.join(" ");
   if (!name) {
-    console.error("Usage: cidx refs <symbolName> [--project x] [--limit n] [--language x] [--type x]");
+    console.error("Usage: cidx refs <symbolName> [--project x] [--limit n] [--language x] [--type x] [--no-docs]");
     process.exit(1);
   }
-  const body: { name: string; project?: string; limit?: number; language?: string; symbolType?: string } = { name };
+  const body: { name: string; project?: string; limit?: number; language?: string; symbolType?: string; includeDocs?: boolean } = { name };
   if (typeof flags.project === "string") body.project = flags.project;
   if (typeof flags.limit === "string") body.limit = Number(flags.limit);
   if (typeof flags.language === "string") body.language = flags.language;
   if (typeof flags.type === "string") body.symbolType = flags.type;
-  const refs = await api<any[]>("POST", "/references", body);
-  if (refs.length === 0) {
-    console.log("No references found.");
-    return;
-  }
-  console.log(`${refs.length} reference(s):`);
-  let lastFile = "";
-  for (const r of refs) {
-    const fileKey = `${r.project}:${r.filePath}`;
-    if (fileKey !== lastFile) {
-      console.log(`\n[${r.project}] ${r.filePath}`);
-      lastFile = fileKey;
-    }
-    const ctx = r.inSymbol ? `  (in ${r.inSymbolType ?? "symbol"} ${r.inSymbol})` : "";
-    console.log(`  L${r.line}: ${r.text}${ctx}`);
-  }
+  if (flags["no-docs"] === true) body.includeDocs = false;
+  console.log(formatReferences(await api<Parameters<typeof formatReferences>[0]>("POST", "/references", body)));
 }
 
 async function cmdOverview(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
@@ -1067,6 +1053,7 @@ const COMMANDS: Record<string, CmdDoc> = {
     details: [
       "Complements 'find' (definition only). Practical whole-identifier matcher over indexed chunks;",
       "may include same-named symbols from other scopes (not full LSP resolution).",
+      "The heading is honest about its cap: 'N of M reference(s)' when the limit bites — 'total' is never capped.",
     ],
     examples: ["cidx refs loginUser", "cidx refs IndexManager --project api"],
   },

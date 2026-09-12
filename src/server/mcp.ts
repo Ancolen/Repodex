@@ -312,6 +312,7 @@ function buildServer(deps: McpDeps): Server {
         limit?: number;
         language?: string;
         symbolType?: string;
+        includeDocs?: boolean;
       };
       if (!args.name) {
         return { content: [{ type: "text", text: "'name' is required." }], isError: true };
@@ -321,6 +322,7 @@ function buildServer(deps: McpDeps): Server {
         const refs = await deps.manager.findReferences(args.name, project, args.limit ?? 50, {
           language: args.language,
           symbolType: args.symbolType,
+          includeDocs: args.includeDocs,
         });
         return { content: [{ type: "text", text: formatReferences(refs) }] };
       } catch (err) {

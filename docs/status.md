@@ -2,7 +2,7 @@
 
 > The living tracker. **When you finish, start, or decide on something, edit this file.** Pair each change with an entry in [`changelog.md`](./changelog.md) and (for behavior) [`features.md`](./features.md); a proposal that earns a real design gets fleshed out in [`proposals.md`](./proposals.md) and referenced from here by ID.
 >
-> Current release: **2.4.0** (docstring / comment embedding + doc search legs). Unreleased: **S1** (identifier-part BM25 tokenization), **A1** (`get_context_pack`), **O1** (`cidx doctor`), **C1** (`get_change_impact`), **C2** (`get_api_diff`), **D1** (`check_docs` doc–code conformance). Test suite: **573/573** passing (1596 expectations).
+> Current release: **2.4.0** (docstring / comment embedding + doc search legs). Unreleased: **S1** (identifier-part BM25 tokenization), **A1** (`get_context_pack`), **O1** (`cidx doctor`), **C1** (`get_change_impact`), **C2** (`get_api_diff`), **D1** (`check_docs` doc–code conformance). Test suite: **595/595** passing (1635 expectations).
 
 ## Legend
 

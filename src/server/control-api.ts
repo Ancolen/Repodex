@@ -380,13 +380,14 @@ export function startControlApi(
   });
 
   app.post("/references", async (req, res) => {
-    const { name, project, path: projectPath, limit, language, symbolType } = (req.body ?? {}) as {
+    const { name, project, path: projectPath, limit, language, symbolType, includeDocs } = (req.body ?? {}) as {
       name?: string;
       project?: string;
       path?: string;
       limit?: number;
       language?: string;
       symbolType?: string;
+      includeDocs?: boolean;
     };
     if (!name) {
       res.status(400).json({ error: "'name' is required" });
@@ -397,6 +398,7 @@ export function startControlApi(
       const results = await deps.manager.findReferences(name, scope, limit ?? 50, {
         language,
         symbolType,
+        includeDocs: typeof includeDocs === "boolean" ? includeDocs : undefined,
       });
       res.json(results);
     } catch (err) {

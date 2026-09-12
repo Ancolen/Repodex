@@ -250,6 +250,7 @@ async function main(): Promise<void> {
             limit: args.limit,
             language: args.language,
             symbolType: args.symbolType,
+            includeDocs: args.includeDocs,
           });
           return ok(formatReferences(refs));
         }
