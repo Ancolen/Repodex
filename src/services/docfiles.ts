@@ -18,6 +18,8 @@ export const DOC_DEFAULT_INCLUDE = ["*.md", "docs/**/*.md"];
 /** Doc-discovery caps — always surfaced, never silently applied. */
 export const DOC_MAX_FILES = 200;
 export const DOC_MAX_DEPTH = 6;
+/** Cap on the walked-file universe (the path-claim side of the checker). */
+export const DOC_MAX_WALK_FILES = 10000;
 
 /** Only real prose formats; code fences live inside them. */
 const DOC_EXTS = new Set([".md", ".mdx"]);
@@ -29,6 +31,13 @@ export interface DocDiscovery {
   truncated: boolean;
   /** How many candidate doc files were seen (before the cap). */
   scanned: number;
+  /**
+   * EVERY non-ignored file the walk passed (project-relative posix, capped at
+   * DOC_MAX_WALK_FILES) — the path-claim universe for the checker, which must
+   * cover files the indexer never indexed (`.sh`, `.wasm`, LICENSE, …). The
+   * same walk produces it, so there is no second traversal.
+   */
+  allFiles: string[];
 }
 
 export interface DocDiscoveryOpts {
@@ -55,6 +64,7 @@ export async function collectDocFiles(baseDir: string, opts?: DocDiscoveryOpts):
   }
 
   const found: string[] = [];
+  const walked: string[] = [];
   let truncated = false;
   let scanned = 0;
 
@@ -77,10 +87,11 @@ export async function collectDocFiles(baseDir: string, opts?: DocDiscoveryOpts):
         continue;
       }
       if (!entry.isFile()) continue;
-      if (!DOC_EXTS.has(path.extname(entry.name).toLowerCase())) continue;
       if (isPathIgnored(ig, baseDir, abs)) continue;
       if (extraIgnore.some((re) => re.test(relEntry))) continue;
       const relPosix = relEntry.replace(/\\/g, "/");
+      if (walked.length < DOC_MAX_WALK_FILES) walked.push(relPosix);
+      if (!DOC_EXTS.has(path.extname(entry.name).toLowerCase())) continue;
       if (!includes.some((re) => re.test(relPosix))) continue;
       scanned++;
       if (found.length >= DOC_MAX_FILES) {
@@ -95,7 +106,8 @@ export async function collectDocFiles(baseDir: string, opts?: DocDiscoveryOpts):
 
   walk(baseDir, "", 0);
   found.sort();
-  return { files: found, truncated, scanned };
+  walked.sort();
+  return { files: found, truncated, scanned, allFiles: walked };
 }
 
 /** Basenames of the files (not directories) directly in `baseDir`. */

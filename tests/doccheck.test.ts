@@ -16,6 +16,7 @@ import {
   similarity,
   globToRegex,
   isDocPath,
+  HISTORICAL_FILE_RE,
   type DocCheckState,
   type DocCheckChunk,
   type DocFile,
@@ -144,9 +145,11 @@ describe("doccheck helpers", () => {
     expect(globToRegex("docs/**/*.md").test("docs/a.md")).toBe(true);
     expect(globToRegex("docs/**/*.md").test("docs/x/y/a.md")).toBe(true);
   });
-  test("isDocPath marks doc artifacts", () => {
+  test("isDocPath marks prose doc artifacts (json is machine config, not prose)", () => {
     expect(isDocPath("README.md")).toBe(true);
-    expect(isDocPath("docs/x.json")).toBe(true);
+    expect(isDocPath("docs/api.xml")).toBe(true);
+    expect(isDocPath("docs/reference.rst")).toBe(true);
+    expect(isDocPath("tsconfig.json")).toBe(false);
     expect(isDocPath("src/core/doctor.ts")).toBe(false);
   });
 });
@@ -221,7 +224,7 @@ describe("buildDocCheckIndex", () => {
   test("doc artifacts are never evidence or constants", () => {
     const idx = buildDocCheckIndex([
       chunk("README.md", 'const FAKE_CONST = "docvalue";'),
-      chunk("docs/api.json", 'const OTHER_CONST = "x";'),
+      chunk("docs/api.xml", 'const OTHER_CONST = "x";'),
     ]);
     expect(idx.constantsByName.size).toBe(0);
     const hits = scanDocTokens([chunk("README.md", "someSymbolCall appears here")], ["someSymbolCall"], "ident");
@@ -382,7 +385,7 @@ describe("checkSpan — flag, dep, kv, model-tag, composite", () => {
     expect(wrongVersion.confidence).toBe(80);
     const missing = checkOne(state, span("left-pad@1.0.0", "dep"));
     expect(missing.status).toBe("missing");
-    expect(missing.confidence).toBe(95);
+    expect(missing.confidence).toBe(80); // suspected — docs name build tools too
   });
 
   test("kv/config-path resolve by key segments; unresolved keys are suspected, never drift", () => {
@@ -805,5 +808,77 @@ describe("IndexManager.checkDocs — engine over a real fixture", () => {
     expect(report.notes.some((n) => n.includes("not a git repo"))).toBe(true);
     expect(report.checked.window).toBeUndefined();
     expect(report.findings.length).toBe(1); // nothing was filtered away
+  });
+});
+
+// --------------------------------------------- live-run adjudication lessons
+
+describe("checkPath — vocabulary/convention gates (live-run lessons)", () => {
+  test("a bare extension mention is vocabulary, not an existence claim", () => {
+    const state = baseState({ repoFiles: new Set(["src/a.ts"]) });
+    for (const ext of [".md", ".json", ".xml", ".rst", ".gd", ".tscn", ".tres", ".godot"]) {
+      const v = checkOne(state, span(ext, "path"));
+      expect(v.status).toBe("skipped");
+      expect(v.skipReason).toBe("external");
+    }
+  });
+
+  test(".git paths, unresolved hidden files and URI-style paths are skipped", () => {
+    const state = baseState({ repoFiles: new Set(["src/a.ts"]) });
+    expect(checkOne(state, span(".git/HEAD", "path")).status).toBe("skipped");
+    expect(checkOne(state, span(".cidx.json", "path")).status).toBe("skipped");
+    expect(checkOne(state, span("/ping", "path")).status).toBe("skipped");
+    expect(checkOne(state, span("/api/generate", "path")).status).toBe("skipped");
+    // …but a hidden file that DOES exist still resolves:
+    expect(checkOne(state, span(".gitignore", "path", { docRelPath: "" })).status).toBe("skipped");
+  });
+
+  test("convention files of supported projects are skipped; real extensions keep drift", () => {
+    const state = baseState({ repoFiles: new Set(["src/a.ts"]) });
+    expect(checkOne(state, span("project.godot", "path")).status).toBe("skipped");
+    const ghost = checkOne(state, span("src/ghost.ts", "path"));
+    expect(ghost.status).toBe("missing");
+    expect(ghost.confidence).toBe(95);
+  });
+
+  test("an extension-less unresolved relative path is suspected, never drift", () => {
+    const state = baseState({ repoFiles: new Set(["src/a.ts"]) });
+    const v = checkOne(state, span("tools/list", "path"));
+    expect(v.status).toBe("missing");
+    expect(v.confidence).toBe(70);
+  });
+
+  test("files the indexer never indexed still resolve (the path universe is the repo)", () => {
+    const state = baseState({ repoFiles: new Set(["scripts/build-wasm.sh", "src/chunking/wasm/g.wasm"]) });
+    expect(checkOne(state, span("scripts/build-wasm.sh", "path")).status).toBe("ok");
+    expect(checkOne(state, span("src/chunking/wasm/", "path")).status).toBe("ok");
+  });
+});
+
+describe("adjudication lessons — dep ranges, env assignments, proposal files", () => {
+  test("a caret range satisfies the pinned version it documents", () => {
+    const state = baseState({ manifest: { deps: { "tree-sitter-wasms": "^0.1.13" }, devDeps: {}, scripts: {} } });
+    expect(checkOne(state, span("tree-sitter-wasms@0.1.13", "dep")).status).toBe("ok");
+    expect(checkOne(state, span("tree-sitter-wasms@0.1.14", "dep")).status).toBe("missing");
+  });
+
+  test("an ALL-CAPS assignment is checked as an environment variable", () => {
+    const state = baseState();
+    const v = checkOne(state, span('CUDA_VISIBLE_DEVICES=""', "kv", { parts: ["CUDA_VISIBLE_DEVICES", '""'] }));
+    expect(v.status).toBe("skipped");
+    expect(v.skipReason).toBe("external");
+  });
+
+  test("proposal/roadmap files are aspirational — never accused", () => {
+    // The daemon assigns fileClass via HISTORICAL_FILE_RE; mirror that here.
+    const rel = "docs/proposals.md";
+    expect(HISTORICAL_FILE_RE.test(rel)).toBe(true);
+    const file = docFile(rel, "## D-next\nwill add `madeUpPlannedThing` in `src/core/future.ts`", "historical");
+    const spans = extractDocSpans(file);
+    expect(spans.every((s) => s.region === "historical")).toBe(true);
+    const state = baseState({ docs: [file], chunks: [chunk("src/x.ts", "const q = 1;")] });
+    const report = runDocCheck(state, { noUndocumented: true });
+    expect(report.findings).toHaveLength(0);
+    expect(report.checked.skipped.historical).toBe(2);
   });
 });

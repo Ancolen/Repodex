@@ -298,6 +298,10 @@ const EXTERNAL_ENV_PREFIXES = [
   "DBUS_", "LC_", "LANG", "TERM", "SHELL", "USER", "LOGNAME", "PWD", "TMPDIR",
   "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "SSH_", "GPG_", "WSL_", "WINDOWID",
   "PATH", "HOME", "EDITOR", "VISUAL", "PAGER", "MANPAGER", "BROWSER",
+  // Ollama's own runtime knobs (OLLAMA_NUM_GPU, OLLAMA_GPU_LAYERS, …) — the
+  // variables cidx itself reads always occur in code, so any OLLAMA_* name that
+  // occurs NOWHERE is Ollama's, not ours.
+  "OLLAMA_",
 ];
 
 /** Files whose existence is optional by design — an absent config is not drift. */
@@ -306,17 +310,37 @@ const CONFIG_LITERALS = new Set([
   ".env", ".npmrc", "tsconfig.json", "bunfig.toml",
 ]);
 
+/**
+ * Convention files a doc can name without it being a claim about THIS repo
+ * (they belong to the projects the tool supports — e.g. every Godot project's
+ * manifest, not this repo's).
+ */
+const CONVENTION_FILES = new Set(["project.godot"]);
+
+/** A bare file-extension mention (`.md`, `.tscn`) is vocabulary, not an existence claim. */
+const BARE_EXT_RE = /^\.[a-z0-9]{1,6}$/i;
+
 /** Headings that open a `planned` region (spans under them are not claims yet). */
 const PLANNED_HEADING_RE =
   /\b(proposal|proposals|proposed|planned|roadmap|not yet|in progress|todo|draft|wip|future)\b|💡|🚧|🏗/i;
 
-/** Historical files: everything in them already happened — never a current claim. Exported for the daemon-side DocFile builder. */
-export const HISTORICAL_FILE_RE = /(^|\/)(changelog|changes|release-?notes|history)(\.|$)/i;
+/**
+ * Historical files: everything in them already happened — never a current claim.
+ * Proposal/roadmap files are the mirror image (everything in them is INTENDED, not
+ * yet real), so they share the file class. Exported for the daemon-side DocFile
+ * builder.
+ */
+export const HISTORICAL_FILE_RE = /(^|\/)(changelog|changes|release-?notes|history|proposals?|roadmap|drafts?)(\.|$)/i;
 
 const IGNORE_MARKER = "<!-- cidx-doccheck-ignore -->";
 
-/** Doc artifacts are never EVIDENCE — a doc claim cannot prove another doc claim. */
-const DOC_PATH_RE = /\.(md|mdx|json|xml|rst)$/i;
+/**
+ * Prose doc artifacts are never EVIDENCE — a doc claim cannot prove another doc
+ * claim. NOTE: `.json` is deliberately NOT here: tsconfig.json/package.json are
+ * machine config whose keys are legitimate evidence (tsconfig compiler flags),
+ * unlike the prose formats.
+ */
+const DOC_PATH_RE = /\.(md|mdx|xml|rst)$/i;
 
 /** Known single-segment file extensions (path class without a slash). */
 const KNOWN_EXTS = new Set([
@@ -647,6 +671,16 @@ export function classifySpan(rawToken: string): ClassifiedSpan | null {
 
   if (SEMVER_RE.test(token) || /^\d/.test(token)) return { spanClass: "opaque" };
 
+  // Repo/tool references and meta-variables: `emscripten/emsdk:3.1.61` (owner/repo:tag),
+  // `<home>/config.yml` (a placeholder the reader substitutes), and lowercase
+  // version-y labels with both a hyphen and a dot (`ubuntu-24.04-arm`, a CI
+  // runner label) — all vocabulary, none of them claims about this repo.
+  if (token.includes("/") && token.includes(":")) return { spanClass: "artifact", skipReason: "external" };
+  if (/[<>]/.test(token)) return { spanClass: "artifact", skipReason: "external" };
+  if (!token.includes(":") && /\d/.test(token) && token.includes("-") && token.includes(".") && !/[A-Z]/.test(token)) {
+    return { spanClass: "opaque" };
+  }
+
   // Single colon, no slash/space → an ollama-style model tag.
   const modelTag = /^[A-Za-z][\w.-]*:[\w.-]+$/.exec(token);
   if (modelTag && !token.includes("/")) return { spanClass: "model-tag" };
@@ -754,11 +788,14 @@ function resolveIdentPart(part: string, ctx: ResolveCtx): boolean {
   return h !== undefined && h.length > 0;
 }
 
-function checkIdentifier(token: string, ctx: ResolveCtx): SpanVerdict {
+function checkIdentifier(token: string, ctx: ResolveCtx, excerpt = ""): SpanVerdict {
   const { idx } = ctx;
+  // A call-shaped doc mention (`os.homedir()`, `IndexManager.checkDocs()`) is
+  // resolved by the identifier it names, not by the call syntax.
+  const bare = token.replace(/\(\)$/, "");
   // The `const INDEX_JOB = "index"` lesson: a doc can name a literal VALUE whose
   // only code presence is a constant binding — the constant table proves it.
-  const constHits = idx.constantsByValue.get(token);
+  const constHits = idx.constantsByValue.get(bare);
   if (constHits && constHits.length > 0) {
     return {
       status: "ok",
@@ -766,17 +803,17 @@ function checkIdentifier(token: string, ctx: ResolveCtx): SpanVerdict {
       evidence: constHits.map((c) => ({ path: c.path, line: c.line, symbol: c.name })),
     };
   }
-  if (idx.symbolNames.has(token)) {
-    return { status: "ok", confidence: 100, evidence: evOf(ctx.identHits, token) };
+  if (idx.symbolNames.has(bare)) {
+    return { status: "ok", confidence: 100, evidence: evOf(ctx.identHits, bare) };
   }
-  const direct = evOf(ctx.identHits, token);
+  const direct = evOf(ctx.identHits, bare);
   if (direct) return { status: "ok", confidence: 100, evidence: direct };
 
-  if (token.includes(".")) {
-    const lit = evOf(ctx.literalHits, token);
+  if (bare.includes(".")) {
+    const lit = evOf(ctx.literalHits, bare);
     if (lit) return { status: "ok", confidence: 100, evidence: lit };
-    const parts = token.split(".");
-    const last = parts[parts.length - 1] ?? token;
+    const parts = bare.split(".");
+    const last = parts[parts.length - 1] ?? bare;
     if (resolveIdentPart(last, ctx)) {
       return { status: "ok", confidence: 95, evidence: evOf(ctx.identHits, last) };
     }
@@ -785,14 +822,29 @@ function checkIdentifier(token: string, ctx: ResolveCtx): SpanVerdict {
     }
   }
 
-  const suggestion = suggestNearest(token, ctx.idx.symbolNameList);
+  const suggestion = suggestNearest(bare, ctx.idx.symbolNameList);
   if (suggestion) {
     return {
       status: "missing",
       confidence: 92,
       suggestion,
-      message: `'${token}' is not defined by the index and never occurs in indexed code; did you mean '${suggestion}'? (possible rename)`,
+      message: `'${bare}' is not defined by the index and never occurs in indexed code; did you mean '${suggestion}'? (possible rename)`,
     };
+  }
+
+  // Dependency-context shield (live-run lesson): an identifier that occurs
+  // nowhere but is named on a line discussing a KNOWN dependency is most likely
+  // that dependency's API (`getDylinkMetadata` on a web-tree-sitter line) —
+  // suspected, never a drift accusation.
+  for (const dep of Object.keys(ctx.state.manifest.deps).concat(Object.keys(ctx.state.manifest.devDeps))) {
+    const short = dep.includes("/") ? (dep.split("/")[1] ?? dep) : dep;
+    if (excerpt.includes(dep) || excerpt.includes(short)) {
+      return {
+        status: "missing",
+        confidence: 70,
+        message: `'${bare}' occurs nowhere in the indexed code; the line discusses '${dep}', so it may be that package's API`,
+      };
+    }
   }
 
   // Unresolved gates — these tokens are too generic to accuse.
@@ -812,7 +864,7 @@ function checkIdentifier(token: string, ctx: ResolveCtx): SpanVerdict {
   return {
     status: "missing",
     confidence: 95,
-    message: `'${token}' is not defined by the index and never occurs in indexed code`,
+    message: `'${bare}' is not defined by the index and never occurs in indexed code`,
   };
 }
 
@@ -827,7 +879,15 @@ function checkPath(token: string, ctx: ResolveCtx, docRelPath: string): SpanVerd
   if (t === "~" || t.startsWith("~/") || t.startsWith("../")) {
     return { status: "skipped", confidence: 0, skipReason: "external" };
   }
-  if (CONFIG_LITERALS.has(t)) {
+  // Vocabulary, not existence claims: a bare extension mention (`.md`), a
+  // `.git/...` path (the index never covers the git dir), an unresolved
+  // dot-file (hidden files are optional/convention-heavy: `.cidx.json`,
+  // `.gitignore`), a URI-style path (`/ping`, `/api/generate`), and the
+  // supported projects' own convention files.
+  if (BARE_EXT_RE.test(t) || t === ".git" || t.startsWith(".git/")) {
+    return { status: "skipped", confidence: 0, skipReason: "external" };
+  }
+  if (CONFIG_LITERALS.has(t) || CONVENTION_FILES.has(t)) {
     return { status: "skipped", confidence: 0, skipReason: "external" };
   }
   const { allPaths } = ctx;
@@ -893,6 +953,38 @@ function checkPath(token: string, ctx: ResolveCtx, docRelPath: string): SpanVerd
       status: "missing",
       confidence: 70,
       message: `directory '${token}' does not exist in the indexed file set`,
+    };
+  }
+  // Unresolved absolutes are URI paths in practice (`/ping`, `/api/generate`);
+  // unresolved hidden files are convention/optional (` .cidx.json`); unresolved
+  // extension-less lowercase `a/b` shapes are protocol vocabulary as often as
+  // paths — all of them stay below the drift line.
+  if (t.startsWith("/") || t.startsWith(".")) {
+    return { status: "skipped", confidence: 0, skipReason: "external" };
+  }
+  if (!/\.[a-z0-9]{1,6}$/i.test(t)) {
+    return {
+      status: "missing",
+      confidence: 70,
+      message: `path '${token}' does not exist in the indexed file set (no file extension — may just be vocabulary)`,
+    };
+  }
+  // An extension the repo never uses suggests the file belongs to ANOTHER
+  // project the doc is describing (live-run lesson: `src/parser.c` in the
+  // vendored-grammar notes) — suspected, not a drift accusation.
+  const ext = (t.match(/\.([a-z0-9]{1,6})$/i)?.[1] ?? "").toLowerCase();
+  let extSeen = false;
+  for (const p of allPaths) {
+    if (p.toLowerCase().endsWith(`.${ext}`)) {
+      extSeen = true;
+      break;
+    }
+  }
+  if (!extSeen) {
+    return {
+      status: "missing",
+      confidence: 85,
+      message: `path '${token}' does not exist here, and no '.${ext}' file exists in this repo — it may belong to a described external project`,
     };
   }
   return {
@@ -1017,14 +1109,20 @@ function checkDep(token: string, ctx: ResolveCtx): SpanVerdict {
   const ver = m[2] ?? "";
   const have = ctx.state.manifest.deps[name] ?? ctx.state.manifest.devDeps[name];
   if (have === undefined) {
+    // Docs legitimately name packages that are build tools or related projects,
+    // not dependencies of THIS repo (live-run lesson: tree-sitter-cli) — so a
+    // missing dep is suspected, never a hard drift.
     return {
       status: "missing",
-      confidence: 95,
+      confidence: 80,
       message: `dependency '${name}' is not in package.json dependencies/devDependencies`,
     };
   }
   const want = ver.replace(/[^0-9.].*$/, "");
-  if (want.length > 0 && !have.startsWith(want)) {
+  // A caret/tilde range satisfies the pinned version it ranges over
+  // (`^0.1.13` in package.json satisfies a documented `0.1.13`).
+  const haveClean = have.replace(/^[v^~>=\s]+/, "");
+  if (want.length > 0 && !haveClean.startsWith(want)) {
     return {
       status: "missing",
       confidence: 80,
@@ -1036,6 +1134,9 @@ function checkDep(token: string, ctx: ResolveCtx): SpanVerdict {
 
 function checkKv(token: string, parts: string[], spanClass: SpanClass, ctx: ResolveCtx): SpanVerdict {
   const key = parts[0] ?? "";
+  // An ALL-CAPS assignment (`CUDA_VISIBLE_DEVICES=""`) is an environment
+  // variable, not a config key — the env resolver knows the platform prefixes.
+  if (ENV_RE.test(key) && key.includes("_")) return checkEnv(key, ctx);
   const segs = key.split(/[.:]/).filter((s) => s.length > 0);
   if (segs.length === 0) return { status: "skipped", confidence: 0, skipReason: "generic" };
   const unresolved = segs.filter((s) => !resolveIdentPart(s, ctx));
@@ -1117,7 +1218,7 @@ export function checkSpan(span: DocSpan, ctx: ResolveCtx): SpanVerdict {
   const parts = span.parts ?? [];
   switch (span.spanClass) {
     case "identifier":
-      return checkIdentifier(span.token, ctx);
+      return checkIdentifier(span.token, ctx, span.excerpt);
     case "path":
       return checkPath(span.token, ctx, span.docRelPath);
     case "env":
@@ -1145,7 +1246,7 @@ export function checkSpan(span: DocSpan, ctx: ResolveCtx): SpanVerdict {
 // ------------------------------------------------------------ intent demotion
 
 const EXAMPLE_LINE_RE =
-  /^\s*(e\.g\.|for example|for instance|such as|sample:|example:|örneğin|örnek)/i;
+  /(^|[(\s])(e\.g\.|i\.e\.|for example|for instance|such as|sample:|example:|örneğin|örnek)/i;
 
 /**
  * Prose-example heuristics (the prototype's FP lessons): a single-character path

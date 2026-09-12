@@ -2360,8 +2360,11 @@ export class IndexManager {
       });
     }
 
-    // The path-claim universe: indexed files ∪ checked docs ∪ root names.
-    const repoFiles = new Set<string>(docs.map((d) => d.relPath));
+    // The path-claim universe: indexed files ∪ checked docs ∪ every walked file
+    // (`.sh`, `.wasm`, LICENSE, … — the index is an under-approximation of the
+    // repo, the doc walk is not) ∪ root names.
+    const repoFiles = new Set<string>(discovery.allFiles);
+    for (const d of docs) repoFiles.add(d.relPath);
     for (const f of this.registry.listCachedFiles(rec.name)) {
       const rel = path.relative(rec.path, f).replace(/\\/g, "/");
       if (rel && !rel.startsWith("..")) repoFiles.add(rel);
