@@ -23,6 +23,9 @@ import type {
 } from "../core/index-manager";
 import type { DocCheckReport, DocFinding, UndocumentedEntry } from "../core/doccheck";
 import type { OutlineEntry } from "../chunking/chunker";
+import { formatBytes } from "../core/doctor";
+import type { CompactResult, TableIndexStat } from "../services/db";
+import type { StatsReport, ProjectStats } from "../core/stats";
 
 /** Formats an epoch-ms timestamp as a compact ISO string (or "—"). */
 function fmtTime(ms: number | null | undefined): string {
@@ -691,6 +694,107 @@ export function formatQueryLogStats(s: QueryLogStats, opts?: { project?: string 
     return `${head}\n${note}`;
   }
   return [head, "", ...formatQueryLogSections(s)].join("\n");
+}
+
+// --------------------------------------------- table stats / compact (O3)
+
+/** One index's display line: `vector [IVF_PQ]` + native coverage when known. */
+function formatIndexStat(s: TableIndexStat, rows: number): string {
+  const bits = [`${s.columns.join("+")} [${s.indexType}]`];
+  if (s.indexedRows !== undefined) {
+    bits.push(`${s.indexedRows}/${rows} rows`);
+    if (s.unindexedRows !== undefined && s.unindexedRows > 0) bits.push(`+${s.unindexedRows} unindexed`);
+  }
+  return bits.join(" ");
+}
+
+/** One project's stats lines: head summary, index presence, fragment signal, job, notes. */
+function formatProjectStat(p: ProjectStats): string[] {
+  const lines: string[] = [
+    `• ${p.name} [${p.status}] — ${p.table}: ${p.rows} row(s) · ${p.cachedFiles} cached file(s) · ` +
+      (p.tableBytes === null ? "size unknown" : formatBytes(p.tableBytes)) +
+      ` · last indexed ${fmtTime(p.lastIndexedAt)}`,
+  ];
+
+  if (p.indices === null) {
+    lines.push("  table not found on disk");
+  } else if (p.indices.length === 0) {
+    lines.push("  no ANN/FTS index built (small table — brute-force serves it)");
+  } else {
+    lines.push(`  ${p.indices.map((ix) => formatIndexStat(ix, p.rows)).join(" · ")}`);
+  }
+
+  if (p.fragments !== null && p.smallFragments !== null) {
+    const hint = p.smallFragments > 0 ? " — compact would merge them" : "";
+    lines.push(`  fragments: ${p.fragments} (${p.smallFragments} small)${hint}`);
+  }
+  if (p.job) {
+    const pct = p.job.total > 0 ? ` (${Math.round((p.job.processed / p.job.total) * 100)}%)` : "";
+    lines.push(`  job: ${p.job.type} ${p.job.status}${pct}`);
+  }
+  for (const n of p.notes) lines.push(`  ! ${n}`);
+  return lines;
+}
+
+/** The data-root block: total, per-table sizes, meta.db, embedding cache. */
+function formatGlobalStat(lines: string[], r: StatsReport): void {
+  const g = r.global;
+  if (!g.rootExists) {
+    lines.push(`Data root: ${r.home} — not created yet (nothing indexed, no disk usage).`);
+    return;
+  }
+  const tables = [...g.tables].sort((a, b) => b.bytes - a.bytes).map((t) => `${t.name} ${formatBytes(t.bytes)}`);
+  const bits: string[] = [`total ${formatBytes(g.totalBytes)}`];
+  if (tables.length > 0) bits.push(`tables: ${tables.join(", ")}`);
+  bits.push(`meta.db ${g.metaDbBytes === null ? "size unknown" : formatBytes(g.metaDbBytes)}`);
+  bits.push(`embedding cache ${g.embeddingCache.rows} row(s) ≈ ${formatBytes(g.embeddingCache.estimatedBytes)}`);
+  if (g.unreadableEntries > 0) {
+    bits.push(`${g.unreadableEntries} unreadable entr${g.unreadableEntries === 1 ? "y" : "ies"}`);
+  }
+  lines.push(`Data root — ${r.home}:`);
+  lines.push(`  ${bits.join(" · ")}`);
+}
+
+/**
+ * The table/disk stat sections for `cidx stats` (proposal O3), exported so the
+ * command stays composable: these print BEFORE the query-log sections of A3
+ * (see `formatQueryLogSections`). One section: every project's table picture,
+ * then the global data-root block. Honest unknowns — a missing table or an
+ * unreadable stat shows up as text, never as an invented zero.
+ */
+export function formatStatsSections(r: StatsReport): string[] {
+  const lines: string[] = [`Tables & disk (${r.projects.length} project(s) · data root ${r.home}):`];
+  if (r.projects.length === 0) {
+    lines.push("  (nothing indexed yet — cidx index <dir> starts one)");
+  } else {
+    for (const p of r.projects) lines.push(...formatProjectStat(p));
+  }
+  formatGlobalStat(lines, r);
+  return [lines.join("\n")];
+}
+
+/**
+ * The compact result line for `cidx compact` (proposal O3): what the native
+ * `optimize` actually did — a merge, a prune, or an honest "nothing to do".
+ */
+export function formatCompactResult(r: CompactResult): string {
+  const c = r.compaction;
+  const compacted = c.fragmentsRemoved > 0;
+  const head = `Compacted '${r.table}':`;
+  if (!compacted && r.prune.oldVersionsRemoved === 0) {
+    return `${head} nothing to do (already compact — no fragmented files, no old versions).`;
+  }
+  const bits: string[] = [];
+  if (compacted) {
+    bits.push(
+      `${c.fragmentsRemoved} fragment(s) merged into ${c.fragmentsAdded}`,
+      `${c.filesRemoved} file(s) into ${c.filesAdded}`,
+    );
+  }
+  if (r.prune.oldVersionsRemoved > 0) {
+    bits.push(`${r.prune.oldVersionsRemoved} old version(s) pruned (${formatBytes(r.prune.bytesRemoved)} freed)`);
+  }
+  return `${head} ${bits.join("; ")}.`;
 }
 
 // ---------------------------------------------------- coupling metrics (C5)

@@ -129,6 +129,13 @@ export interface QueryLogStats {
   repeatRate: number;
 }
 
+/** Row count + estimated size of the embedding cache (proposal O3 table stats). */
+export interface EmbedCacheStats {
+  rows: number;
+  /** Summed vector-BLOB bytes — the bulk of every row, so an honest estimate. */
+  estimatedBytes: number;
+}
+
 /**
 /** Rounds a (possibly NULL aggregate) number to `digits` decimals; non-finite → 0. */
 function round(x: number | null | undefined, digits: number): number {
@@ -446,6 +453,19 @@ export class Registry {
     this.db.query(`DELETE FROM file_cache WHERE index_name = $i`).run({ $i: indexName });
   }
 
+  /**
+   * Rows of the file cache: a project's cached-file count (pass a name), or
+   * every project's (pass nothing). Read-only — feeds the O3 table stats.
+   */
+  countFileCache(indexName?: string): number {
+    const row = indexName
+      ? (this.db.query(`SELECT COUNT(*) AS n FROM file_cache WHERE index_name = $i`).get({ $i: indexName }) as {
+          n: number;
+        })
+      : (this.db.query(`SELECT COUNT(*) AS n FROM file_cache`).get() as { n: number });
+    return row.n;
+  }
+
   // ------------------------------------------------------------ embed cache
   /** Returns the cached embedding by content-hash + model key. */
   getCachedEmbedding(model: string, hash: string): number[] | null {
@@ -495,6 +515,18 @@ export class Registry {
       )
       .run({ $n: total - max });
     return Number(res.changes);
+  }
+
+  /**
+   * Row count + estimated size of the embedding cache (O3 table stats). The
+   * vector BLOB is the bulk of every row, so its summed byte length is the
+   * honest lower bound on the cache's footprint — reported as an estimate.
+   */
+  embeddingCacheStats(): EmbedCacheStats {
+    const row = this.db
+      .query(`SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(vector)), 0) AS bytes FROM embedding_cache`)
+      .get() as { n: number; bytes: number };
+    return { rows: row.n, estimatedBytes: row.bytes };
   }
 
   // -------------------------------------------------------------- query log

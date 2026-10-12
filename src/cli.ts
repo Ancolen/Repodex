@@ -7,7 +7,9 @@ import { daemonCommand, bridgeCommand } from "./runtime";
 import { daemonCheck, type DoctorCheck, type DoctorReport } from "./core/doctor";
 import { resolveEditor, buildEditorArgs } from "./utils/editor";
 import type { QueryLogStats, SearchEnvelope } from "./core/index-manager";
-import { formatContextPack, formatReferences, formatApiDiff, formatImpact, formatDocCheck, formatBlameNote, formatQueryLogStats, formatCoupling } from "./server/format";
+import type { StatsReport } from "./core/stats";
+import type { CompactResult } from "./services/db";
+import { formatContextPack, formatReferences, formatApiDiff, formatImpact, formatDocCheck, formatBlameNote, formatQueryLogStats, formatCoupling, formatStatsSections, formatCompactResult } from "./server/format";
 
 const BASE = `http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}`;
 
@@ -1311,16 +1313,26 @@ const COMMANDS: Record<string, CmdDoc> = {
   },
   stats: {
     usage: "stats [project]",
-    summary: "Search analytics: top queries, zero-hit queries (index gaps), latency, repeat rate.",
+    summary: "Table/disk stats + search analytics: fragments, cache, data-root usage, queries.",
     aliases: ["analytics"],
     details: [
-      "Aggregates the daemon's local query log (capped by search.queryLogSize, default 10k rows; 0 = off).",
-      "Every searchIndex/searchAll call writes one row — batch and context-pack queries log per query.",
+      "Table/disk sections (read-only): per project — registry row count, file-cache count, measured table size, ANN/FTS index presence, lastIndexedAt, pending job; global — data-root total, per-table sizes, meta.db size, embedding-cache rows + estimated size.",
+      "Query-log sections (proposal A3): aggregates the daemon's local query log (capped by search.queryLogSize, default 10k rows; 0 = off). Every searchIndex/searchAll call writes one row — batch and context-pack queries log per query.",
       "Zero-hit queries are flagged as possible index gaps: either a bad query or nothing relevant indexed.",
       "Cross-project (searchAll) queries are logged without a project and count toward the global stats only.",
-      "Local-only data — queries never leave ~/.cidx. Table/disk stats land in a later release.",
+      "Local-only data — nothing leaves ~/.cidx. Many small fragments on a project are the table-maintenance signal: run 'cidx compact <name>'.",
     ],
     examples: ["cidx stats", "cidx stats api"],
+  },
+  compact: {
+    usage: "compact <name>",
+    summary: "Compacts a project's table: merges small fragments, prunes old versions, refreshes indices.",
+    details: [
+      "Runs LanceDB's native optimize inside the per-table write lock — never a hand-rolled rewriter.",
+      "Refuses while an index/sync/migrate job runs on the project (the busy rule the watcher deferral also uses).",
+      "Safe to call anytime: on an already-compact table it is a fast native no-op and reports 'nothing to do'.",
+    ],
+    examples: ["cidx compact api"],
   },
   config: {
     usage: "config [path]",
@@ -1355,7 +1367,7 @@ const COMMANDS: Record<string, CmdDoc> = {
 
 const HELP_ORDER = [
   "start", "index", "list", "status", "reindex", "sync", "remove",
-  "search", "open", "batch", "pack", "find", "refs", "overview", "deps", "deadcode", "callgraph", "commits", "apidiff", "impact", "coupling", "doccheck", "doctor", "stats", "config", "mcp", "stop", "version", "help",
+  "search", "open", "batch", "pack", "find", "refs", "overview", "deps", "deadcode", "callgraph", "commits", "apidiff", "impact", "coupling", "doccheck", "doctor", "stats", "compact", "config", "mcp", "stop", "version", "help",
 ];
 
 /** Detailed help for a single command. */
@@ -1443,7 +1455,8 @@ function printHelp(): void {
   lines.push('  cidx deadcode api --min-confidence 70  # potential dead code');
   lines.push('  cidx coupling api                 # fan-in/fan-out bands per file');
   lines.push('  cidx apidiff api v1.2.0           # public-API diff between two git refs');
-  lines.push('  cidx stats api                   # search analytics: top/zero-hit queries, latency');
+  lines.push('  cidx stats api                   # table/disk stats + search analytics');
+  lines.push('  cidx compact api                 # merge small fragments, prune old versions');
   lines.push('  cidx sync api          # fast incremental update');
   lines.push("");
   lines.push("CONNECTING TO AN AI AGENT (MCP)");
@@ -1568,22 +1581,51 @@ async function cmdVersion(): Promise<void> {
 }
 
 /**
- * `cidx stats [project]` — search analytics (proposal A3) rendered from the
- * daemon's local query log via `GET /querylog`. Composable by design: a later
- * wave appends table/disk stat sections as further `console.log(format…)`
- * blocks here, reusing exported section formatters from server/format.ts.
+ * `cidx stats [project]` — table/disk stats (proposal O3) first, then the
+ * search analytics (proposal A3). Two read-only endpoints compose it: the
+ * aggregate `GET /stats` (per-project table picture + the global data root,
+ * rendered by the exported `formatStatsSections` formatter) and the existing
+ * `GET /querylog` (unchanged; rendered by `formatQueryLogStats`). A failed
+ * half is reported but does not hide the other half.
  */
 async function cmdStats(positionals: string[]): Promise<void> {
   await requireDaemon();
   const project = positionals[0];
   const query = project ? `?project=${encodeURIComponent(project)}` : "";
+  let failed = false;
+  try {
+    const stats = await api<StatsReport>("GET", `/stats${query}`);
+    for (const section of formatStatsSections(stats)) console.log(section);
+  } catch (err) {
+    failed = true;
+    console.error("Error:", err instanceof Error ? err.message : err);
+  }
   try {
     const stats = await api<QueryLogStats>("GET", `/querylog${query}`);
+    console.log("");
     console.log(formatQueryLogStats(stats, project ? { project } : undefined));
   } catch (err) {
+    failed = true;
     console.error("Error:", err instanceof Error ? err.message : err);
+  }
+  if (failed) process.exit(1);
+}
+
+/**
+ * `cidx compact <name>` — native table maintenance (proposal O3) via
+ * `POST /compact`: merges small fragments, prunes old versions and refreshes
+ * the ANN/FTS indices inside the per-table write lock. Refused (with the
+ * server's clear message) while an index/sync/migrate job runs on the project.
+ */
+async function cmdCompact(positionals: string[]): Promise<void> {
+  await requireDaemon();
+  const name = positionals[0];
+  if (!name) {
+    console.error("Usage: cidx compact <name>");
     process.exit(1);
   }
+  const r = await api<CompactResult>("POST", "/compact", { name });
+  console.log(formatCompactResult(r));
 }
 
 // ----------------------------------------------------------------------- main
@@ -1626,6 +1668,7 @@ async function main(): Promise<void> {
     case "apidiff": case "api-diff": await cmdApiDiff(positionals, flags); break;
     case "doctor": await cmdDoctor(); break;
     case "stats": case "analytics": await cmdStats(positionals); break;
+    case "compact": await cmdCompact(positionals); break;
     case "config": await cmdConfig(positionals); break;
     case "mcp": case "stdio": await cmdMcp(); break;
     case "stop": await cmdStop(); break;
