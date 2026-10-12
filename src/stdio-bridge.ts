@@ -360,6 +360,7 @@ async function main(): Promise<void> {
             maxChars: args.maxChars,
             doc: args.doc,
             blame: args.blame,
+            expand: args.expand,
           });
           // Readable text for the model + the structured envelope (results + blame
           // notes) for JSON consumers — mirrors the in-process MCP server.
@@ -385,6 +386,7 @@ async function main(): Promise<void> {
             maxChars: args.maxChars,
             doc: args.doc,
             blame: args.blame,
+            expand: args.expand,
           });
           // Note lines ride on the groups (per-query blame envelope).
           return {

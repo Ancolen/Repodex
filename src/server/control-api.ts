@@ -239,6 +239,7 @@ export function startControlApi(
       maxChars,
       doc,
       blame,
+      expand,
     } = (req.body ?? {}) as {
       query?: string;
       project?: string;
@@ -255,12 +256,13 @@ export function startControlApi(
       maxChars?: number;
       doc?: boolean;
       blame?: boolean;
+      expand?: boolean;
     };
     if (!query) {
       res.status(400).json({ error: "'query' is required" });
       return;
     }
-    const opts = { mode, language, symbolType, pathGlob, contextLines, rerank, mmr, boost, maxChars, doc, blame };
+    const opts = { mode, language, symbolType, pathGlob, contextLines, rerank, mmr, boost, maxChars, doc, blame, expand };
     try {
       // 'path' anchors the search to the project containing it; neither → all projects.
       const scope = deps.manager.resolveProjectScope(project, projectPath);
@@ -290,6 +292,7 @@ export function startControlApi(
       maxChars,
       doc,
       blame,
+      expand,
     } = (req.body ?? {}) as {
       queries?: unknown;
       project?: string;
@@ -306,12 +309,13 @@ export function startControlApi(
       maxChars?: number;
       doc?: boolean;
       blame?: boolean;
+      expand?: boolean;
     };
     if (!Array.isArray(queries) || queries.length === 0 || !queries.every((q) => typeof q === "string")) {
       res.status(400).json({ error: "'queries' must be a non-empty array of strings" });
       return;
     }
-    const opts = { mode, language, symbolType, pathGlob, contextLines, rerank, mmr, boost, maxChars, doc, blame };
+    const opts = { mode, language, symbolType, pathGlob, contextLines, rerank, mmr, boost, maxChars, doc, blame, expand };
     try {
       const scope = deps.manager.resolveProjectScope(project, projectPath);
       const groups = await deps.manager.searchBatch(queries as string[], scope, limit ?? 5, opts);

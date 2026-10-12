@@ -93,6 +93,24 @@ export interface IndexerConfig {
      * recent `queryLogSize` rows at write time. 0 = off (nothing is logged).
      */
     queryLogSize: number;
+    /**
+     * Local-LLM query expansion (proposal S4): one completion call produces
+     * 2-3 variant queries per `expand: true` search and their rankings merge
+     * into the base ranking (RRF, the original query first — rank dominance).
+     * Opt-in per call; the model must name an instruct model the backend
+     * serves. Empty model = the feature is unavailable and an expanded search
+     * degrades to the base search with an envelope note.
+     */
+    expand: {
+      /** Ollama tag / llama-server alias of the expansion model. Empty = unavailable. */
+      model: string;
+      /** Base URL for the expansion request. Empty = follow the embedding backend's resolved URL (same rule as `search.rerank.url`). */
+      url: string;
+      /** Max variant queries one expanded search may add (empties, duplicates and the original are always dropped). */
+      maxVariants: number;
+      /** The single completion call is aborted at this deadline; the search then degrades to the base search. */
+      timeoutMs: number;
+    };
     rerank: {
       /** If true, a second-stage reranker refines results by default (per-call override via the search API). */
       enabled: boolean;
@@ -212,6 +230,7 @@ const DEFAULTS: IndexerConfig = {
   watcher: { debounceMs: 300 },
   search: {
     queryLogSize: 10000,
+    expand: { model: "", url: "", maxVariants: 3, timeoutMs: 10000 },
     rerank: { enabled: true, model: "qwen3-reranker-q8", topK: 20, concurrency: 4, numCtx: 1024, url: "" },
     mmr: { enabled: true, lambda: 0.5, topK: 20 },
     boost: {
@@ -268,6 +287,11 @@ ${DEFAULTS.indexing.ignoredDirs.map((d) => `    - "${d}"`).join("\n")}
 
 search:
   queryLogSize: ${DEFAULTS.search.queryLogSize}          # max rows kept in the local query log (search analytics via 'cidx stats'); 0 = off
+  expand:
+    model: ""                   # local-LLM query expander; empty = expansion unavailable (an expand:true search degrades to the base search with a note). Needs an INSTRUCT model the backend serves (e.g. qwen3:0.6b) — not the embedding model
+    url: ""                     # expansion base URL; empty = same server as the embedding backend
+    maxVariants: ${DEFAULTS.search.expand.maxVariants}             # max variant queries one expanded search may add (empties, duplicates and the original are dropped)
+    timeoutMs: ${DEFAULTS.search.expand.timeoutMs}           # the single completion call aborts at this deadline; the search then returns the plain base results
   rerank:
     enabled: ${DEFAULTS.search.rerank.enabled}            # on by default; auto-disables if the reranker model is absent in Ollama
     model: ${DEFAULTS.search.rerank.model}    # causal-LM reranker; scored via yes/no token logprobs
@@ -450,6 +474,18 @@ export const RESOLVED: IndexerConfig = {
   search: {
     queryLogSize:
       num(process.env.QUERY_LOG_SIZE) ?? y.search?.queryLogSize ?? DEFAULTS.search.queryLogSize,
+    expand: {
+      model: process.env.EXPAND_MODEL ?? y.search?.expand?.model ?? DEFAULTS.search.expand.model,
+      url: process.env.EXPAND_URL ?? y.search?.expand?.url ?? DEFAULTS.search.expand.url,
+      maxVariants:
+        num(process.env.EXPAND_MAX_VARIANTS) ??
+        y.search?.expand?.maxVariants ??
+        DEFAULTS.search.expand.maxVariants,
+      timeoutMs:
+        num(process.env.EXPAND_TIMEOUT_MS) ??
+        y.search?.expand?.timeoutMs ??
+        DEFAULTS.search.expand.timeoutMs,
+    },
     rerank: {
       enabled:
         typeof y.search?.rerank?.enabled === "boolean"
@@ -561,6 +597,11 @@ export const CONFIG = {
   BOOST_SOURCE_ROOTS: RESOLVED.search.boost.sourceRoots,
 
   QUERY_LOG_SIZE: RESOLVED.search.queryLogSize,
+
+  EXPAND_MODEL: RESOLVED.search.expand.model,
+  EXPAND_URL: RESOLVED.search.expand.url,
+  EXPAND_MAX_VARIANTS: RESOLVED.search.expand.maxVariants,
+  EXPAND_TIMEOUT_MS: RESOLVED.search.expand.timeoutMs,
 
   DOC_CHECK_MAX_CHARS: RESOLVED.doccheck.maxChars,
   DOC_CHECK_UNDOCUMENTED: RESOLVED.doccheck.undocumentedLimit,

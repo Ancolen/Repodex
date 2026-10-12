@@ -72,13 +72,53 @@ export function formatBlameNote(
 }
 
 /**
+ * The envelope-level expansion notes (proposal S4) → one rendered fragment, or
+ * null when expansion was not requested. `expanded > 0` tells the reader the
+ * ranking is a merge (and that the original query dominates it);
+ * `expandNote` explains why a requested expansion did not run.
+ */
+export function formatExpandNote(
+  notes: Pick<SearchEnvelope, "expanded" | "expandNote"> | undefined,
+): string | null {
+  if (!notes) return null;
+  const parts: string[] = [];
+  if (typeof notes.expanded === "number" && notes.expanded > 0) {
+    parts.push(
+      `${notes.expanded} expansion variant ranking(s) merged into this result (the original query keeps rank dominance)`,
+    );
+  }
+  if (notes.expandNote !== undefined && notes.expandNote.length > 0) {
+    parts.push(notes.expandNote);
+  }
+  if (parts.length === 0) return null;
+  return `⚠ expand: ${parts.join(" · ")}`;
+}
+
+/**
+ * All envelope-level notes (C4 blame + S4 expansion) in one rendered line, or
+ * null when there is nothing to say. The blame-only and expansion-only cases
+ * render exactly like their own formatters.
+ */
+export function formatEnvelopeNotes(
+  notes: Pick<SearchEnvelope, "blameNotARepo" | "blameSkipped" | "expanded" | "expandNote"> | undefined,
+): string | null {
+  const blame = formatBlameNote(notes);
+  const expand = formatExpandNote(notes);
+  if (blame === null) return expand;
+  if (expand === null) return blame;
+  // Both: strip the expand fragment's own ⚠ prefix; they share the line.
+  return `${blame} · ${expand.replace(/^⚠\s*/, "")}`;
+}
+
+/**
  * Converts search/symbol results to agent-friendly text (shared by mcp + stdio
- * bridge). `blameNotes` renders the envelope-level notes of a blame search
- * (`find_symbol` passes none — it has no envelope).
+ * bridge). `envelopeNotes` renders the envelope-level notes (blame C4, and the
+ * expansion count/degrade note of S4; `find_symbol` passes none — it has no
+ * envelope).
  */
 export function formatResults(
   results: ScopedSearchResult[],
-  blameNotes?: Pick<SearchEnvelope, "blameNotARepo" | "blameSkipped">,
+  envelopeNotes?: Pick<SearchEnvelope, "blameNotARepo" | "blameSkipped" | "expanded" | "expandNote">,
 ): string {
   if (results.length === 0) return "No relevant code chunk found.";
   const body = results
@@ -112,7 +152,7 @@ export function formatResults(
       return `Result ${i + 1}: [${r.project}] ${loc}${sym}${sig}\n${meta}${blameLine(r)}\n${before}\`\`\`\n${r.content}\n\`\`\`${after}`;
     })
     .join("\n---\n\n");
-  const note = formatBlameNote(blameNotes);
+  const note = formatEnvelopeNotes(envelopeNotes);
   return note ? `${body}\n—\n${note}` : body;
 }
 
@@ -124,7 +164,7 @@ export function formatBatchResults(groups: BatchSearchGroup[]): string {
       const n = g.results.length;
       const header = `## Query: "${g.query}" (${n} result${n === 1 ? "" : "s"})`;
       const body = n > 0 ? formatResults(g.results) : "No relevant code chunk found.";
-      const note = formatBlameNote(g);
+      const note = formatEnvelopeNotes(g);
       return note ? `${header}\n\n${body}\n—\n${note}` : `${header}\n\n${body}`;
     })
     .join("\n\n---\n\n");

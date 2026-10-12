@@ -9,7 +9,7 @@ import { resolveEditor, buildEditorArgs } from "./utils/editor";
 import type { QueryLogStats, SearchEnvelope } from "./core/index-manager";
 import type { StatsReport } from "./core/stats";
 import type { CompactResult } from "./services/db";
-import { formatContextPack, formatReferences, formatApiDiff, formatImpact, formatDocCheck, formatBlameNote, formatQueryLogStats, formatCoupling, formatStatsSections, formatCompactResult } from "./server/format";
+import { formatContextPack, formatReferences, formatApiDiff, formatImpact, formatDocCheck, formatBlameNote, formatEnvelopeNotes, formatQueryLogStats, formatCoupling, formatStatsSections, formatCompactResult } from "./server/format";
 
 const BASE = `http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}`;
 
@@ -197,7 +197,7 @@ async function cmdSearch(positionals: string[], flags: Record<string, string | b
   await requireDaemon();
   const query = positionals.join(" ");
   if (!query) {
-    console.error('Usage: cidx search "<query>" [--project x] [--limit n] [--mode hybrid|vector|text] [--language x] [--type x] [--path glob] [--rerank] [--mmr] [--boost] [--max-chars n] [--doc] [--blame]');
+    console.error('Usage: cidx search "<query>" [--project x] [--limit n] [--mode hybrid|vector|text] [--language x] [--type x] [--path glob] [--rerank] [--mmr] [--boost] [--max-chars n] [--doc] [--blame] [--expand]');
     process.exit(1);
   }
   const body: {
@@ -215,6 +215,7 @@ async function cmdSearch(positionals: string[], flags: Record<string, string | b
     maxChars?: number;
     doc?: boolean;
     blame?: boolean;
+    expand?: boolean;
   } = { query };
   if (typeof flags.project === "string") body.project = flags.project;
   if (typeof flags.limit === "string") body.limit = Number(flags.limit);
@@ -240,16 +241,19 @@ async function cmdSearch(positionals: string[], flags: Record<string, string | b
   // --blame opts in to the ownership/last-author enrichment (one git call per hit file, ≤ 8).
   if (flags.blame === true || flags.blame === "true") body.blame = true;
   else if (flags.blame === "false") body.blame = false;
+  // --expand opts in to query expansion (one local-LLM round-trip; needs search.expand.model).
+  if (flags.expand === true || flags.expand === "true") body.expand = true;
+  else if (flags.expand === "false") body.expand = false;
   const env = await api<SearchEnvelope>("POST", "/search", body);
   printResults(env.results);
-  printBlameNote(formatBlameNote(env));
+  printBlameNote(formatEnvelopeNotes(env));
 }
 
 async function cmdOpen(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
   await requireDaemon();
   const query = positionals.join(" ");
   if (!query) {
-    console.error('Usage: cidx open "<query>" [--pick n] [--project x] [--mode hybrid|vector|text] [--limit n] [--language x] [--type x] [--path glob] [--rerank] [--mmr] [--boost] [--doc] [--blame]');
+    console.error('Usage: cidx open "<query>" [--pick n] [--project x] [--mode hybrid|vector|text] [--limit n] [--language x] [--type x] [--path glob] [--rerank] [--mmr] [--boost] [--doc] [--blame] [--expand]');
     console.error("\nSearches, prints the results, and opens the selected one in $VISUAL/$EDITOR at the matching line.");
     process.exit(1);
   }
@@ -266,6 +270,7 @@ async function cmdOpen(positionals: string[], flags: Record<string, string | boo
     boost?: boolean;
     doc?: boolean;
     blame?: boolean;
+    expand?: boolean;
   } = { query, limit: 10 }; // a list worth picking from, unless --limit says otherwise
   if (typeof flags.project === "string") body.project = flags.project;
   if (typeof flags.limit === "string") body.limit = Number(flags.limit);
@@ -283,6 +288,8 @@ async function cmdOpen(positionals: string[], flags: Record<string, string | boo
   else if (flags.doc === "false") body.doc = false;
   if (flags.blame === true || flags.blame === "true") body.blame = true;
   else if (flags.blame === "false") body.blame = false;
+  if (flags.expand === true || flags.expand === "true") body.expand = true;
+  else if (flags.expand === "false") body.expand = false;
 
   const env = await api<SearchEnvelope>("POST", "/search", body);
   const results = env.results;
@@ -291,7 +298,7 @@ async function cmdOpen(positionals: string[], flags: Record<string, string | boo
     return;
   }
   printResults(results);
-  printBlameNote(formatBlameNote(env));
+  printBlameNote(formatEnvelopeNotes(env));
 
   const pick = flags.pick !== undefined ? Number(flags.pick) : 1;
   const r = results[pick - 1];
@@ -323,7 +330,7 @@ async function cmdBatch(positionals: string[], flags: Record<string, string | bo
   // Each positional is a separate query (quote multi-word queries).
   const queries = positionals;
   if (queries.length === 0) {
-    console.error('Usage: cidx batch "<q1>" "<q2>" ... [--project x] [--limit n] [--mode hybrid|vector|text] [--language x] [--type x] [--path glob] [--max-chars n] [--doc] [--blame]');
+    console.error('Usage: cidx batch "<q1>" "<q2>" ... [--project x] [--limit n] [--mode hybrid|vector|text] [--language x] [--type x] [--path glob] [--max-chars n] [--doc] [--blame] [--expand]');
     process.exit(1);
   }
   const body: {
@@ -341,6 +348,7 @@ async function cmdBatch(positionals: string[], flags: Record<string, string | bo
     maxChars?: number;
     doc?: boolean;
     blame?: boolean;
+    expand?: boolean;
   } = { queries };
   if (typeof flags.project === "string") body.project = flags.project;
   if (typeof flags.limit === "string") body.limit = Number(flags.limit);
@@ -360,6 +368,8 @@ async function cmdBatch(positionals: string[], flags: Record<string, string | bo
   else if (flags.doc === "false") body.doc = false;
   if (flags.blame === true || flags.blame === "true") body.blame = true;
   else if (flags.blame === "false") body.blame = false;
+  if (flags.expand === true || flags.expand === "true") body.expand = true;
+  else if (flags.expand === "false") body.expand = false;
   const groups = await api<any[]>("POST", "/search/batch", body);
   printBatchResults(groups);
 }
@@ -375,11 +385,11 @@ function printBatchResults(groups: any[]): void {
     const n = g.results?.length ?? 0;
     console.log(`## Query: "${g.query}" (${n} result${n === 1 ? "" : "s"})`);
     printResults(g.results ?? []);
-    printBlameNote(formatBlameNote(g));
+    printBlameNote(formatEnvelopeNotes(g));
   });
 }
 
-/** Prints the blame envelope note (no-op when the envelope carries nothing to say). */
+/** Prints the envelope notes (blame C4, expansion S4; no-op when nothing to say). */
 function printBlameNote(note: string | null): void {
   if (note) console.log(`\n${note}`);
 }
@@ -1016,6 +1026,7 @@ const COMMANDS: Record<string, CmdDoc> = {
       ["--max-chars <n>", "Cap returned text to ~n chars: results are kept whole in ranked order while they fit (top-1 always returned). Pair with a higher --limit for recall without bloating output."],
       ["--doc [bool]", "Docstring retrieval legs (on by default where available): results whose docstring/doc comment matched are marked [doc hit]. --doc false skips the doc legs."],
       ["--blame", "Ownership enrichment: stamp each result with lastAuthor / lastCommitDate / churnCommits via one git blame per hit file (≤ 8; extras reported as blameSkipped). Off by default — costs one git call per hit file."],
+      ["--expand [bool]", "Query expansion (off by default). --expand turns the query into 2-3 variants with the configured local expansion model (search.expand.model) and merges their rankings — the original query keeps rank dominance. Costs one local LLM round-trip; degrades to the plain base search with an expand note when no model is configured or the call fails."],
     ],
     details: [
       "mode=text requires no model compatibility (uses no vectors); works on old/incompatible indexes.",
@@ -1045,6 +1056,7 @@ const COMMANDS: Record<string, CmdDoc> = {
       ["--boost [bool]", "Path/surface boost (on by default). --boost false keeps a pure RRF order."],
       ["--doc [bool]", "Docstring retrieval legs (on by default where available). --doc false skips them."],
       ["--blame", "Ownership enrichment (lastAuthor / lastCommitDate / churnCommits), same as cidx search --blame."],
+      ["--expand [bool]", "Query expansion (off by default), same as cidx search --expand."],
     ],
     details: [
       "Editor is $VISUAL, then $EDITOR, then vi. Line positioning: +<line> for terminal editors",
@@ -1074,6 +1086,7 @@ const COMMANDS: Record<string, CmdDoc> = {
       ["--max-chars <n>", "Character budget applied PER QUERY; results kept whole while they fit."],
       ["--doc [bool]", "Docstring retrieval legs (on by default where available). --doc false skips them."],
       ["--blame", "Ownership enrichment (lastAuthor / lastCommitDate / churnCommits), applied per query; same as cidx search --blame."],
+      ["--expand [bool]", "Query expansion (off by default), applied PER QUERY — each query pays its own expansion round-trip."],
     ],
     details: ["Each argument is a separate query; quote multi-word queries. Duplicate queries are de-duped."],
     examples: [
