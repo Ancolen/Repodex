@@ -665,6 +665,7 @@ export function startControlApi(
       noUndocumented,
       since,
       window,
+      judge,
     } = (req.body ?? {}) as {
       project?: string;
       path?: string;
@@ -676,6 +677,7 @@ export function startControlApi(
       noUndocumented?: boolean;
       since?: string;
       window?: boolean;
+      judge?: boolean;
     };
     if (!project && !filePath) {
       res.status(400).json({ error: "Provide a 'project' name and/or a 'path' (at least one is required)." });
@@ -692,6 +694,7 @@ export function startControlApi(
       noUndocumented?: boolean;
       since?: string;
       window?: boolean;
+      judge?: boolean;
     } = {};
     if (typeof project === "string") opts.project = project;
     if (typeof filePath === "string") opts.path = filePath;
@@ -703,6 +706,7 @@ export function startControlApi(
     if (typeof noUndocumented === "boolean") opts.noUndocumented = noUndocumented;
     if (typeof since === "string") opts.since = since;
     if (typeof window === "boolean") opts.window = window;
+    if (typeof judge === "boolean") opts.judge = judge;
     try {
       res.json(await deps.manager.checkDocs(opts));
     } catch (err) {

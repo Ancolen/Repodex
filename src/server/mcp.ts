@@ -586,6 +586,7 @@ function buildServer(deps: McpDeps): Server {
         noUndocumented?: boolean;
         since?: string;
         window?: boolean;
+        judge?: boolean;
       };
       if (!args.project && !args.path) {
         return {
@@ -604,6 +605,7 @@ function buildServer(deps: McpDeps): Server {
         noUndocumented?: boolean;
         since?: string;
         window?: boolean;
+        judge?: boolean;
       } = {};
       if (typeof args.project === "string") opts.project = args.project;
       if (typeof args.path === "string") opts.path = args.path;
@@ -615,6 +617,7 @@ function buildServer(deps: McpDeps): Server {
       if (typeof args.noUndocumented === "boolean") opts.noUndocumented = args.noUndocumented;
       if (typeof args.since === "string") opts.since = args.since;
       if (typeof args.window === "boolean") opts.window = args.window;
+      if (typeof args.judge === "boolean") opts.judge = args.judge;
       try {
         const report = await deps.manager.checkDocs(opts);
         return { content: [{ type: "text", text: formatDocCheck(report) }], structuredContent: { docCheck: report } };
