@@ -3,6 +3,7 @@ import type Parser from "web-tree-sitter";
 import { CONFIG } from "../config";
 import { EXT_TO_GRAMMAR, languageForExt, getParser } from "./tree-sitter";
 import { extractDoc } from "./docstring";
+import { alignEndToCodePoint, alignStartToCodePoint } from "../utils/text";
 
 type Node = Parser.SyntaxNode;
 
@@ -210,8 +211,16 @@ function buildMeta(language?: string, symbolName?: string, symbolType?: string):
 /** Splits a large text into overlapping chunks; approximates line numbers. */
 function splitLarge(text: string, baseLine: number, meta: Meta): Chunk[] {
   const out: Chunk[] = [];
-  for (let offset = 0; offset < text.length; offset += STEP) {
-    const slice = text.slice(offset, offset + MAX);
+  for (let raw = 0; raw < text.length; raw += STEP) {
+    // Never cut inside an astral character: a chunk that ends (or starts) on
+    // a surrogate half serializes to a \uD83x escape in the embed request, and
+    // strict JSON parsers (llama.cpp's nlohmann) reject the whole request —
+    // the file then fails to index on every sync (seen in production: emoji
+    // straddling the 1500-char window in print strings / log payloads). Both
+    // cut edges slide by one UTF-16 unit instead.
+    const offset = alignStartToCodePoint(text, raw);
+    const end = alignEndToCodePoint(text, offset + MAX);
+    const slice = text.slice(offset, end);
     if (slice.trim().length === 0) continue;
     const startLine = baseLine + countLines(text.slice(0, offset));
     out.push({ content: slice, startLine, endLine: startLine + countLines(slice), ...meta });

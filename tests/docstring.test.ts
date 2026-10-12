@@ -132,6 +132,23 @@ describe("docstring extraction", () => {
     expect(fn!.doc!.length).toBeLessThanOrEqual(MAX_DOC_CHARS);
   });
 
+  test("the MAX_DOC_CHARS cap never halves an astral character", async () => {
+    // The extracted doc is the comment text `/** ${inner} */`; with the "/** "
+    // prefix the emoji's high half sits at MAX_DOC_CHARS-1 — the raw cut used
+    // to land between the halves, and the doc leg's embed request was
+    // rejected by strict JSON parsers. The aligned cut keeps the pair whole.
+    const emoji = "🔄";
+    const inner = "x".repeat(MAX_DOC_CHARS - 5) + emoji + "y".repeat(50);
+    const src = `/** ${inner} */\nexport function f() {}\n`;
+    const chunks = await chunkCode("cap-emoji.js", src);
+    const fn = chunks.find((c) => c.symbolName === "f");
+    expect(fn).toBeDefined();
+    expect(fn!.doc!.length).toBeLessThanOrEqual(MAX_DOC_CHARS + 1);
+    expect(fn!.doc!.endsWith(emoji)).toBe(true);
+    // Wire-safe: JSON.stringify escapes any lone surrogate half.
+    expect(JSON.stringify(fn!.doc!)).not.toMatch(/\\ud[0-9a-f]{3}/i);
+  });
+
   test("class doc comment lands on the class chunk; methods get their own", async () => {
     // A big class body forces header + per-method splitting; without it the
     // whole class is one chunk and the method docs stay inside its content.

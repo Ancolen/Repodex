@@ -1,4 +1,5 @@
 import type Parser from "web-tree-sitter";
+import { alignEndToCodePoint } from "../utils/text";
 
 type Node = Parser.SyntaxNode;
 
@@ -70,7 +71,11 @@ function pythonDocstring(node: Node): string | undefined {
 /** Truncates to MAX_DOC_CHARS, keeping the head (doc intent lives up front). */
 function cap(text: string): string {
   const trimmed = text.trim();
-  return trimmed.length > MAX_DOC_CHARS ? trimmed.slice(0, MAX_DOC_CHARS) : trimmed;
+  if (trimmed.length <= MAX_DOC_CHARS) return trimmed;
+  // Keep the cut on a code-point boundary — a doc ending on half an astral
+  // character serializes to a \uD83x escape and fails the whole doc leg's
+  // embed request (strict JSON parsers reject it).
+  return trimmed.slice(0, alignEndToCodePoint(trimmed, MAX_DOC_CHARS));
 }
 
 /**

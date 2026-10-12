@@ -4,7 +4,14 @@
  * without requiring LanceDB.
  */
 import { test, expect, describe } from "bun:test";
-import { deriveSignature, matchIdentifierLines, escapeRegExp } from "../src/utils/text";
+import {
+  deriveSignature,
+  matchIdentifierLines,
+  escapeRegExp,
+  alignEndToCodePoint,
+  alignStartToCodePoint,
+  sanitizeLoneSurrogates,
+} from "../src/utils/text";
 
 describe("deriveSignature", () => {
   test("extracts a JS/TS function signature without the body", () => {
@@ -120,5 +127,54 @@ describe("matchIdentifierLines", () => {
 describe("escapeRegExp", () => {
   test("escapes regex metacharacters", () => {
     expect(escapeRegExp("a.b*c")).toBe("a\\.b\\*c");
+  });
+});
+
+describe("alignEndToCodePoint", () => {
+  test("slides the cut forward past a high surrogate half", () => {
+    // "ab🄄c": cutting at 3 would leave the high half at the end.
+    expect(alignEndToCodePoint("ab🄄c", 3)).toBe(4);
+  });
+
+  test("leaves ordinary cuts alone", () => {
+    expect(alignEndToCodePoint("abcd", 3)).toBe(3);
+    expect(alignEndToCodePoint("abcd", 4)).toBe(4);
+  });
+
+  test("out-of-range ends pass through (slice clamps)", () => {
+    expect(alignEndToCodePoint("ab", 5)).toBe(5);
+    expect(alignEndToCodePoint("ab", 0)).toBe(0);
+  });
+});
+
+describe("alignStartToCodePoint", () => {
+  test("slides the cut back off a low surrogate half", () => {
+    // "ab🄄": starting at 3 would begin with the lone low half.
+    expect(alignStartToCodePoint("ab🄄", 3)).toBe(2);
+  });
+
+  test("leaves ordinary starts alone", () => {
+    expect(alignStartToCodePoint("abcd", 2)).toBe(2);
+    expect(alignStartToCodePoint("\uDC00x", 0)).toBe(0); // nothing before 0
+  });
+});
+
+describe("sanitizeLoneSurrogates", () => {
+  test("valid surrogate pairs pass through untouched", () => {
+    const s = "a🔄b📡 c";
+    expect(sanitizeLoneSurrogates(s)).toBe(s);
+  });
+
+  test("lone halves become U+FFFD", () => {
+    expect(sanitizeLoneSurrogates("a\uDC04b")).toBe("a�b");
+    expect(sanitizeLoneSurrogates("a\uD83Db")).toBe("a�b");
+  });
+
+  test("mix: pairs kept, stragglers replaced, output JSON-wire-safe", () => {
+    const out = sanitizeLoneSurrogates("x\uD83Dy\uDC00z🔄w");
+    expect(out).toBe("x�y�z🔄w");
+    // The property that matters at the wire: no surrogate escapes after
+    // JSON.stringify (strict parsers — llama.cpp's nlohmann — reject them).
+    expect(JSON.stringify(out)).not.toMatch(/\\ud[0-9a-f]{3}/i);
   });
 });

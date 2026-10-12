@@ -1,7 +1,13 @@
 import { test, expect, describe } from "bun:test";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { CHARS_PER_TOKEN, estimateTokens, effectiveChunkChars } from "../src/chunking/chunker";
+import {
+  CHARS_PER_TOKEN,
+  chunkCode,
+  estimateTokens,
+  effectiveChunkChars,
+} from "../src/chunking/chunker";
+import { CONFIG } from "../src/config";
 
 const CAP_FIXTURE = join(import.meta.dir, "fixtures", "chunk-token-cap.ts");
 const NO_YAML = join(tmpdir(), `cidx-no-such-config-${crypto.randomUUID()}.yml`);
@@ -87,5 +93,58 @@ describe("token cap integration (subprocess)", () => {
     const { count, contentLen } = await runCap({});
     expect(contentLen).toBeLessThan(1500);
     expect(count).toBe(1);
+  });
+});
+
+describe("splitLarge — astral-character safety at window cuts", () => {
+  // Mirror the module's own MAX/STEP derivation so the placement arithmetic
+  // below stays exact under any config.
+  const MAX = effectiveChunkChars(CONFIG.MAX_CHUNK_SIZE, CONFIG.MAX_CHUNK_TOKENS, CHARS_PER_TOKEN);
+  const STEP = Math.max(1, MAX - CONFIG.OVERLAP_SIZE);
+
+  /** Pair-aware lone-surrogate count — 0 means the text cuts cleanly. */
+  function loneSurrogates(s: string): number {
+    let n = 0;
+    for (let i = 0; i < s.length; i++) {
+      const c = s.charCodeAt(i);
+      if (c >= 0xd800 && c <= 0xdbff) {
+        const next = s.charCodeAt(i + 1);
+        if (!(next >= 0xdc00 && next <= 0xdfff)) n++;
+      } else if (c >= 0xdc00 && c <= 0xdfff) {
+        const prev = s.charCodeAt(i - 1);
+        if (!(prev >= 0xd800 && prev <= 0xdbff)) n++;
+      }
+    }
+    return n;
+  }
+
+  test("a window END never cuts an astral character in half (production: luffy_proxy.py)", async () => {
+    // The function text starts at unit 0 (`def`); the first window ends at MAX.
+    // Put the emoji's HIGH half at MAX-1 — exactly what the 1500-char window
+    // did to an emoji inside a Turkish print string: the chunk ended on a lone
+    // high surrogate, JSON.stringify escaped it to \ud83d, and llama.cpp's
+    // strict parser rejected the embed request (the file failed every sync).
+    const head = `def f():\n    s = "`;
+    const emoji = "🔄";
+    const fill = "x".repeat(MAX - head.length - 1);
+    const src = head + fill + emoji + "y".repeat(STEP * 2) + `"\n`;
+    const chunks = await chunkCode("window-end.py", src);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const c of chunks) expect(loneSurrogates(c.content)).toBe(0);
+    expect(chunks.some((c) => c.content.includes(emoji))).toBe(true);
+  });
+
+  test("a window START never cuts an astral character in half (production: STREAM_ERROR.json)", async () => {
+    // Window 2 starts at STEP — put the emoji's LOW half exactly there (its
+    // high half at STEP-1 stays inside the previous window's overlap): the
+    // continuation chunk used to START with a lone low surrogate.
+    const head = `def f():\n    s = "`;
+    const emoji = "📡";
+    const fill = "x".repeat(STEP - head.length - 1);
+    const src = head + fill + emoji + "y".repeat(MAX) + `"\n`;
+    const chunks = await chunkCode("window-start.py", src);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const c of chunks) expect(loneSurrogates(c.content)).toBe(0);
+    expect(chunks.some((c) => c.content.includes(emoji))).toBe(true);
   });
 });

@@ -8,6 +8,49 @@ export function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+// --------------------------------------------- UTF-16 / astral-character safety
+
+/**
+ * Aligns a UTF-16 cut index (an exclusive slice END) so it never splits an
+ * astral character: when the code unit just before the cut is a lone high
+ * surrogate half, the cut slides one unit forward to keep the pair whole.
+ * Every content cut in cidx (chunk windows, the doc cap, the signature cap)
+ * must go through this — a chunk that ends on half an emoji serializes to a
+ * `\uD83x` escape, strict JSON parsers (llama.cpp's nlohmann) reject the
+ * whole embed request, and the file silently fails to index on every sync.
+ */
+export function alignEndToCodePoint(text: string, end: number): number {
+  if (end <= 0 || end > text.length) return end;
+  const prev = text.charCodeAt(end - 1);
+  return prev >= 0xd800 && prev <= 0xdbff ? end + 1 : end;
+}
+
+/**
+ * Symmetric START alignment: a cut index must not land ON a low surrogate
+ * half (its high half would stay in the previous slice) — slides one unit
+ * back to include the pair.
+ */
+export function alignStartToCodePoint(text: string, start: number): number {
+  if (start <= 0 || start >= text.length) return start;
+  const code = text.charCodeAt(start);
+  return code >= 0xdc00 && code <= 0xdfff ? start - 1 : start;
+}
+
+/**
+ * Replaces unpaired surrogate halves with U+FFFD — the last line of defense
+ * before serializing text into a backend request body: `JSON.stringify` emits
+ * `\ud8xx` escapes for lone surrogates and strict servers reject the request.
+ * Valid pairs are kept whole and clean text passes through byte-identical, so
+ * embed cache keys (which hash the text BEFORE the wire) never drift.
+ */
+export function sanitizeLoneSurrogates(s: string): string {
+  // Alternation order matters: a valid pair matches the first branch and is
+  // kept as-is; only unpaired halves fall through to the replacement.
+  return s.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]|[\uD800-\uDFFF]/g, (m) =>
+    m.length === 2 ? m : "�",
+  );
+}
+
 const SIGNATURE_MAX = 200;
 
 /**
@@ -159,7 +202,7 @@ export function deriveSignature(content: string, language?: string | null | unde
   if (bodyBrace > 0) sig = sig.slice(0, bodyBrace).trim();
   if (sig.endsWith(":")) sig = sig.slice(0, -1).trim();
   if (sig.endsWith("(")) sig = sig.slice(0, -1).trim();
-  if (sig.length > SIGNATURE_MAX) sig = sig.slice(0, SIGNATURE_MAX) + "…";
+  if (sig.length > SIGNATURE_MAX) sig = sig.slice(0, alignEndToCodePoint(sig, SIGNATURE_MAX)) + "…";
   return sig;
 }
 
