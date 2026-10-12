@@ -20,6 +20,9 @@ import type {
   CouplingReport,
   CouplingBand,
   FileCoupling,
+  HotspotReport,
+  HotspotFile,
+  HotspotBand,
 } from "../core/index-manager";
 import type { DocCheckReport, DocFinding, UndocumentedEntry } from "../core/doccheck";
 import type { OutlineEntry } from "../chunking/chunker";
@@ -873,6 +876,53 @@ export function formatCoupling(r: CouplingReport): string {
   band("▲ Most imported", "files other modules import the most", r.topFanIn);
   band("⟳ Change magnets", "heavily imported AND heavily importing — one change ripples", r.changeMagnets);
   band("↗ Unstable leaves", "imported by nothing, importing others — pure dependents", r.unstableLeaves);
+
+  if (r.truncated) {
+    lines.push("⚠ a band hit its cap — pass a higher --limit for more.");
+  }
+  return lines.join("\n");
+}
+// ---------------------------------------------------- hotspot report (C3)
+
+/**
+ * Converts a hotspot report to text, sectioned in the three bands
+ * (critical → warm → review), one ranked line per file with its rationale.
+ * The header carries the churn window and repeats the PROXY caveat: size here
+ * is chunk+symbol volume, never cyclomatic complexity.
+ */
+export function formatHotspots(r: HotspotReport): string {
+  const lines: string[] = [];
+  lines.push(`Hotspots — project: ${r.project} · churn window: ${r.since}`);
+  if (r.scannedFiles === 0) {
+    lines.push("(the project has no indexed files — nothing to measure)");
+    return lines.join("\n");
+  }
+  const notes: string[] = [`${r.scannedFiles} file(s) scanned`];
+  if (r.notARepo) notes.push("not a git repo — churn empty (window/debt bands only)");
+  else notes.push(`${r.filesWithChurn} changed in window`, `${r.commitsScanned} commit(s) walked`);
+  if (r.unindexedChurnFiles > 0) notes.push(`${r.unindexedChurnFiles} churn path(s) not in the index`);
+  if (r.notListed > 0) notes.push(`${r.notListed} file(s) below every band (score 0, no signal)`);
+  lines.push(`${notes.join(" · ")} — size is a chunk+symbol PROXY, not cyclomatic complexity`);
+  if (r.commitsTruncated) {
+    lines.push("⚠ the churn walk hit its commit cap — older in-window commits exist, counts may undercount.");
+  }
+  if (r.snapshotTruncated) {
+    lines.push("⚠ the table snapshot hit its row cap — size/dead-code feeds are partial.");
+  }
+  // One ranked line per file: score · path, then the one-line rationale.
+  const fileLine = (f: HotspotFile): string => `  ${String(f.score).padStart(5)}  ${f.relativeFile} — ${f.rationale}`;
+  const band = (title: string, hint: string, b: HotspotBand): void => {
+    lines.push(`\n${title} (${b.total}) — ${hint}`);
+    if (b.items.length === 0) {
+      lines.push("  (none)");
+      return;
+    }
+    for (const f of b.items) lines.push(fileLine(f));
+  };
+
+  band("▲ Critical", "hot churn × size — refactor here first", r.critical);
+  band("◐ Warm", "getting hot — changes landing on meaningful volume", r.warm);
+  band("○ Review", "below the warm line: stable files with debt, demoted test/entry files", r.review);
 
   if (r.truncated) {
     lines.push("⚠ a band hit its cap — pass a higher --limit for more.");

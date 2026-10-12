@@ -731,6 +731,27 @@ export function startControlApi(
     }
   });
 
+  /** Hotspot / technical-debt report (`cidx hotspots`, proposal C3). */
+  app.post("/hotspots", async (req, res) => {
+    const { project, path: projectPath, since, limit } = (req.body ?? {}) as {
+      project?: string;
+      path?: string;
+      since?: string;
+      limit?: number;
+    };
+    try {
+      // Resolution happens in the engine (same anchor chain as /coupling).
+      const opts: { since?: string; limit?: number } = {};
+      if (typeof since === "string") opts.since = since;
+      if (typeof limit === "number") opts.limit = limit;
+      res.json(await deps.manager.getHotspots(project, projectPath, opts));
+    } catch (err) {
+      // An unknown project / ambiguous anchor is a 404 (like /deadcode); anything else is a bad request.
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(msg.startsWith("Index not found") || msg.startsWith("No indexed project") ? 404 : 400).json({ error: msg });
+    }
+  });
+
   // ------------------------------------------------- bridge sessions (O4)
 
   /**

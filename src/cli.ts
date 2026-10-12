@@ -9,7 +9,7 @@ import { resolveEditor, buildEditorArgs } from "./utils/editor";
 import type { QueryLogStats, SearchEnvelope } from "./core/index-manager";
 import type { StatsReport } from "./core/stats";
 import type { CompactResult } from "./services/db";
-import { formatContextPack, formatReferences, formatApiDiff, formatImpact, formatDocCheck, formatBlameNote, formatEnvelopeNotes, formatQueryLogStats, formatCoupling, formatStatsSections, formatCompactResult } from "./server/format";
+import { formatContextPack, formatReferences, formatApiDiff, formatImpact, formatDocCheck, formatBlameNote, formatEnvelopeNotes, formatQueryLogStats, formatCoupling, formatStatsSections, formatCompactResult, formatHotspots } from "./server/format";
 
 const BASE = `http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}`;
 
@@ -863,6 +863,34 @@ async function cmdCoupling(positionals: string[], flags: Record<string, string |
   console.log(formatCoupling(r));
 }
 
+// ------------------------------------------------- hotspot report (C3)
+
+/**
+ * `cidx hotspots [project|dir] [--since <git date>] [--limit n]` — the churn ×
+ * size hotspot report with dead-code/coupling signals. The positional is a
+ * project NAME or an existing dir (which anchors by path, like coupling does);
+ * absent → the daemon resolves the single indexed project.
+ */
+async function cmdHotspots(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
+  await requireDaemon();
+  const arg = positionals[0];
+  const body: {
+    project?: string | undefined;
+    path?: string | undefined;
+    since?: string | undefined;
+    limit?: number;
+  } =
+    typeof flags.path === "string"
+      ? { path: path.resolve(flags.path) }
+      : arg && existsSync(arg) && statSync(arg).isDirectory()
+        ? { path: path.resolve(arg) }
+        : { project: arg };
+  if (typeof flags.since === "string") body.since = flags.since;
+  if (typeof flags.limit === "string") body.limit = Number(flags.limit);
+  const r = await api<any>("POST", "/hotspots", body);
+  console.log(formatHotspots(r));
+}
+
 // -------------------------------------------------- doc conformance (D1)
 
 /**
@@ -1227,6 +1255,25 @@ const COMMANDS: Record<string, CmdDoc> = {
     ],
     examples: ["cidx coupling repodex", "cidx coupling ~/projects/api --limit 20"],
   },
+  hotspots: {
+    usage: "hotspots [project|dir] [flags]",
+    summary: "Hotspot report: churn x size (a proxy), banded critical/warm/review with debt signals.",
+    flags: [
+      ["--path <dir>", "Alternative to the positional: a dir/file inside the project."],
+      ["--since <date>", "Churn window, git date syntax (default: '90 days ago')."],
+      ["--limit <n>", "Cap per band (default: 20); exceeding it prints a truncation warning."],
+    ],
+    details: [
+      "Score = churn x size, log-scaled, on 0-100 — a deliberate PROXY: size is chunk count +",
+      "distinct symbol count, NOT cyclomatic complexity. Debt signals adjust the score:",
+      "dead-code density and coupling (fan-in + fan-out) promote; test files and entry points",
+      "are demoted into review. Bands: critical (>= 50) → warm (>= 25) → review.",
+      "Churn runs git log --since live per call; size/dead feeds come from the cached index",
+      "snapshot (fresh at reindex). A non-repo degrades to size/debt bands (notARepo reported).",
+      "Every cap is surfaced: commitsTruncated (churn walk cap), snapshotTruncated, truncated.",
+    ],
+    examples: ["cidx hotspots repodex", "cidx hotspots --since '30 days ago' --limit 10"],
+  },
   doccheck: {
     usage: "doccheck [project|path] [flags]",
     summary: "Doc–code conformance: resolves markdown claims against the index (deterministic, no LLM).",
@@ -1380,7 +1427,7 @@ const COMMANDS: Record<string, CmdDoc> = {
 
 const HELP_ORDER = [
   "start", "index", "list", "status", "reindex", "sync", "remove",
-  "search", "open", "batch", "pack", "find", "refs", "overview", "deps", "deadcode", "callgraph", "commits", "apidiff", "impact", "coupling", "doccheck", "doctor", "stats", "compact", "config", "mcp", "stop", "version", "help",
+  "search", "open", "batch", "pack", "find", "refs", "overview", "deps", "deadcode", "callgraph", "commits", "apidiff", "impact", "coupling", "hotspots", "doccheck", "doctor", "stats", "compact", "config", "mcp", "stop", "version", "help",
 ];
 
 /** Detailed help for a single command. */
@@ -1467,6 +1514,7 @@ function printHelp(): void {
   lines.push('  cidx commits api "login flow"     # git-history / commit-message search');
   lines.push('  cidx deadcode api --min-confidence 70  # potential dead code');
   lines.push('  cidx coupling api                 # fan-in/fan-out bands per file');
+  lines.push("  cidx hotspots api                 # churn x size hotspot bands (+ debt signals)");
   lines.push('  cidx apidiff api v1.2.0           # public-API diff between two git refs');
   lines.push('  cidx stats api                   # table/disk stats + search analytics');
   lines.push('  cidx compact api                 # merge small fragments, prune old versions');
@@ -1479,7 +1527,7 @@ function printHelp(): void {
   lines.push("  Stdio-expecting clients (Claude Desktop): cidx mcp");
   lines.push("  Tools: search_codebase, search_codebase_batch, find_symbol, find_references,");
   lines.push("            get_file_outline, get_dependencies, get_call_graph, find_dead_code, search_commits,");
-  lines.push("            get_api_diff, get_change_impact, get_coupling, get_context_pack, get_repo_overview,");
+  lines.push("            get_api_diff, get_change_impact, get_coupling, get_hotspots, get_context_pack, get_repo_overview,");
   lines.push("            list_indexes, get_index_status, index_project");
   lines.push("");
   lines.push("CONFIGURATION");
@@ -1676,6 +1724,7 @@ async function main(): Promise<void> {
     case "callgraph": case "call-graph": await cmdCallGraph(positionals, flags); break;
     case "impact": case "change-impact": await cmdImpact(positionals, flags); break;
     case "coupling": await cmdCoupling(positionals, flags); break;
+    case "hotspots": case "hotspot": await cmdHotspots(positionals, flags); break;
     case "doccheck": case "check-docs": case "checkdocs": await cmdDoccheck(positionals, flags); break;
     case "commits": case "git-log": case "gitlog": await cmdCommits(positionals, flags); break;
     case "apidiff": case "api-diff": await cmdApiDiff(positionals, flags); break;

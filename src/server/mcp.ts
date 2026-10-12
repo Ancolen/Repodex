@@ -39,6 +39,7 @@ import {
   formatImpact,
   formatDocCheck,
   formatCoupling,
+  formatHotspots,
 } from "./format";
 import type { JobQueue } from "../core/job-queue";
 import type { IndexManager } from "../core/index-manager";
@@ -700,6 +701,28 @@ export function buildServer(deps: McpDeps): Server {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text", text: `Coupling error: ${msg}` }], isError: true };
+      }
+    }
+
+    // ---- hotspot / technical-debt report (proposal C3) ----
+    if (name === "get_hotspots") {
+      const args = rawArgs as {
+        project?: string;
+        path?: string;
+        since?: string;
+        limit?: number;
+      };
+      const hsOpts: { since?: string; limit?: number } = {};
+      if (typeof args.since === "string") hsOpts.since = args.since;
+      if (typeof args.limit === "number") hsOpts.limit = args.limit;
+      try {
+        // Resolution happens in the engine (explicit project → path anchor → the
+        // single indexed project, or an error naming the available ones).
+        const report = await deps.manager.getHotspots(args.project, args.path, hsOpts);
+        return { content: [{ type: "text", text: formatHotspots(report) }], structuredContent: { hotspots: report } };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text", text: `Hotspots error: ${msg}` }], isError: true };
       }
     }
 
