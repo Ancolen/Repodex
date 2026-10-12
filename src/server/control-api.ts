@@ -13,6 +13,9 @@ import type { JobQueue } from "../core/job-queue";
 import { indexNotFoundMessage } from "../core/index-manager";
 import type { IndexManager } from "../core/index-manager";
 import type { BridgeSessionRegistry } from "../core/bridgesessions";
+// A2 — the GET /events backing store and the shared index-serializer.
+import type { DaemonEventRing } from "../core/events";
+import { viewIndex } from "./resource-defs";
 import type { IndexRecord, QueryLogStatsOpts } from "../core/registry";
 
 export interface ControlDeps {
@@ -28,33 +31,8 @@ export interface ControlDeps {
   onActivity?: () => void;
   /** Tracks live stdio-bridge MCP sessions (the idle guardrail). */
   bridgeSessions: BridgeSessionRegistry;
-}
-
-/** Presents an index record along with live job progress. */
-function viewIndex(deps: ControlDeps, rec: IndexRecord) {
-  const job = deps.manager.activeJob(rec.name);
-  return {
-    name: rec.name,
-    path: rec.path,
-    table: rec.tableName,
-    status: rec.status,
-    files: rec.fileCount,
-    chunks: rec.chunkCount,
-    lastIndexedAt: rec.lastIndexedAt,
-    error: rec.error,
-    job: job
-      ? {
-          id: job.id,
-          status: job.status,
-          processed: job.progress.processed,
-          total: job.progress.total,
-          percent:
-            job.progress.total > 0
-              ? Math.round((job.progress.processed / job.progress.total) * 100)
-              : 0,
-        }
-      : null,
-  };
+  /** A2 — the in-memory daemon event ring behind `GET /events`. */
+  events: DaemonEventRing;
 }
 
 // -------------------------------------------------------------------- doctor
@@ -157,7 +135,7 @@ export function startControlApi(
   });
 
   app.get("/indexes", (_req, res) => {
-    res.json(deps.manager.listIndexes().map((r) => viewIndex(deps, r)));
+    res.json(deps.manager.listIndexes().map((r) => viewIndex(deps.manager, r)));
   });
 
   app.get("/indexes/:name", (req, res) => {
@@ -168,7 +146,7 @@ export function startControlApi(
         .json({ error: indexNotFoundMessage(req.params.name, deps.manager.listIndexes().map((r) => r.name)) });
       return;
     }
-    res.json(viewIndex(deps, rec));
+    res.json(viewIndex(deps.manager, rec));
   });
 
   app.post("/index", (req, res) => {
@@ -183,7 +161,7 @@ export function startControlApi(
     }
     try {
       const rec = deps.manager.createIndex(dir, name);
-      res.json(viewIndex(deps, rec));
+      res.json(viewIndex(deps.manager, rec));
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -197,7 +175,7 @@ export function startControlApi(
     }
     try {
       const rec = deps.manager.reindex(name);
-      res.json(viewIndex(deps, rec));
+      res.json(viewIndex(deps.manager, rec));
     } catch (err) {
       res.status(404).json({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -211,7 +189,7 @@ export function startControlApi(
     }
     try {
       const rec = deps.manager.syncIndex(name);
-      res.json(viewIndex(deps, rec));
+      res.json(viewIndex(deps.manager, rec));
     } catch (err) {
       res.status(404).json({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -758,6 +736,24 @@ export function startControlApi(
   app.delete("/bridge-session/:id", (req, res) => {
     const removed = deps.bridgeSessions.remove(req.params.id);
     res.json({ removed });
+  });
+
+  // ------------------------------------------------- event stream (A2)
+
+  /**
+   * The daemon's in-memory event ring, paged by the stdio bridge (proposal A2):
+   * `GET /events?since=<id>` → `{ events: [{ id, type, project?, jobType?,
+   * status?, ts }], lastId }`. Ids are monotonic (a process-local counter) and
+   * the ring only replays what it still holds — in-memory only, so a daemon
+   * restart resets the sequence and a poller re-syncs from 0
+   * (`src/core/events.ts → nextEventCursor`). A malformed/negative `since`
+   * degrades to 0 (the full retained tail), never a 400: this is polled every
+   * few seconds and must not fail noisily.
+   */
+  app.get("/events", (req, res) => {
+    const raw = typeof req.query.since === "string" ? Number(req.query.since) : NaN;
+    const since = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+    res.json(deps.events.since(since));
   });
 
   app.post("/shutdown", (_req, res) => {

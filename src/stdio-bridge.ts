@@ -19,7 +19,10 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
+  ListResourcesRequestSchema,
+  ListResourceTemplatesRequestSchema,
   ListToolsRequestSchema,
+  ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { CONFIG } from "./config";
 import { daemonCommand } from "./runtime";
@@ -31,6 +34,20 @@ import {
   deleteSessionRequest,
   BRIDGE_HEARTBEAT_MS,
 } from "./core/bridgesessions";
+// A2 — resources forwarding + the daemon event stream (poll → MCP notifications).
+import {
+  buildResourceCatalog,
+  controlApiResourceTargets,
+  readCidxResource,
+  type IndexView,
+} from "./server/resource-defs";
+import {
+  BRIDGE_EVENT_POLL_MS,
+  eventsPollRequest,
+  eventNotifications,
+  nextEventCursor,
+  type DaemonEventPage,
+} from "./core/events";
 import {
   formatResults,
   formatBatchResults,
@@ -109,15 +126,7 @@ async function api<T = unknown>(method: string, pathname: string, body?: unknown
 }
 
 // ----------------------------------------------------------------- formatting
-interface IndexView {
-  name: string;
-  path: string;
-  status: string;
-  files: number;
-  chunks: number;
-  error?: string | null;
-  job?: { percent: number; processed: number; total: number } | null;
-}
+// IndexView (the shared Control-API index serialization) comes from resource-defs.
 
 function formatIndexList(indexes: IndexView[]): string {
   if (indexes.length === 0) return "No projects indexed yet.";
@@ -212,6 +221,7 @@ function startSessionHeartbeat(): ReturnType<typeof setInterval> {
 /** Stops the beats and unregisters, then exits with code 0 (one line to stderr). */
 async function stopAndExit(): Promise<void> {
   clearInterval(heartbeatTimer);
+  if (eventsTimer !== null) clearInterval(eventsTimer);
   try {
     await unregisterSession();
   } finally {
@@ -221,6 +231,62 @@ async function stopAndExit(): Promise<void> {
 }
 
 let heartbeatTimer: ReturnType<typeof setInterval>;
+
+// --------------------------------------------------- event stream (proposal A2)
+/**
+ * Polls `GET /events` (every BRIDGE_EVENT_POLL_MS = 3 s, addendum) and emits one
+ * MCP notification per event on the stdio JSON-RPC channel:
+ * `job-completed` → `notifications/message` ("index finished for …"), add/remove
+ * → `notifications/resources/list_changed`.
+ *
+ * stdout safety: the ONLY output these notifications produce is JSON-RPC (the
+ * SDK's send* calls go through the stdio transport); everything else — polling
+ * failures, transport gone mid-loop — is swallowed to stderr. Nothing here can
+ * pollute the JSON-RPC channel.
+ */
+let lastEventId = 0;
+let eventsTimer: ReturnType<typeof setInterval> | null = null;
+
+async function pollDaemonEvents(
+  sendLog: (params: { level: "info"; logger: string; data: string }) => Promise<unknown>,
+  sendListChanged: () => Promise<unknown>,
+): Promise<void> {
+  const req = eventsPollRequest(lastEventId);
+  let page: DaemonEventPage;
+  try {
+    page = await api<DaemonEventPage>(req.method, req.path);
+  } catch {
+    // The daemon is down or restarting; the next tick retries. Stderr never stdout.
+    return;
+  }
+  // Advance (or, after a daemon restart, zero) the cursor BEFORE emitting.
+  lastEventId = nextEventCursor(lastEventId, page);
+  for (const ev of page.events) {
+    for (const note of eventNotifications(ev)) {
+      try {
+        if (note.kind === "log") {
+          await sendLog({ level: note.level, logger: note.logger, data: note.data });
+        } else {
+          await sendListChanged();
+        }
+      } catch (err) {
+        // "Not connected" (client gone mid-loop) and friends — never fatal, never stdout.
+        console.error("[bridge] event notification failed:", err instanceof Error ? err.message : err);
+      }
+    }
+  }
+}
+
+function startEventPolling(server: Server): void {
+  eventsTimer = setInterval(() => {
+    void pollDaemonEvents(
+      (params) => server.sendLoggingMessage(params),
+      () => server.sendResourceListChanged(),
+    );
+  }, BRIDGE_EVENT_POLL_MS);
+  // Unref'd like the heartbeat: the timer never holds the process by itself.
+  eventsTimer.unref();
+}
 
 // --------------------------------------------------------------------- main
 async function main(): Promise<void> {
@@ -244,10 +310,33 @@ async function main(): Promise<void> {
 
   const server = new Server(
     { name: "cidx (stdio bridge)", version: "2.5.0" },
-    { capabilities: { tools: {} } },
+    // The bridge pushes (poll → notifications), so it declares `logging` and
+    // `resources.listChanged`; the tools capability stays as before.
+    { capabilities: { tools: {}, resources: { listChanged: true }, logging: {} } },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOL_DEFINITIONS }));
+
+  // --- resources forwarding (proposal A2): the daemon's payloads over the Control API ---
+  server.setRequestHandler(ListResourcesRequestSchema, async () => {
+    const indexes = await api<IndexView[]>("GET", "/indexes");
+    const { resources } = buildResourceCatalog(indexes);
+    return { resources };
+  });
+
+  server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => {
+    const { resourceTemplates } = buildResourceCatalog([]);
+    return { resourceTemplates };
+  });
+
+  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    const targets = controlApiResourceTargets(api);
+    const content = await readCidxResource(targets, request.params.uri);
+    if (content === null) {
+      throw new Error(`Unknown resource: ${request.params.uri}`);
+    }
+    return { contents: [content] };
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: rawArgs } = request.params;
@@ -490,6 +579,9 @@ async function main(): Promise<void> {
   // ahead of its own close bookkeeping.)
   transport.onclose = () => void stopAndExit();
   await server.connect(transport as unknown as Parameters<typeof server.connect>[0]);
+  // A2: only after the MCP client is connected — the notifications have a
+  // consumer (send* on a disconnected transport would throw on every tick).
+  startEventPolling(server);
   console.error("[bridge] Stdio MCP bridge ready.");
 }
 
