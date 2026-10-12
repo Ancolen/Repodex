@@ -225,6 +225,7 @@ export function startControlApi(
       mmr,
       maxChars,
       doc,
+      blame,
     } = (req.body ?? {}) as {
       query?: string;
       project?: string;
@@ -239,19 +240,20 @@ export function startControlApi(
       mmr?: boolean;
       maxChars?: number;
       doc?: boolean;
+      blame?: boolean;
     };
     if (!query) {
       res.status(400).json({ error: "'query' is required" });
       return;
     }
-    const opts = { mode, language, symbolType, pathGlob, contextLines, rerank, mmr, maxChars, doc };
+    const opts = { mode, language, symbolType, pathGlob, contextLines, rerank, mmr, maxChars, doc, blame };
     try {
       // 'path' anchors the search to the project containing it; neither → all projects.
       const scope = deps.manager.resolveProjectScope(project, projectPath);
-      const results = scope
+      const env = scope
         ? await deps.manager.searchIndex(scope, query, limit ?? 5, opts)
         : await deps.manager.searchAll(query, limit ?? 5, opts);
-      res.json(results);
+      res.json(env);
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -272,6 +274,7 @@ export function startControlApi(
       mmr,
       maxChars,
       doc,
+      blame,
     } = (req.body ?? {}) as {
       queries?: unknown;
       project?: string;
@@ -286,12 +289,13 @@ export function startControlApi(
       mmr?: boolean;
       maxChars?: number;
       doc?: boolean;
+      blame?: boolean;
     };
     if (!Array.isArray(queries) || queries.length === 0 || !queries.every((q) => typeof q === "string")) {
       res.status(400).json({ error: "'queries' must be a non-empty array of strings" });
       return;
     }
-    const opts = { mode, language, symbolType, pathGlob, contextLines, rerank, mmr, maxChars, doc };
+    const opts = { mode, language, symbolType, pathGlob, contextLines, rerank, mmr, maxChars, doc, blame };
     try {
       const scope = deps.manager.resolveProjectScope(project, projectPath);
       const groups = await deps.manager.searchBatch(queries as string[], scope, limit ?? 5, opts);

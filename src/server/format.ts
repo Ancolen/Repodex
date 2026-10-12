@@ -4,6 +4,7 @@ import type {
   ReferenceResult,
   RepoOverview,
   BatchSearchGroup,
+  SearchEnvelope,
   DependencyResult,
   DeadCodeReport,
   CallGraphResult,
@@ -29,10 +30,51 @@ function fmtTime(ms: number | null | undefined): string {
   }
 }
 
-/** Converts search/symbol results to agent-friendly text (shared by mcp + stdio bridge). */
-export function formatResults(results: ScopedSearchResult[]): string {
+/** One hit's blame line ("last: <author> <date> (<n> commits)"), or "" when unstamped. */
+function blameLine(r: ScopedSearchResult): string {
+  if (r.lastAuthor === undefined && r.lastCommitDate === undefined && r.churnCommits === undefined) {
+    return "";
+  }
+  const author = r.lastAuthor ?? "unknown";
+  const date = r.lastCommitDate ?? "—";
+  const n = r.churnCommits ?? 0;
+  // A trailing "+" flags the churn cap (more distinct commits than reported).
+  const churn = n > 0 ? `${n} commit${n === 1 ? "" : "s"}${r.churnTruncated ? "+" : ""}` : "no commit";
+  return `\n  last: ${author} ${date} (${churn})`;
+}
+
+/**
+ * The envelope-level blame notes (proposal C4) → one rendered note line, or
+ * null when there is nothing to say. Blame FIELDS ride on the hits; this covers
+ * the whole-search cases: every hit outside a git repo, and the honest
+ * per-search file-cap count.
+ */
+export function formatBlameNote(
+  notes: Pick<SearchEnvelope, "blameNotARepo" | "blameSkipped"> | undefined,
+): string | null {
+  if (!notes) return null;
+  const parts: string[] = [];
+  if (notes.blameNotARepo === true) {
+    parts.push("no blame: the hit files are not in a git working tree");
+  }
+  if (notes.blameSkipped !== undefined && notes.blameSkipped > 0) {
+    parts.push(`${notes.blameSkipped} more file(s) skipped by the per-search blame cap (≤8)`);
+  }
+  if (parts.length === 0) return null;
+  return `⚠ blame: ${parts.join(" · ")}`;
+}
+
+/**
+ * Converts search/symbol results to agent-friendly text (shared by mcp + stdio
+ * bridge). `blameNotes` renders the envelope-level notes of a blame search
+ * (`find_symbol` passes none — it has no envelope).
+ */
+export function formatResults(
+  results: ScopedSearchResult[],
+  blameNotes?: Pick<SearchEnvelope, "blameNotARepo" | "blameSkipped">,
+): string {
   if (results.length === 0) return "No relevant code chunk found.";
-  return results
+  const body = results
     .map((r, i) => {
       const loc =
         r.startLine !== undefined && r.endLine !== undefined
@@ -59,9 +101,11 @@ export function formatResults(results: ScopedSearchResult[]): string {
       const after = r.contextAfter?.length
         ? `\n--- ${r.contextAfter.length} lines after ---\n${r.contextAfter.join("\n")}`
         : "";
-      return `Result ${i + 1}: [${r.project}] ${loc}${sym}${sig}\n${meta}\n${before}\`\`\`\n${r.content}\n\`\`\`${after}`;
+      return `Result ${i + 1}: [${r.project}] ${loc}${sym}${sig}\n${meta}${blameLine(r)}\n${before}\`\`\`\n${r.content}\n\`\`\`${after}`;
     })
     .join("\n---\n\n");
+  const note = formatBlameNote(blameNotes);
+  return note ? `${body}\n—\n${note}` : body;
 }
 
 /** Converts batch (multi-query) search results to text, one section per query. */
@@ -72,7 +116,8 @@ export function formatBatchResults(groups: BatchSearchGroup[]): string {
       const n = g.results.length;
       const header = `## Query: "${g.query}" (${n} result${n === 1 ? "" : "s"})`;
       const body = n > 0 ? formatResults(g.results) : "No relevant code chunk found.";
-      return `${header}\n\n${body}`;
+      const note = formatBlameNote(g);
+      return note ? `${header}\n\n${body}\n—\n${note}` : `${header}\n\n${body}`;
     })
     .join("\n\n---\n\n");
 }

@@ -6,7 +6,8 @@ import { CONFIG, RESOLVED, CONFIG_SOURCE, resolveConfigPath } from "./config";
 import { daemonCommand, bridgeCommand } from "./runtime";
 import { daemonCheck, type DoctorCheck, type DoctorReport } from "./core/doctor";
 import { resolveEditor, buildEditorArgs } from "./utils/editor";
-import { formatContextPack, formatReferences, formatApiDiff, formatImpact, formatDocCheck } from "./server/format";
+import type { SearchEnvelope } from "./core/index-manager";
+import { formatContextPack, formatReferences, formatApiDiff, formatImpact, formatDocCheck, formatBlameNote } from "./server/format";
 
 const BASE = `http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}`;
 
@@ -194,7 +195,7 @@ async function cmdSearch(positionals: string[], flags: Record<string, string | b
   await requireDaemon();
   const query = positionals.join(" ");
   if (!query) {
-    console.error('Usage: cidx search "<query>" [--project x] [--limit n] [--mode hybrid|vector|text] [--language x] [--type x] [--path glob] [--rerank] [--mmr] [--max-chars n] [--doc]');
+    console.error('Usage: cidx search "<query>" [--project x] [--limit n] [--mode hybrid|vector|text] [--language x] [--type x] [--path glob] [--rerank] [--mmr] [--max-chars n] [--doc] [--blame]');
     process.exit(1);
   }
   const body: {
@@ -210,6 +211,7 @@ async function cmdSearch(positionals: string[], flags: Record<string, string | b
     mmr?: boolean;
     maxChars?: number;
     doc?: boolean;
+    blame?: boolean;
   } = { query };
   if (typeof flags.project === "string") body.project = flags.project;
   if (typeof flags.limit === "string") body.limit = Number(flags.limit);
@@ -229,15 +231,19 @@ async function cmdSearch(positionals: string[], flags: Record<string, string | b
   // --doc false skips the docstring retrieval legs (on by default where available).
   if (flags.doc === true || flags.doc === "true") body.doc = true;
   else if (flags.doc === "false") body.doc = false;
-  const results = await api<any[]>("POST", "/search", body);
-  printResults(results);
+  // --blame opts in to the ownership/last-author enrichment (one git call per hit file, ≤ 8).
+  if (flags.blame === true || flags.blame === "true") body.blame = true;
+  else if (flags.blame === "false") body.blame = false;
+  const env = await api<SearchEnvelope>("POST", "/search", body);
+  printResults(env.results);
+  printBlameNote(formatBlameNote(env));
 }
 
 async function cmdOpen(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
   await requireDaemon();
   const query = positionals.join(" ");
   if (!query) {
-    console.error('Usage: cidx open "<query>" [--pick n] [--project x] [--mode hybrid|vector|text] [--limit n] [--language x] [--type x] [--path glob] [--rerank] [--mmr] [--doc]');
+    console.error('Usage: cidx open "<query>" [--pick n] [--project x] [--mode hybrid|vector|text] [--limit n] [--language x] [--type x] [--path glob] [--rerank] [--mmr] [--doc] [--blame]');
     console.error("\nSearches, prints the results, and opens the selected one in $VISUAL/$EDITOR at the matching line.");
     process.exit(1);
   }
@@ -252,6 +258,7 @@ async function cmdOpen(positionals: string[], flags: Record<string, string | boo
     rerank?: boolean;
     mmr?: boolean;
     doc?: boolean;
+    blame?: boolean;
   } = { query, limit: 10 }; // a list worth picking from, unless --limit says otherwise
   if (typeof flags.project === "string") body.project = flags.project;
   if (typeof flags.limit === "string") body.limit = Number(flags.limit);
@@ -265,13 +272,17 @@ async function cmdOpen(positionals: string[], flags: Record<string, string | boo
   else if (flags.mmr === "false") body.mmr = false;
   if (flags.doc === true || flags.doc === "true") body.doc = true;
   else if (flags.doc === "false") body.doc = false;
+  if (flags.blame === true || flags.blame === "true") body.blame = true;
+  else if (flags.blame === "false") body.blame = false;
 
-  const results = await api<any[]>("POST", "/search", body);
+  const env = await api<SearchEnvelope>("POST", "/search", body);
+  const results = env.results;
   if (results.length === 0) {
     console.log("No results found.");
     return;
   }
   printResults(results);
+  printBlameNote(formatBlameNote(env));
 
   const pick = flags.pick !== undefined ? Number(flags.pick) : 1;
   const r = results[pick - 1];
@@ -303,7 +314,7 @@ async function cmdBatch(positionals: string[], flags: Record<string, string | bo
   // Each positional is a separate query (quote multi-word queries).
   const queries = positionals;
   if (queries.length === 0) {
-    console.error('Usage: cidx batch "<q1>" "<q2>" ... [--project x] [--limit n] [--mode hybrid|vector|text] [--language x] [--type x] [--path glob] [--max-chars n] [--doc]');
+    console.error('Usage: cidx batch "<q1>" "<q2>" ... [--project x] [--limit n] [--mode hybrid|vector|text] [--language x] [--type x] [--path glob] [--max-chars n] [--doc] [--blame]');
     process.exit(1);
   }
   const body: {
@@ -319,6 +330,7 @@ async function cmdBatch(positionals: string[], flags: Record<string, string | bo
     mmr?: boolean;
     maxChars?: number;
     doc?: boolean;
+    blame?: boolean;
   } = { queries };
   if (typeof flags.project === "string") body.project = flags.project;
   if (typeof flags.limit === "string") body.limit = Number(flags.limit);
@@ -334,6 +346,8 @@ async function cmdBatch(positionals: string[], flags: Record<string, string | bo
   if (typeof flags["max-chars"] === "string") body.maxChars = Number(flags["max-chars"]);
   if (flags.doc === true || flags.doc === "true") body.doc = true;
   else if (flags.doc === "false") body.doc = false;
+  if (flags.blame === true || flags.blame === "true") body.blame = true;
+  else if (flags.blame === "false") body.blame = false;
   const groups = await api<any[]>("POST", "/search/batch", body);
   printBatchResults(groups);
 }
@@ -349,7 +363,13 @@ function printBatchResults(groups: any[]): void {
     const n = g.results?.length ?? 0;
     console.log(`## Query: "${g.query}" (${n} result${n === 1 ? "" : "s"})`);
     printResults(g.results ?? []);
+    printBlameNote(formatBlameNote(g));
   });
+}
+
+/** Prints the blame envelope note (no-op when the envelope carries nothing to say). */
+function printBlameNote(note: string | null): void {
+  if (note) console.log(`\n${note}`);
 }
 
 async function cmdPack(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
@@ -416,6 +436,12 @@ function printResults(results: any[]): void {
     const docHit = r._docHit ? "  [doc hit]" : "";
     console.log(`\n${i + 1}. [${r.project}] ${loc}${sym}${score ? `  (${score})` : ""}${docHit}`);
     if (r.signature) console.log(`   ↳ ${r.signature}`);
+    // Blame enrichment (opt-in, C4): same compact line as the MCP formatter.
+    if (r.lastAuthor !== undefined || r.lastCommitDate !== undefined || r.churnCommits !== undefined) {
+      const n = typeof r.churnCommits === "number" ? r.churnCommits : 0;
+      const churn = n > 0 ? `${n} commit${n === 1 ? "" : "s"}${r.churnTruncated ? "+" : ""}` : "no commit";
+      console.log(`   last: ${r.lastAuthor ?? "unknown"} ${r.lastCommitDate ?? "—"} (${churn})`);
+    }
     if (Array.isArray(r.contextBefore)) {
       r.contextBefore.forEach((l: string) => console.log(`   · ${l}`));
     }
@@ -946,6 +972,7 @@ const COMMANDS: Record<string, CmdDoc> = {
       ["--mmr [bool]", "MMR diversification (on by default). --mmr true forces it on; --mmr false keeps a pure relevance order. Drops near-duplicate chunks so the top results are distinct."],
       ["--max-chars <n>", "Cap returned text to ~n chars: results are kept whole in ranked order while they fit (top-1 always returned). Pair with a higher --limit for recall without bloating output."],
       ["--doc [bool]", "Docstring retrieval legs (on by default where available): results whose docstring/doc comment matched are marked [doc hit]. --doc false skips the doc legs."],
+      ["--blame", "Ownership enrichment: stamp each result with lastAuthor / lastCommitDate / churnCommits via one git blame per hit file (≤ 8; extras reported as blameSkipped). Off by default — costs one git call per hit file."],
     ],
     details: [
       "mode=text requires no model compatibility (uses no vectors); works on old/incompatible indexes.",
@@ -956,6 +983,7 @@ const COMMANDS: Record<string, CmdDoc> = {
       'cidx search "jwt token generation" --project api --limit 10',
       'cidx search "retry" --mode text --language go --path "src/*"',
       'cidx search "retry backoff" --project api --limit 5 --rerank',
+      'cidx search "parseGitBlamePorcelain" --blame --limit 3',
     ],
   },
   open: {
@@ -972,6 +1000,7 @@ const COMMANDS: Record<string, CmdDoc> = {
       ["--rerank [bool]", "Reranker (on by default). --rerank false skips it."],
       ["--mmr [bool]", "MMR diversification (on by default). --mmr false skips it."],
       ["--doc [bool]", "Docstring retrieval legs (on by default where available). --doc false skips them."],
+      ["--blame", "Ownership enrichment (lastAuthor / lastCommitDate / churnCommits), same as cidx search --blame."],
     ],
     details: [
       "Editor is $VISUAL, then $EDITOR, then vi. Line positioning: +<line> for terminal editors",
@@ -999,6 +1028,7 @@ const COMMANDS: Record<string, CmdDoc> = {
       ["--mmr [bool]", "MMR diversification (on by default). --mmr false keeps pure relevance."],
       ["--max-chars <n>", "Character budget applied PER QUERY; results kept whole while they fit."],
       ["--doc [bool]", "Docstring retrieval legs (on by default where available). --doc false skips them."],
+      ["--blame", "Ownership enrichment (lastAuthor / lastCommitDate / churnCommits), applied per query; same as cidx search --blame."],
     ],
     details: ["Each argument is a separate query; quote multi-word queries. Duplicate queries are de-duped."],
     examples: [

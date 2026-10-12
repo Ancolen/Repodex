@@ -96,6 +96,15 @@ export const TOOL_DEFINITIONS: Tool[] = [
             "intent-style queries ('how do we retry with backoff?') surface the code chunk that has that doc. " +
             "Doc-matching results are marked with '[doc hit]'. Pass false to skip the doc legs.",
         },
+        blame: {
+          type: "boolean",
+          description:
+            "Ownership/blame enrichment (opt-in, default false). Pass true to stamp each result with " +
+            "lastAuthor / lastCommitDate (UTC date) / churnCommits — the most recent commit touching the " +
+            "chunk's line range, read fresh from git per search (one 'git blame --porcelain' per hit file, " +
+            "≤ 8 files; extras are reported as the blameSkipped envelope note). Off by default — it costs one " +
+            "git call per hit file.",
+        },
       },
       required: ["query"],
     },
@@ -151,6 +160,13 @@ export const TOOL_DEFINITIONS: Tool[] = [
         doc: {
           type: "boolean",
           description: "Docstring retrieval legs ON by default (same semantics as search_codebase's 'doc'); pass false to skip.",
+        },
+        blame: {
+          type: "boolean",
+          description:
+            "Ownership/blame enrichment (opt-in, default false; same semantics as search_codebase's 'blame'), " +
+            "applied per query. Each result is stamped with lastAuthor / lastCommitDate / churnCommits from one " +
+            "'git blame --porcelain' per hit file (≤ 8; extras reported as a per-group blameSkipped note).",
         },
       },
       required: ["queries"],

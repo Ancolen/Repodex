@@ -35,7 +35,9 @@ import { rerankScores } from "../services/rerank";
 import { selectMMR } from "../utils/mmr";
 import { applyCharBudget, applyPackBudget } from "../utils/budget";
 import { fileOutline, type OutlineEntry } from "../chunking/chunker";
-import { gitHeadPath, isGitRepo, searchGitLog } from "../services/git";
+import { gitHeadPath, isGitRepo, searchGitLog, blameRange } from "../services/git";
+// C4 — blame/ownership: the pure porcelain parser (git lives in services/git).
+import { parseGitBlamePorcelain, summarizeBlameRange, type BlameLineRecord } from "./blame";
 import { rrfMerge } from "../utils/rrf";
 import { wantIdTermsLeg } from "./idterms";
 import { deriveSignature, matchIdentifierLines } from "../utils/text";
@@ -107,6 +109,13 @@ import {
 
 const INDEX_JOB = "index";
 
+/**
+ * Per-search blame budget (proposal C4): at most this many hit files get ONE
+ * `git blame --porcelain` each; the rest are reported as `blameSkipped` so the
+ * worst-case search latency stays bounded (files kept whole in rank order).
+ */
+const BLAME_FILE_CAP = 8;
+
 export interface IndexJobPayload {
   target: IndexTarget;
   /** If true, the existing table+cache are cleared and indexed from scratch. */
@@ -124,12 +133,43 @@ export interface ScopedSearchResult extends SearchResult {
   contextBefore?: string[];
   /** N lines immediately after the chunk in the current file (if requested). */
   contextAfter?: string[];
+  /**
+   * Blame (opt-in, proposal C4): author of the most recent commit touching
+   * this chunk's line range — fresh from git, never from the (possibly stale)
+   * index. Absent when blame was not requested, the file is untracked and
+   * `git blame` failed for it.
+   */
+  lastAuthor?: string;
+  /** Blame: UTC calendar date (YYYY-MM-DD) of that commit's author time. */
+  lastCommitDate?: string;
+  /** Blame: distinct commits touching this chunk's lines (cap — see churnTruncated). */
+  churnCommits?: number;
+  /** Blame: more distinct commits than the cap touch this chunk's range. */
+  churnTruncated?: boolean;
 }
 
 /** One query's worth of batch-search results (`searchBatch`). */
 export interface BatchSearchGroup {
   query: string;
   results: ScopedSearchResult[];
+  /** Blame requested, but no hit file lives in a git working tree → nothing was stamped. */
+  blameNotARepo?: boolean;
+  /** Hit files whose blame was skipped by the per-search file cap (no silent caps). */
+  blameSkipped?: number;
+}
+
+/**
+ * The result list of one search plus its opt-in blame notes (proposal C4).
+ * The blame fields ride on the hits; these envelope notes carry what can't be
+ * said per-hit — the whole-list not-a-repo case and the honest file-cap count.
+ * They flow to the control-API JSON, the MCP `structuredContent` and the CLI.
+ */
+export interface SearchEnvelope {
+  results: ScopedSearchResult[];
+  /** `blame` was requested, but no hit file is in a git working tree → nothing was stamped. */
+  blameNotARepo?: boolean;
+  /** Hit files whose blame was skipped by the per-search file cap (no silent caps). */
+  blameSkipped?: number;
 }
 
 /** One assembled hit of a context pack: the search hit plus its file's shape and imports. */
@@ -207,6 +247,13 @@ export interface SearchOptions extends SearchFilters {
    * - true/undefined → include them when the columns exist (default on).
    */
   doc?: boolean | undefined;
+  /**
+   * Ownership/blame enrichment (opt-in, default false): stamp each final hit
+   * with `lastAuthor` / `lastCommitDate` / `churnCommits` — one
+   * `git blame --porcelain` per hit file (≤ BLAME_FILE_CAP, extras reported as
+   * `blameSkipped`). Off by default: it costs one git call per hit file.
+   */
+  blame?: boolean | undefined;
 }
 
 /** One occurrence of a symbol name found in the indexed code. */
@@ -381,6 +428,30 @@ function sanitize(name: string): string {
     .replace(/[^a-z0-9_]+/g, "_")
     .replace(/^_+|_+$/g, "");
   return s.length > 0 ? s : "idx";
+}
+
+/**
+ * The min..max line coverage of one file's hits — the single `-L` range ONE
+ * `git blame` for that file must cover so every hit's subrange sits inside it.
+ * Null when no hit carries usable line numbers.
+ */
+function hitLineBounds(group: readonly ScopedSearchResult[]): { start: number; end: number } | null {
+  let start = 0;
+  let end = 0;
+  for (const r of group) {
+    if (typeof r.startLine !== "number" || typeof r.endLine !== "number") continue;
+    if (r.startLine < 1 || r.endLine < 1) continue;
+    const lo = Math.min(r.startLine, r.endLine);
+    const hi = Math.max(r.startLine, r.endLine);
+    if (start === 0) {
+      start = lo;
+      end = hi;
+    } else {
+      start = Math.min(start, lo);
+      end = Math.max(end, hi);
+    }
+  }
+  return start > 0 ? { start, end } : null;
 }
 
 /**
@@ -814,7 +885,7 @@ export class IndexManager {
     query: string,
     limit = 5,
     opts?: SearchOptions,
-  ): Promise<ScopedSearchResult[]> {
+  ): Promise<SearchEnvelope> {
     const rec = this.registry.getIndex(name);
     if (!rec) throw this.indexNotFound(name);
     const mode = opts?.mode ?? "hybrid";
@@ -832,14 +903,17 @@ export class IndexManager {
     const refined = await this.refineAndSlice(rows, query, limit, mode, rerankOn, mmrOn);
     const scoped = refined.map((r) => this.scope(r, name, rec.lastIndexedAt));
     const enriched = await this.enrich(scoped, opts?.contextLines ?? 0);
-    return this.stripEmbeddings(applyCharBudget(enriched, opts?.maxChars));
+    return this.finishSearch(enriched, opts);
   }
 
   /** Search across all projects; results are merged and ranked. */
-  async searchAll(query: string, limit = 5, opts?: SearchOptions): Promise<ScopedSearchResult[]> {
+  async searchAll(query: string, limit = 5, opts?: SearchOptions): Promise<SearchEnvelope> {
     const mode = opts?.mode ?? "hybrid";
     const indexes = this.registry.listIndexes();
-    if (indexes.length === 0) return [];
+    if (indexes.length === 0) {
+      const env: SearchEnvelope = { results: [] };
+      return env;
+    }
     const rerankOn = this.wantRerank(opts);
     const mmrOn = this.wantMMR(opts);
     const fetchLimit = rerankOn || mmrOn ? Math.max(limit, CONFIG.RERANK_TOP_K, CONFIG.MMR_TOP_K) : limit;
@@ -864,7 +938,22 @@ export class IndexManager {
     const ranked = this.rankCombined(perTable.flat(), mode);
     const refined = await this.refineAndSlice(ranked, query, limit, mode, rerankOn, mmrOn);
     const enriched = await this.enrich(refined, opts?.contextLines ?? 0);
-    return this.stripEmbeddings(applyCharBudget(enriched, opts?.maxChars));
+    return this.finishSearch(enriched, opts);
+  }
+
+  /**
+   * The last mile shared by searchIndex/searchAll: the opt-in blame
+   * enrichment (BEFORE the char budget — its handful of small fields must not
+   * bill against the budget, and the budget keeps dropping whole hits on top
+   * of them), then the public payload boundary (no embedding columns), wrapped
+   * in the envelope that carries the blame notes.
+   */
+  private async finishSearch(rows: ScopedSearchResult[], opts?: SearchOptions): Promise<SearchEnvelope> {
+    const blame = opts?.blame === true ? await this.applyBlame(rows) : undefined;
+    const env: SearchEnvelope = { results: this.stripEmbeddings(applyCharBudget(rows, opts?.maxChars)) };
+    if (blame?.notARepo === true) env.blameNotARepo = true;
+    if (blame?.skipped !== undefined && blame.skipped > 0) env.blameSkipped = blame.skipped;
+    return env;
   }
 
   /**
@@ -883,10 +972,15 @@ export class IndexManager {
     if (uniq.length === 0) return [];
     return Promise.all(
       uniq.map(async (query) => {
-        const results = project
+        // Blame is inherited per query (each call stamps its own result group,
+        // and the group carries that query's envelope notes).
+        const env = project
           ? await this.searchIndex(project, query, limit, opts)
           : await this.searchAll(query, limit, opts);
-        return { query, results };
+        const group: BatchSearchGroup = { query, results: env.results };
+        if (env.blameNotARepo === true) group.blameNotARepo = true;
+        if (env.blameSkipped !== undefined) group.blameSkipped = env.blameSkipped;
+        return group;
       }),
     );
   }
@@ -933,7 +1027,10 @@ export class IndexManager {
     if (opts?.language !== undefined) searchOpts.language = opts.language;
     if (opts?.symbolType !== undefined) searchOpts.symbolType = opts.symbolType;
     if (opts?.pathGlob !== undefined) searchOpts.pathGlob = opts.pathGlob;
-    const results = project
+    // The inner search runs WITHOUT `maxChars` on purpose: the pack budget is
+    // applied once, below. Packs stay blame-free — their legs are already
+    // per-file, and the blame budget belongs to plain searches.
+    const { results } = project
       ? await this.searchIndex(project, query, limit, searchOpts)
       : await this.searchAll(query, limit, searchOpts);
 
@@ -1076,6 +1173,113 @@ export class IndexManager {
     } catch {
       // File missing/changed — skip context silently (still a valid result).
     }
+  }
+
+  // -------------------------------------------------- blame / ownership (C4)
+
+  /**
+   * Ownership / blame enrichment (proposal C4) — "who last changed this code,
+   * and when". Runs AFTER signature/context enrichment and BEFORE the char
+   * budget (see `finishSearch`); the data is fresh from git per search, the
+   * same way `contextLines` is fresh from disk — a stale index still reports
+   * the truth.
+   *
+   * Mechanics: the final hits are grouped by `filePath` in rank order, at most
+   * BLAME_FILE_CAP files are blamed, and ONE `git blame --porcelain -L min,max`
+   * per file covers every hit line range of that file (adjacent chunks share
+   * it). The porcelain output is parsed once by the pure `core/blame.ts`, then
+   * each hit is stamped from the records of its own line subrange.
+   *
+   * Guardrails: a not-a-repo territory probes the files' directories once and
+   * skips the git calls entirely (a single envelope note replaces all the
+   * fields); a per-file blame failure leaves THAT file's fields unset and
+   * never fails the search; files beyond the cap are returned as `skipped` —
+   * no silent caps.
+   */
+  private async applyBlame(
+    rows: ScopedSearchResult[],
+  ): Promise<{ notARepo?: boolean; skipped?: number }> {
+    // Group by file, in rank order (Map preserves first-seen order).
+    const byFile = new Map<string, ScopedSearchResult[]>();
+    for (const r of rows) {
+      if (!r.filePath) continue;
+      const group = byFile.get(r.filePath);
+      if (group) group.push(r);
+      else byFile.set(r.filePath, [r]);
+    }
+    if (byFile.size === 0) return {};
+    const files = [...byFile.keys()];
+    const taken = files.slice(0, BLAME_FILE_CAP);
+    const skipped = files.length - taken.length;
+
+    // One probe per file's directory: outside a git working tree there is
+    // nothing to blame. When NONE of the involved files is in a repo, the
+    // single envelope note replaces the fields (and no git call is made).
+    const repoByDir = new Map<string, boolean>();
+    let anyRepo = false;
+    for (const file of taken) {
+      const dir = path.dirname(file);
+      let inRepo = repoByDir.get(dir);
+      if (inRepo === undefined) {
+        inRepo = await isGitRepo(dir);
+        repoByDir.set(dir, inRepo);
+      }
+      if (inRepo) anyRepo = true;
+    }
+
+    if (anyRepo) {
+      // The file's own directory anchors its repo — multi-project searches
+      // (searchAll) blame each file in the repo it actually lives in. The
+      // ≤8 git calls run concurrently: a file's failure omits only its fields.
+      await Promise.all(
+        taken.map(async (file) => {
+          if (repoByDir.get(path.dirname(file)) !== true) return;
+          const group = byFile.get(file) ?? [];
+          const bounds = hitLineBounds(group);
+          if (!bounds) return;
+          const dir = path.dirname(file);
+          const raw = await blameRange(file, bounds.start, bounds.end, dir);
+          if (raw === null) return; // this file's fields stay unset; the search keeps its results
+          const records = parseGitBlamePorcelain(raw);
+          if (records.length === 0) return;
+          for (const r of group) {
+            this.stampBlame(r, records, bounds);
+          }
+        }),
+      );
+    }
+
+    if (!anyRepo) return { notARepo: true };
+    return skipped > 0 ? { skipped } : {};
+  }
+
+  /** Stamps one hit with the summary of its own line subrange of the file's blame. */
+  private stampBlame(
+    r: ScopedSearchResult,
+    records: BlameLineRecord[],
+    bounds: { start: number; end: number },
+  ): void {
+    let start = bounds.start;
+    let end = bounds.end;
+    if (
+      typeof r.startLine === "number" &&
+      typeof r.endLine === "number" &&
+      r.startLine > 0 &&
+      r.endLine > 0
+    ) {
+      start = Math.min(r.startLine, r.endLine);
+      end = Math.max(r.startLine, r.endLine);
+    }
+    // One blame record per line of the `-L` range, so the subrange is normally
+    // covered; if the line data somehow does not intersect it, the file-level
+    // summary degrades instead of leaving the group's other hits unenriched.
+    const sub = records.filter((rec) => rec.line >= start && rec.line <= end);
+    const summary = summarizeBlameRange(sub.length > 0 ? sub : records);
+    if (!summary) return;
+    if (summary.lastAuthor.length > 0) r.lastAuthor = summary.lastAuthor;
+    if (summary.lastCommitDate.length > 0) r.lastCommitDate = summary.lastCommitDate;
+    if (summary.distinctCommits > 0) r.churnCommits = summary.distinctCommits;
+    if (summary.distinctTruncated) r.churnTruncated = true;
   }
 
   /**
