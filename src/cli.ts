@@ -1019,8 +1019,11 @@ const COMMANDS: Record<string, CmdDoc> = {
   },
   reindex: {
     usage: "reindex <name>",
-    summary: "Reindexes the project FROM SCRATCH (table + cache are cleared and rebuilt).",
-    details: ["Use it when the embedding model changes or a full refresh is needed."],
+    summary: "Reindexes the project FROM SCRATCH (table + file cache are cleared and rebuilt).",
+    details: [
+      "Use it when the embedding model changes or a full refresh is needed.",
+      "The embedding cache is KEPT (keyed by content hash + model) — only content+model pairs never embedded before are re-embedded, so a reindex of unchanged files can legitimately finish in seconds on 100% cache hits.",
+    ],
   },
   sync: {
     usage: "sync <name>",
