@@ -33,6 +33,7 @@ import { modelTagPresent } from "../utils/model-tag";
 import { readProjectConfig } from "./project-config";
 import { rerankScores } from "../services/rerank";
 import { selectMMR } from "../utils/mmr";
+import { applyPathBoost, type PathBoostConfig } from "../utils/boost";
 import { applyCharBudget, applyPackBudget } from "../utils/budget";
 import { fileOutline, type OutlineEntry } from "../chunking/chunker";
 import { gitHeadPath, isGitRepo, searchGitLog, blameRange } from "../services/git";
@@ -234,6 +235,17 @@ export interface SearchOptions extends SearchFilters {
    */
   mmr?: boolean | undefined;
   /**
+   * Override the default path/surface boost for this call (proposal S3 — small
+   * multiplicative signals over RRF-merged results: short project-relative
+   * path, conventional source root, test/generated demotion).
+   * - true  → boost even if disabled in config.
+   * - false → skip boosting even if enabled in config; the ordering is then
+   *   byte-identical to a boost-free run.
+   * - undefined → use CONFIG.BOOST_ENABLED.
+   * Single-leg results (no RRF `_score`) are never touched either way.
+   */
+  boost?: boolean | undefined;
+  /**
    * If > 0, cap the returned results to an approximate character budget: results
    * are kept in ranked order (whole, never truncated mid-chunk) while they fit,
    * so a high `limit` can be used for recall without bloating the caller's
@@ -254,6 +266,20 @@ export interface SearchOptions extends SearchFilters {
    * `blameSkipped`). Off by default: it costs one git call per hit file.
    */
   blame?: boolean | undefined;
+}
+
+/**
+ * One table's search result: the rows plus whether they came out of an RRF
+ * merge. Distinguishing the two matters for the path/surface boost (S3): rows
+ * can carry a `_score` from EITHER source — an RRF merge writes its own rank-
+ * fused score, but a single-leg list passes the raw metric straight through
+ * (the LanceDB text leg surfaces native BM25 as `_score`, vector legs as
+ * `_distance`) — and the boost must never rescale a native metric.
+ */
+interface TableSearch {
+  rows: SearchResult[];
+  /** True when `rows` are RRF-merged (all of them carry a fused `_score`). */
+  rrfMerged: boolean;
 }
 
 /** One occurrence of a symbol name found in the indexed code. */
@@ -898,9 +924,15 @@ export class IndexManager {
       mode === "text" ? null : await cachedEmbed(query, projectModel, this.registry, (t) => getEmbedding(t, projectModel));
     const rerankOn = this.wantRerank(opts);
     const mmrOn = this.wantMMR(opts);
+    const boostOn = this.wantBoost(opts);
     const fetchLimit = rerankOn || mmrOn ? Math.max(limit, CONFIG.RERANK_TOP_K, CONFIG.MMR_TOP_K) : limit;
-    const rows = await this.searchOnTable(rec.tableName, query, vector, fetchLimit, opts);
-    const refined = await this.refineAndSlice(rows, query, limit, mode, rerankOn, mmrOn);
+    const { rows, rrfMerged } = await this.searchOnTable(rec.tableName, query, vector, fetchLimit, opts);
+    // Path/surface boost: after the RRF merge, BEFORE rerank/MMR — the boost
+    // adjusts relevance input only (rerank/MMR see the adjusted order). RRF-
+    // merged lists only: single-leg lists keep their native metric untouched
+    // (a text leg surfaces raw BM25 as `_score`, a vector leg `_distance`).
+    const boosted = boostOn && rrfMerged ? applyPathBoost(rows, this.pathBoostCfg(true), rec.path) : rows;
+    const refined = await this.refineAndSlice(boosted, query, limit, mode, rerankOn, mmrOn);
     const scoped = refined.map((r) => this.scope(r, name, rec.lastIndexedAt));
     const enriched = await this.enrich(scoped, opts?.contextLines ?? 0);
     return this.finishSearch(enriched, opts);
@@ -916,6 +948,8 @@ export class IndexManager {
     }
     const rerankOn = this.wantRerank(opts);
     const mmrOn = this.wantMMR(opts);
+    const boostOn = this.wantBoost(opts);
+    const boostCfg = this.pathBoostCfg(boostOn);
     const fetchLimit = rerankOn || mmrOn ? Math.max(limit, CONFIG.RERANK_TOP_K, CONFIG.MMR_TOP_K) : limit;
 
     const perTable = await Promise.all(
@@ -927,8 +961,12 @@ export class IndexManager {
           // different embedding spaces when models differ.
           const model = rec.embedModel ?? CONFIG.OLLAMA_MODEL;
           const vector = mode === "text" ? null : await cachedEmbed(query, model, this.registry, (t) => getEmbedding(t, model));
-          const rows = await this.searchOnTable(rec.tableName, query, vector, fetchLimit, opts);
-          return rows.map((r) => this.scope(r, rec.name, rec.lastIndexedAt));
+          const { rows, rrfMerged } = await this.searchOnTable(rec.tableName, query, vector, fetchLimit, opts);
+          // Boost per table (each row's factor comes from its own path), RRF-
+          // merged lists only: the boosted `_score` then drives the cross-table
+          // sort in rankCombined. Single-leg lists keep their native metric.
+          const adjusted = boostOn && rrfMerged ? applyPathBoost(rows, boostCfg, rec.path) : rows;
+          return adjusted.map((r) => this.scope(r, rec.name, rec.lastIndexedAt));
         } catch {
           return [] as ScopedSearchResult[];
         }
@@ -2179,19 +2217,19 @@ export class IndexManager {
     vector: number[] | null,
     limit: number,
     opts?: SearchOptions,
-  ): Promise<SearchResult[]> {
+  ): Promise<TableSearch> {
     const where = buildWhere(opts);
     const mode = opts?.mode ?? "hybrid";
     const wantDoc = opts?.doc !== false;
 
     if (mode === "vector") {
       const vec = await searchTable(table, vector!, limit, where);
-      if (!wantDoc) return vec;
+      if (!wantDoc) return { rows: vec, rrfMerged: false };
       return this.mergeWithExtraLegs(table, query, vector, where, limit, [vec], mode);
     }
     if (mode === "text") {
       const fts = await searchTableText(table, query, limit, where);
-      if (!wantDoc) return fts;
+      if (!wantDoc) return { rows: fts, rrfMerged: false };
       return this.mergeWithExtraLegs(table, query, vector, where, limit, [fts], mode);
     }
 
@@ -2205,14 +2243,20 @@ export class IndexManager {
     return this.mergeWithExtraLegs(table, query, vector, where, pool, [vec, fts], mode);
   }
 
-  /** Merges non-empty result lists: a single list keeps its native metric, multiple lists go through RRF. */
-  private combine(lists: SearchResult[][], fetchCount: number): SearchResult[] {
+  /**
+   * Merges non-empty result lists: a single list keeps its native metric, multiple
+   * lists go through RRF.
+   */
+  private combine(lists: SearchResult[][], fetchCount: number): TableSearch {
     const nonEmpty = lists.filter((l) => l.length > 0);
-    if (nonEmpty.length === 0) return [];
-    if (nonEmpty.length === 1) return nonEmpty[0]!.slice(0, fetchCount);
-    return rrfMerge(nonEmpty, (r) => String(r.id), 60)
-      .slice(0, fetchCount)
-      .map(({ item, score }) => ({ ...item, _score: score }));
+    if (nonEmpty.length === 0) return { rows: [], rrfMerged: false };
+    if (nonEmpty.length === 1) return { rows: nonEmpty[0]!.slice(0, fetchCount), rrfMerged: false };
+    return {
+      rows: rrfMerge(nonEmpty, (r) => String(r.id), 60)
+        .slice(0, fetchCount)
+        .map(({ item, score }) => ({ ...item, _score: score })),
+      rrfMerged: true,
+    };
   }
 
   /**
@@ -2243,7 +2287,7 @@ export class IndexManager {
     fetchCount: number,
     base: SearchResult[][],
     mode: string,
-  ): Promise<SearchResult[]> {
+  ): Promise<TableSearch> {
     const cols = await tableColumns(table);
     const docIds = new Set<string>();
     const lists = [...base];
@@ -2262,13 +2306,16 @@ export class IndexManager {
       if (hits.length > 0) lists.push(hits);
     }
     if (lists.length === base.length) return this.combine(base, fetchCount);
-    return rrfMerge(lists, (r) => String(r.id), 60)
-      .slice(0, fetchCount)
-      .map(({ item, score }) => {
-        const row: SearchResult = { ...item, _score: score };
-        if (docIds.has(String(row.id))) row._docHit = true;
-        return row;
-      });
+    return {
+      rows: rrfMerge(lists, (r) => String(r.id), 60)
+        .slice(0, fetchCount)
+        .map(({ item, score }) => {
+          const row: SearchResult = { ...item, _score: score };
+          if (docIds.has(String(row.id))) row._docHit = true;
+          return row;
+        }),
+      rrfMerged: true,
+    };
   }
 
   /** Sorts cross-project results by the metric appropriate for the mode. */
@@ -2302,6 +2349,30 @@ export class IndexManager {
   private wantMMR(opts?: SearchOptions): boolean {
     const flag = opts?.mmr;
     return flag === true || (CONFIG.MMR_ENABLED && flag !== false);
+  }
+
+  /** Is path/surface boosting active for this call? */
+  private wantBoost(opts?: SearchOptions): boolean {
+    const flag = opts?.boost;
+    return flag === true || (CONFIG.BOOST_ENABLED && flag !== false);
+  }
+
+  /**
+   * The `search.boost` parameters handed to the pure boost pass. `enabled`
+   * echoes the resolved call-level decision (`wantBoost`), so the pass runs
+   * exactly when the caller wants it — a config-off session boosted per-call
+   * (`boost: true`) uses the same weights, and anything skipped never reaches
+   * `applyPathBoost` at all (its input is returned byte-identical there too).
+   */
+  private pathBoostCfg(enabled: boolean): PathBoostConfig {
+    return {
+      enabled,
+      shortPath: CONFIG.BOOST_SHORT_PATH,
+      sourceRoot: CONFIG.BOOST_SOURCE_ROOT,
+      testDemotion: CONFIG.BOOST_TEST_DEMOTION,
+      generatedDemotion: CONFIG.BOOST_GENERATED_DEMOTION,
+      sourceRoots: CONFIG.BOOST_SOURCE_ROOTS,
+    };
   }
 
   /**

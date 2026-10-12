@@ -124,6 +124,74 @@ describe("config — defaults and environment variable overrides", () => {
     const ovr = await runConfig({ MAX_CHUNK_TOKENS: "128" });
     expect(ovr.CONFIG.MAX_CHUNK_TOKENS).toBe(128);
   });
+
+  test("boost defaults: on, with the S3 weights and the conventional source roots", async () => {
+    const { CONFIG } = await runConfig({});
+    expect(CONFIG.BOOST_ENABLED).toBe(true);
+    expect(CONFIG.BOOST_SHORT_PATH).toBe(0.1);
+    expect(CONFIG.BOOST_SOURCE_ROOT).toBe(0.05);
+    expect(CONFIG.BOOST_TEST_DEMOTION).toBe(0.85);
+    expect(CONFIG.BOOST_GENERATED_DEMOTION).toBe(0.8);
+    expect(CONFIG.BOOST_SOURCE_ROOTS).toEqual(["src", "lib", "app"]);
+  });
+
+  test("BOOST_* environment variables override the weights", async () => {
+    const { CONFIG } = await runConfig({
+      BOOST_SHORT_PATH: "0.2",
+      BOOST_SOURCE_ROOT: "0.01",
+      BOOST_TEST_DEMOTION: "0.5",
+      BOOST_GENERATED_DEMOTION: "0.9",
+    });
+    expect(CONFIG.BOOST_SHORT_PATH).toBe(0.2);
+    expect(CONFIG.BOOST_SOURCE_ROOT).toBe(0.01);
+    expect(CONFIG.BOOST_TEST_DEMOTION).toBe(0.5);
+    expect(CONFIG.BOOST_GENERATED_DEMOTION).toBe(0.9);
+  });
+
+  test("invalid / empty BOOST_* environment variables fall back to defaults", async () => {
+    const { CONFIG } = await runConfig({ BOOST_SHORT_PATH: "abc", BOOST_TEST_DEMOTION: "" });
+    expect(CONFIG.BOOST_SHORT_PATH).toBe(0.1);
+    expect(CONFIG.BOOST_TEST_DEMOTION).toBe(0.85);
+  });
+
+  test("search.boost YAML block: enabled and sourceRoots override, weights keep defaults", async () => {
+    const yamlPath = join(tmpdir(), `cidx-boost-${crypto.randomUUID()}.yml`);
+    writeFileSync(
+      yamlPath,
+      "search:\n  boost:\n    enabled: false\n    sourceRoots:\n      - pkg\n      - internal\n",
+    );
+    try {
+      const { CONFIG } = await runConfig({ CIDX_CONFIG: yamlPath });
+      expect(CONFIG.BOOST_ENABLED).toBe(false);
+      expect(CONFIG.BOOST_SOURCE_ROOTS).toEqual(["pkg", "internal"]);
+      expect(CONFIG.BOOST_SHORT_PATH).toBe(0.1);
+      expect(CONFIG.BOOST_TEST_DEMOTION).toBe(0.85);
+    } finally {
+      rmSync(yamlPath, { force: true });
+    }
+  });
+
+  test("a non-array search.boost.sourceRoots is dropped (default kept)", async () => {
+    const yamlPath = join(tmpdir(), `cidx-boost-bad-${crypto.randomUUID()}.yml`);
+    writeFileSync(yamlPath, "search:\n  boost:\n    sourceRoots: src\n");
+    try {
+      const { CONFIG } = await runConfig({ CIDX_CONFIG: yamlPath });
+      expect(CONFIG.BOOST_SOURCE_ROOTS).toEqual(["src", "lib", "app"]);
+    } finally {
+      rmSync(yamlPath, { force: true });
+    }
+  });
+
+  test("the generated config template carries the boost block with the defaults", () => {
+    expect(DEFAULT_CONFIG_YAML).toContain("  boost:");
+    expect(DEFAULT_CONFIG_YAML).toContain("shortPath: 0.1");
+    expect(DEFAULT_CONFIG_YAML).toContain("sourceRoot: 0.05");
+    expect(DEFAULT_CONFIG_YAML).toContain("testDemotion: 0.85");
+    expect(DEFAULT_CONFIG_YAML).toContain("generatedDemotion: 0.8");
+    expect(DEFAULT_CONFIG_YAML).toContain('- "src"');
+    expect(DEFAULT_CONFIG_YAML).toContain('- "lib"');
+    expect(DEFAULT_CONFIG_YAML).toContain('- "app"');
+  });
 });
 
 describe("config — legacy ~/.mcp-indexer → ~/.cidx migration", () => {

@@ -110,6 +110,24 @@ export interface IndexerConfig {
       /** How many of the top candidates to diversify over before slicing to the requested `limit`. */
       topK: number;
     };
+    boost: {
+      /**
+       * If true, path/surface signals nudge RRF-merged search results by default
+       * (per-call override via the search API). Pure re-scoring — no index change,
+       * no reindex, no backend call; single-leg results are never touched.
+       */
+      enabled: boolean;
+      /** Max multiplicative bonus for a short project-relative path (fades in on a log scale). */
+      shortPath: number;
+      /** Multiplicative bonus when a path starts with a conventional source root. */
+      sourceRoot: number;
+      /** Multiplicative demotion for test files (`isTestFile` patterns). */
+      testDemotion: number;
+      /** Multiplicative demotion for generated/artifact paths (gen|dist|build|vendor|node_modules segments, .pb.go, .min.*). */
+      generatedDemotion: number;
+      /** Directories that count as conventional source roots (project-relative). */
+      sourceRoots: string[];
+    };
   };
   /** Doc–code conformance checker (proposal D1) — deterministic, no LLM. */
   doccheck: {
@@ -170,6 +188,14 @@ const DEFAULTS: IndexerConfig = {
   search: {
     rerank: { enabled: true, model: "qwen3-reranker-q8", topK: 20, concurrency: 4, numCtx: 1024, url: "" },
     mmr: { enabled: true, lambda: 0.5, topK: 20 },
+    boost: {
+      enabled: true,
+      shortPath: 0.1,
+      sourceRoot: 0.05,
+      testDemotion: 0.85,
+      generatedDemotion: 0.8,
+      sourceRoots: ["src", "lib", "app"],
+    },
   },
   doccheck: { maxChars: 12000, undocumentedLimit: 25 },
 };
@@ -224,6 +250,14 @@ search:
     enabled: true              # diversify the top results (Maximal Marginal Relevance)
     lambda: 0.5                # 1.0 = pure relevance, 0.0 = pure diversity
     topK: 20                   # how many candidates to diversify over before slicing to limit
+  boost:
+    enabled: ${DEFAULTS.search.boost.enabled}              # nudge RRF-merged results by path/surface signals (single-leg results untouched)
+    shortPath: ${DEFAULTS.search.boost.shortPath}             # max bonus for short project-relative paths (fades in with the log of the path length)
+    sourceRoot: ${DEFAULTS.search.boost.sourceRoot}           # bonus when a path starts with a conventional source root
+    testDemotion: ${DEFAULTS.search.boost.testDemotion}         # demotion multiplier for test files
+    generatedDemotion: ${DEFAULTS.search.boost.generatedDemotion}     # demotion multiplier for generated/artifact paths (gen/dist/build/vendor/node_modules, .pb.go, .min.*)
+    sourceRoots:              # directories that count as conventional source roots
+${DEFAULTS.search.boost.sourceRoots.map((d) => `      - "${d}"`).join("\n")}
 
 doccheck:
   maxChars: ${DEFAULTS.doccheck.maxChars}          # per-call char budget over the rendered findings (kept whole)
@@ -399,6 +433,25 @@ export const RESOLVED: IndexerConfig = {
       lambda: num(process.env.MMR_LAMBDA) ?? y.search?.mmr?.lambda ?? DEFAULTS.search.mmr.lambda,
       topK: num(process.env.MMR_TOP_K) ?? y.search?.mmr?.topK ?? DEFAULTS.search.mmr.topK,
     },
+    boost: {
+      enabled:
+        typeof y.search?.boost?.enabled === "boolean"
+          ? y.search.boost.enabled
+          : DEFAULTS.search.boost.enabled,
+      shortPath:
+        num(process.env.BOOST_SHORT_PATH) ?? y.search?.boost?.shortPath ?? DEFAULTS.search.boost.shortPath,
+      sourceRoot:
+        num(process.env.BOOST_SOURCE_ROOT) ?? y.search?.boost?.sourceRoot ?? DEFAULTS.search.boost.sourceRoot,
+      testDemotion:
+        num(process.env.BOOST_TEST_DEMOTION) ??
+        y.search?.boost?.testDemotion ??
+        DEFAULTS.search.boost.testDemotion,
+      generatedDemotion:
+        num(process.env.BOOST_GENERATED_DEMOTION) ??
+        y.search?.boost?.generatedDemotion ??
+        DEFAULTS.search.boost.generatedDemotion,
+      sourceRoots: strArray(y.search?.boost?.sourceRoots) ?? DEFAULTS.search.boost.sourceRoots,
+    },
   },
   doccheck: {
     maxChars: num(process.env.DOC_CHECK_MAX_CHARS) ?? y.doccheck?.maxChars ?? DEFAULTS.doccheck.maxChars,
@@ -450,6 +503,13 @@ export const CONFIG = {
   MMR_ENABLED: RESOLVED.search.mmr.enabled,
   MMR_LAMBDA: RESOLVED.search.mmr.lambda,
   MMR_TOP_K: RESOLVED.search.mmr.topK,
+
+  BOOST_ENABLED: RESOLVED.search.boost.enabled,
+  BOOST_SHORT_PATH: RESOLVED.search.boost.shortPath,
+  BOOST_SOURCE_ROOT: RESOLVED.search.boost.sourceRoot,
+  BOOST_TEST_DEMOTION: RESOLVED.search.boost.testDemotion,
+  BOOST_GENERATED_DEMOTION: RESOLVED.search.boost.generatedDemotion,
+  BOOST_SOURCE_ROOTS: RESOLVED.search.boost.sourceRoots,
 
   DOC_CHECK_MAX_CHARS: RESOLVED.doccheck.maxChars,
   DOC_CHECK_UNDOCUMENTED: RESOLVED.doccheck.undocumentedLimit,

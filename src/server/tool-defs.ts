@@ -81,6 +81,15 @@ export const TOOL_DEFINITIONS: Tool[] = [
             "chunks (e.g. copies of the same function) so you see distinct relevant code. Pass false to " +
             "keep a pure relevance order.",
         },
+        boost: {
+          type: "boolean",
+          description:
+            "Path/surface boost is ON by default: RRF-merged results get small multiplicative nudges — " +
+            "short project-relative paths and conventional source roots (src/lib/app) score a little " +
+            "higher, test and generated/artifact paths (build/dist/gen/vendor, .pb.go, .min.*) a little " +
+            "lower. Applies to RRF-merged lists only; single-leg results are untouched. Pass false for " +
+            "a pure-RRF relevance order.",
+        },
         maxChars: {
           type: "number",
           description:
@@ -153,6 +162,12 @@ export const TOOL_DEFINITIONS: Tool[] = [
         },
         rerank: { type: "boolean", description: "Second-stage reranker ON by default; pass false to skip." },
         mmr: { type: "boolean", description: "MMR diversification ON by default; pass false to keep pure relevance." },
+        boost: {
+          type: "boolean",
+          description:
+            "Path/surface boost ON by default (short paths / source roots up, test & generated paths down, " +
+            "small multiplicative factors on RRF-merged results); pass false for a pure-RRF order.",
+        },
         maxChars: {
           type: "number",
           description: "Optional character budget applied PER QUERY; results kept whole while they fit.",
