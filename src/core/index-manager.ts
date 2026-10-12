@@ -14,7 +14,12 @@ import type { EmbedCacheStats } from "./registry";
 export type { QueryLogStats, QueryLogStatsOpts, EmbedCacheStats } from "./registry";
 import type { JobQueue } from "./job-queue";
 import type { Job } from "./types";
-import { INDEX_JOB_TYPE, MIGRATE_JOB_TYPE, type MigrateJobPayload } from "./types";
+import {
+  INDEX_JOB_TYPE,
+  JOB_PRIORITY_BACKGROUND,
+  MIGRATE_JOB_TYPE,
+  type MigrateJobPayload,
+} from "./types";
 // Per-model embedding task framing: the pure resolution + the prefix helpers.
 import { resolveFraming, frameQuery } from "./framing";
 import {
@@ -3484,7 +3489,13 @@ export class IndexManager {
             ? `[manager] '${rec.name}' .cidx.json embedModel changed (${rec.embedModel} → ${pcfgModel}); resuming as a migration.`
             : `[manager] '${rec.name}' embedding framing changed (${rec.framing ?? "none"} → ${intendedFraming ?? "none"}); resuming as a migration.`,
         );
-        this.startMigration(rec, modelChanged ? pcfgModel : (rec.embedModel ?? CONFIG.OLLAMA_MODEL));
+        // Boot-time catch-up runs at BACKGROUND priority: it must not starve a
+        // job the user just clicked (see JOB_PRIORITY_BACKGROUND).
+        this.startMigration(
+          rec,
+          modelChanged ? pcfgModel : (rec.embedModel ?? CONFIG.OLLAMA_MODEL),
+          JOB_PRIORITY_BACKGROUND,
+        );
         continue;
       }
       // Both half-finished ('indexing') and 'ready' projects are incrementally
@@ -3494,11 +3505,11 @@ export class IndexManager {
       if (rec.status === "indexing") {
         console.error(`[manager] '${rec.name}' was half-finished, resuming indexing.`);
         this.registry.setIndexStatus(rec.name, "indexing");
-        this.enqueueIndex(target, false);
+        this.enqueueIndex(target, false, JOB_PRIORITY_BACKGROUND);
       } else if (rec.status === "ready") {
         console.error(`[manager] '${rec.name}' is syncing at startup (offline changes).`);
         this.registry.setIndexStatus(rec.name, "indexing");
-        this.enqueueIndex(target, false);
+        this.enqueueIndex(target, false, JOB_PRIORITY_BACKGROUND);
       }
       // 'error' projects are left untouched; the user can reindex/sync them.
     }
@@ -3583,8 +3594,9 @@ export class IndexManager {
    * complete. The payload's framing is resolved from the effective setting
    * under the TARGET model — a model change moves the preset with it, a
    * framing-only change keeps the record's model and applies the new setting.
+   * Escalations raised at boot-time restore pass `JOB_PRIORITY_BACKGROUND`.
    */
-  private startMigration(rec: IndexRecord, targetModel: string): IndexRecord {
+  private startMigration(rec: IndexRecord, targetModel: string, priority = 0): IndexRecord {
     const target: IndexTarget = {
       indexName: rec.name,
       tableName: tableNameFor(rec),
@@ -3595,16 +3607,25 @@ export class IndexManager {
     // mismatch rules already suppress its writes until the swap pins both.
     this.ensureWatcher(target);
     const setting = readProjectConfig(rec.path)?.framing ?? CONFIG.EMBEDDING_FRAMING;
-    this.enqueueMigrate(rec, targetModel, resolveFraming(setting, targetModel));
+    this.enqueueMigrate(rec, targetModel, resolveFraming(setting, targetModel), priority);
     return this.registry.getIndex(rec.name)!;
   }
 
-  private enqueueMigrate(rec: IndexRecord, targetModel: string, framing: string | null): void {
-    const id = this.jobQueue.enqueue<MigrateJobPayload>(MIGRATE_JOB, {
-      project: rec.name,
-      targetModel,
-      framing,
-    });
+  private enqueueMigrate(
+    rec: IndexRecord,
+    targetModel: string,
+    framing: string | null,
+    priority = 0,
+  ): void {
+    const id = this.jobQueue.enqueue<MigrateJobPayload>(
+      MIGRATE_JOB,
+      {
+        project: rec.name,
+        targetModel,
+        framing,
+      },
+      priority,
+    );
     // jobByIndex drives isIndexing (watcher deferral), progress and removal —
     // a running migration counts exactly like a running index job.
     this.jobByIndex.set(rec.name, id);
@@ -3903,8 +3924,8 @@ export class IndexManager {
     }
   }
 
-  private enqueueIndex(target: IndexTarget, fresh: boolean): void {
-    const id = this.jobQueue.enqueue<IndexJobPayload>(INDEX_JOB, { target, fresh });
+  private enqueueIndex(target: IndexTarget, fresh: boolean, priority = 0): void {
+    const id = this.jobQueue.enqueue<IndexJobPayload>(INDEX_JOB, { target, fresh }, priority);
     this.jobByIndex.set(target.indexName, id);
   }
 

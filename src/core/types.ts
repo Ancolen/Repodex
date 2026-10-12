@@ -17,6 +17,12 @@ export interface Job<TPayload = unknown, TResult = unknown> {
   type: string;
   status: JobStatus;
   payload: TPayload;
+  /**
+   * Queue priority: HIGHER values are claimed first by the worker pool; jobs of
+   * equal priority keep enqueue (FIFO) order. Default 0 — every user-initiated
+   * job (index/reindex/sync via CLI, Control API or MCP) runs at 0.
+   */
+  priority: number;
   progress: JobProgress;
   result?: TResult;
   error?: string;
@@ -45,6 +51,15 @@ export type JobHandler<TPayload = unknown, TResult = unknown> = (
 
 /** The async indexing job: (re)index the project's table from the working tree. */
 export const INDEX_JOB_TYPE = "index";
+
+/**
+ * Queue priority of jobs the daemon enqueues BY ITSELF at boot (restore()):
+ * offline-change catch-up and half-finished-project resumes. They must not
+ * starve a job the user just clicked — an interactive index job at the default
+ * priority 0 is claimed before any background catch-up still waiting in
+ * (or re-added to) the queue.
+ */
+export const JOB_PRIORITY_BACKGROUND = -5;
 
 /** The zero-downtime model migration job (proposal O2): rebuild every vector of the
  * project's current table in a shadow table with `targetModel` and swap the

@@ -24,7 +24,10 @@ const PROGRESS_PERSIST_MS = 1000;
  *
  * - New job types are added with registerHandler(type, fn).
  * - enqueue() puts the job in the queue and returns IMMEDIATELY (doesn't block
- *   the server).
+ *   the server). The optional `priority` orders the claim: higher values are
+ *   claimed first, enqueue (FIFO) order holds within the same priority.
+ *   User-initiated jobs stay at the default 0; `JOB_PRIORITY_BACKGROUND` (-5)
+ *   marks boot-time restore() catch-up so it never starves an interactive job.
  * - Jobs are dispatched by `pump()`, at most `concurrency` at a time; since the
  *   event loop is free while waiting for I/O, searches/requests continue
  *   uninterrupted.
@@ -55,8 +58,12 @@ export class JobQueue extends EventEmitter {
     return this.handlers.has(type);
   }
 
-  /** Enqueues the job, returns the job id. The caller does not wait. */
-  enqueue<TPayload>(type: string, payload: TPayload): string {
+  /**
+   * Enqueues the job, returns the job id. The caller does not wait.
+   * `priority` (default 0) orders the claim: higher values run first, enqueue
+   * order is kept within the same priority.
+   */
+  enqueue<TPayload>(type: string, payload: TPayload, priority = 0): string {
     if (!this.handlers.has(type)) {
       throw new Error(`Unknown job type: ${type}`);
     }
@@ -65,6 +72,7 @@ export class JobQueue extends EventEmitter {
       type,
       status: "queued",
       payload,
+      priority,
       progress: { processed: 0, total: 0 },
       createdAt: Date.now(),
     };
@@ -150,8 +158,8 @@ export class JobQueue extends EventEmitter {
    */
   private pump(): void {
     while (this.activeWorkers < this.maxWorkers && this.queue.length > 0) {
-      const id = this.queue.shift();
-      if (!id) continue;
+      const id = this.claimNext();
+      if (id === undefined) continue;
       const job = this.jobs.get(id);
       if (!job || job.status !== "queued") continue;
       this.activeWorkers++;
@@ -160,6 +168,33 @@ export class JobQueue extends EventEmitter {
         this.pump();
       });
     }
+  }
+
+  /**
+   * Removes and returns the ENQUEUED job to claim next: priority DESC first,
+   * then the enqueue (FIFO) order within the same priority. In one pass the
+   * scan drops ids whose job is gone or no longer queued (the old shift() loop
+   * skipped the same entries) and keeps the best candidate — STRONGLY-higher
+   * priority only replaces the incumbent, so equal priorities stay in queue
+   * (push) order.
+   */
+  private claimNext(): string | undefined {
+    let best = -1;
+    let bestPriority = -Infinity;
+    const kept: string[] = [];
+    for (const id of this.queue) {
+      const j = this.jobs.get(id);
+      if (j === undefined || j.status !== "queued") continue;
+      if (j.priority > bestPriority) {
+        bestPriority = j.priority;
+        best = kept.length;
+      }
+      kept.push(id);
+    }
+    this.queue = kept;
+    if (best === -1) return undefined;
+    const [id] = this.queue.splice(best, 1);
+    return id;
   }
 
   private async run(job: Job): Promise<void> {
@@ -238,6 +273,7 @@ export class JobQueue extends EventEmitter {
       id: job.id,
       type: job.type,
       status: job.status,
+      priority: job.priority,
       payload: job.payload === undefined ? null : JSON.stringify(job.payload),
       progressProcessed: job.progress.processed,
       progressTotal: job.progress.total,
