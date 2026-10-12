@@ -2,6 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
+import type { FramingSetting } from "./core/framing";
 
 /**
  * Configuration layer.
@@ -48,6 +49,14 @@ export interface IndexerConfig {
     provider: EmbedProviderSetting;
     /** Base URL of a `llama-server` process (OpenAI-compatible endpoints). */
     llamacppUrl: string;
+    /**
+     * Default embedding task-framing setting (per-model framing layer): "none"
+     * sends every text exactly as before; "auto" applies the per-model preset
+     * for the record's embedding model (unknown models stay unframed). A
+     * per-project `.cidx.json` `framing` overrides it; the resolved identity is
+     * pinned per record and a framing change escalates like a model change.
+     */
+    framing: FramingSetting;
   };
   indexing: {
     maxChunkSize: number;
@@ -167,7 +176,8 @@ const DEFAULTS: IndexerConfig = {
     concurrency: 4,
     numCtx: 1024,
   },
-  embedding: { cacheMax: 50000, provider: "auto", llamacppUrl: "http://127.0.0.1:8080" },
+  // framing stays "none": existing installs embed byte-identically; "auto" is opt-in.
+  embedding: { cacheMax: 50000, provider: "auto", llamacppUrl: "http://127.0.0.1:8080", framing: "none" },
   indexing: {
     maxChunkSize: 1500,
     overlapSize: 200,
@@ -240,6 +250,7 @@ embedding:
   cacheMax: ${DEFAULTS.embedding.cacheMax}       # max records in the content-hash embedding cache
   provider: ${DEFAULTS.embedding.provider}       # auto | ollama | llamacpp; auto = an Ollama that has the model wins, else a live llama-server
   llamacppUrl: ${DEFAULTS.embedding.llamacppUrl}  # base URL of llama-server; start it: llama-server -m <model.gguf> -a <model> --ctx-size <numCtx> --embedding
+  framing: ${DEFAULTS.embedding.framing}               # none | auto; auto = per-model task prefixes (EmbeddingGemma 2 docs/queries, qwen3 query instruction); unknown models stay unframed; a change re-embeds via migration
 
 indexing:
   maxChunkSize: ${DEFAULTS.indexing.maxChunkSize}
@@ -400,6 +411,12 @@ export const RESOLVED: IndexerConfig = {
       return "auto" as const;
     })(),
     llamacppUrl: process.env.LLAMACPP_URL ?? y.embedding?.llamacppUrl ?? DEFAULTS.embedding.llamacppUrl,
+    framing: (() => {
+      const raw = process.env.EMBEDDING_FRAMING ?? y.embedding?.framing ?? DEFAULTS.embedding.framing;
+      if (raw === "none" || raw === "auto") return raw;
+      console.error(`[config] embedding.framing: '${raw}' is not one of none/auto — using 'none'`);
+      return "none" as const;
+    })(),
   },
   indexing: {
     maxChunkSize: y.indexing?.maxChunkSize ?? DEFAULTS.indexing.maxChunkSize,
@@ -510,6 +527,7 @@ export const CONFIG = {
   EMBED_CACHE_MAX: RESOLVED.embedding.cacheMax,
   EMBED_PROVIDER: RESOLVED.embedding.provider,
   LLAMACPP_URL: RESOLVED.embedding.llamacppUrl,
+  EMBEDDING_FRAMING: RESOLVED.embedding.framing,
 
   ALLOWED_EXTENSIONS: RESOLVED.indexing.allowedExtensions,
   GLOBAL_IGNORED_DIRS: RESOLVED.indexing.ignoredDirs,

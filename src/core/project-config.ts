@@ -2,6 +2,7 @@ import path from "node:path";
 import { readFileSync } from "node:fs";
 import { EXT_TO_GRAMMAR } from "../chunking/tree-sitter";
 import { TEXT_LANG_BY_EXT } from "../chunking/chunker";
+import type { FramingSetting } from "./framing";
 
 /**
  * Per-project configuration, read from an optional `.cidx.json` at the project
@@ -12,14 +13,15 @@ import { TEXT_LANG_BY_EXT } from "../chunking/chunker";
  *   "languages":   ["typescript", "python"],  // allowlist of language labels
  *   "ignore":      ["vendor/**", "*.gen.ts"], // extra ignore patterns
  *   "embedModel":  "qwen3-embedding:8b-q8_0", // per-project embedding model
+ *   "framing":     "auto",                    // embedding task framing: none | auto
  *   "doccheck":    { "files": ["docs/**"], "ignore": ["drafts/**"] }
  * }
  *
  * Applied at index time (full index/sync and watcher writes). Changes only take
  * effect after a reindex — except `languages`/`ignore`, which the incremental
- * sync also picks up through the deleted-file cleanup, and `embedModel`, which
- * triggers a full reindex automatically (vectors from two models can never
- * share a table).
+ * sync also picks up through the deleted-file cleanup, and `embedModel`/
+ * `framing`, which escalate through the zero-downtime migration automatically
+ * (vectors from two models — or two framings — can never share a table).
  */
 
 export interface ProjectConfig {
@@ -29,6 +31,14 @@ export interface ProjectConfig {
   ignore?: string[];
   /** Per-project embedding model override (Ollama tag). */
   embedModel?: string;
+  /**
+   * Per-project embedding task-framing setting (`src/core/framing.ts`): "none"
+   * embeds everything exactly as before; "auto" applies the per-model preset
+   * for the project's embedding model. Absent → the global
+   * `embedding.framing` default. The resolved identity is pinned into
+   * `IndexRecord.framing` at createIndex.
+   */
+  framing?: FramingSetting;
   /**
    * Per-project `doccheck` block (proposal D1): narrows which documentation
    * files the doc–code conformance checker looks at. It never changes what is
@@ -80,6 +90,14 @@ export function parseProjectConfig(raw: unknown, source: string): ProjectConfig 
       valid = true;
     } else {
       console.error(`[project-config] '${source}': 'embedModel' must be a non-empty string; skipping it.`);
+    }
+  }
+  if (obj.framing !== undefined) {
+    if (obj.framing === "none" || obj.framing === "auto") {
+      out.framing = obj.framing;
+      valid = true;
+    } else {
+      console.error(`[project-config] '${source}': 'framing' must be "none" or "auto"; skipping it.`);
     }
   }
   if (obj.doccheck !== undefined) {

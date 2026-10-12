@@ -3,6 +3,7 @@ import path from "node:path";
 import { CONFIG } from "../config";
 import { buildIgnore, isPathIgnored, indexFile, removeFileIndex, type IndexTarget } from "./indexer";
 import { readProjectConfig, extToLanguage, languageAllowSet } from "../core/project-config";
+import { resolveFraming } from "../core/framing";
 import { tableNameFor } from "../core/registry";
 import type { Registry } from "../core/registry";
 
@@ -88,8 +89,29 @@ export function startWatcher(target: IndexTarget, opts: WatchOptions = {}): FSWa
         );
         return;
       }
+      // A framing divergence — a per-project `.cidx.json` `framing` edit OR a
+      // changed global `embedding.framing` default resolving differently from
+      // the record's pin — must not mix framed and unframed vectors either:
+      // skip writes until the next sync migrates/reindexes the project
+      // (exactly the model-mismatch rule above). Unlike that rule this is not
+      // gated on the override being present: a global-default change must not
+      // silently write framed vectors into an unframed table.
+      const intendedFraming = resolveFraming(
+        pcfg?.framing ?? CONFIG.EMBEDDING_FRAMING,
+        pcfg?.embedModel ?? rec?.embedModel ?? CONFIG.OLLAMA_MODEL,
+      );
+      if (rec && intendedFraming !== (rec.framing ?? null)) {
+        console.error(
+          `[watcher] '${target.indexName}' embedding framing changed (${rec.framing ?? "none"} → ` +
+            `${intendedFraming ?? "none"}); skipping '${filePath}'. Sync to re-apply.`,
+        );
+        return;
+      }
       if (action === "index") {
-        await indexFile(targetNow(rec), filePath, opts.registry, undefined, pcfg?.embedModel);
+        // Framing: the RECORD's pin — here it always equals the intended value
+        // (the check above just skipped any divergence), and the pin is what
+        // the table's vectors were framed with.
+        await indexFile(targetNow(rec), filePath, opts.registry, undefined, pcfg?.embedModel, rec?.framing ?? null);
       } else {
         await removeFileIndex(targetNow(rec), filePath, opts.registry);
       }

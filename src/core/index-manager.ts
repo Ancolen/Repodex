@@ -14,6 +14,8 @@ export type { QueryLogStats, QueryLogStatsOpts } from "./registry";
 import type { JobQueue } from "./job-queue";
 import type { Job } from "./types";
 import { INDEX_JOB_TYPE, MIGRATE_JOB_TYPE, type MigrateJobPayload } from "./types";
+// Per-model embedding task framing: the pure resolution + the prefix helpers.
+import { resolveFraming, frameQuery } from "./framing";
 import {
   indexDirectory,
   migrateTable,
@@ -775,6 +777,7 @@ export class IndexManager {
 
     const tableName = this.uniqueTableName(name);
     const now = Date.now();
+    const pcfg = readProjectConfig(baseDir);
     this.registry.upsertIndex({
       name,
       path: baseDir,
@@ -784,7 +787,12 @@ export class IndexManager {
       chunkCount: 0,
       // A per-project model override (.cidx.json `embedModel`) wins over the
       // global config; the record pins the model the table is built with.
-      embedModel: readProjectConfig(baseDir)?.embedModel ?? CONFIG.OLLAMA_MODEL,
+      embedModel: pcfg?.embedModel ?? CONFIG.OLLAMA_MODEL,
+      // The resolved embedding task framing, pinned exactly like the model:
+      // the per-project `.cidx.json` `framing` setting wins over the global
+      // `embedding.framing` default, resolved under the record model ("auto"
+      // applies the per-model preset; every other resolution is null/unframed).
+      framing: resolveFraming(pcfg?.framing ?? CONFIG.EMBEDDING_FRAMING, pcfg?.embedModel ?? CONFIG.OLLAMA_MODEL),
       embedDim: null,
       lastIndexedAt: null,
       createdAt: now,
@@ -834,13 +842,35 @@ export class IndexManager {
     // zero-downtime migration: every vector is rebuilt in a shadow table with
     // the new model while search keeps serving the current one, and the
     // registry only flips once the shadow is complete.
-    const pcfgModel = readProjectConfig(rec.path)?.embedModel;
+    const pcfg = readProjectConfig(rec.path);
+    const pcfgModel = pcfg?.embedModel;
     if (pcfgModel && rec.embedModel && pcfgModel !== rec.embedModel) {
       console.error(
         `[manager] '${name}' .cidx.json embedModel changed (${rec.embedModel} → ${pcfgModel}); ` +
           `migrating to a shadow table (search keeps serving the current one until the swap).`,
       );
       return this.startMigration(rec, pcfgModel);
+    }
+
+    // A framing change (per-project `.cidx.json` `framing`, or the global
+    // `embedding.framing` default moving under the record's pin) escalates to
+    // the SAME migration: framed queries against unframed documents — or the
+    // reverse — would silently degrade retrieval, so a pin that no longer
+    // describes the intended framing is rebuilt in a shadow table embedded
+    // with the target framing (framing is carried on the migrate payload). Not
+    // gated on an override being present, unlike the model check: the global
+    // default participates in the pin, and "none"-resolved legacy pins stay
+    // equal to the default → no escalation, no forced reindex.
+    const intendedFraming = resolveFraming(
+      pcfg?.framing ?? CONFIG.EMBEDDING_FRAMING,
+      pcfgModel ?? rec.embedModel ?? CONFIG.OLLAMA_MODEL,
+    );
+    if (intendedFraming !== (rec.framing ?? null)) {
+      console.error(
+        `[manager] '${name}' embedding framing changed (${rec.framing ?? "none"} → ${intendedFraming ?? "none"}); ` +
+          `migrating to a shadow table (search keeps serving the current one until the swap).`,
+      );
+      return this.startMigration(rec, rec.embedModel ?? CONFIG.OLLAMA_MODEL);
     }
 
     this.registry.setIndexStatus(name, "indexing");
@@ -955,10 +985,14 @@ export class IndexManager {
     // The query is embedded with the model the table was built with (the record
     // pins it — global config or a .cidx.json per-project override), so vectors
     // are always comparable. A legacy record without a model falls back to the
-    // global config.
+    // global config. The query is framed with the RECORD's framing (per-model
+    // framing layer) before the embed call — the cache keys on the framed text,
+    // per record exactly like the model pin. Everything else about the query
+    // (BM25 legs, the query log, the reranker prompt) uses the raw text.
     const projectModel = rec.embedModel ?? CONFIG.OLLAMA_MODEL;
+    const framedQuery = frameQuery(query, rec.framing);
     const vector =
-      mode === "text" ? null : await cachedEmbed(query, projectModel, this.registry, (t) => getEmbedding(t, projectModel));
+      mode === "text" ? null : await cachedEmbed(framedQuery, projectModel, this.registry, (t) => getEmbedding(t, projectModel));
     const rerankOn = this.wantRerank(opts);
     const mmrOn = this.wantMMR(opts);
     const boostOn = this.wantBoost(opts);
@@ -998,11 +1032,13 @@ export class IndexManager {
       indexes.map(async (rec) => {
         try {
           // Each table is queried with a vector embedded by the model the table
-          // was built with (per-project overrides make models differ between
-          // projects). Caveat: cross-project ranking mixes distances from
-          // different embedding spaces when models differ.
+          // was built with and framed with the table's own framing (per-record
+          // pins make models — and framings — differ between projects).
+          // Caveat: cross-project ranking mixes distances from different
+          // embedding spaces when models differ.
           const model = rec.embedModel ?? CONFIG.OLLAMA_MODEL;
-          const vector = mode === "text" ? null : await cachedEmbed(query, model, this.registry, (t) => getEmbedding(t, model));
+          const framedQuery = frameQuery(query, rec.framing);
+          const vector = mode === "text" ? null : await cachedEmbed(framedQuery, model, this.registry, (t) => getEmbedding(t, model));
           const { rows, rrfMerged } = await this.searchOnTable(rec.tableName, query, vector, fetchLimit, opts);
           // Boost per table (each row's factor comes from its own path), RRF-
           // merged lists only: the boosted `_score` then drives the cross-table
@@ -2790,13 +2826,24 @@ export class IndexManager {
       // O2 migration instead — the same rule `syncIndex` applies live. This
       // covers both a migrate job that was interrupted mid-build (the stale
       // shadow is pre-cleaned) and a .cidx.json edited while the daemon was down.
-      const pcfgModel = readProjectConfig(rec.path)?.embedModel;
+      const pcfg = readProjectConfig(rec.path);
+      const pcfgModel = pcfg?.embedModel;
       const modelChanged = !!(pcfgModel && rec.embedModel && pcfgModel !== rec.embedModel);
-      if (modelChanged && (rec.status === "indexing" || rec.status === "ready")) {
+      // A framing divergence from the record's pin escalates the same way (see
+      // `syncIndex`): the shadow is embedded with the intended framing and the
+      // swap re-pins it; legacy unframed pins resolve to null and never
+      // escalate under the "none" default.
+      const intendedFraming = resolveFraming(
+        pcfg?.framing ?? CONFIG.EMBEDDING_FRAMING,
+        pcfgModel ?? rec.embedModel ?? CONFIG.OLLAMA_MODEL,
+      );
+      if ((modelChanged || intendedFraming !== (rec.framing ?? null)) && (rec.status === "indexing" || rec.status === "ready")) {
         console.error(
-          `[manager] '${rec.name}' .cidx.json embedModel changed (${rec.embedModel} → ${pcfgModel}); resuming as a migration.`,
+          modelChanged
+            ? `[manager] '${rec.name}' .cidx.json embedModel changed (${rec.embedModel} → ${pcfgModel}); resuming as a migration.`
+            : `[manager] '${rec.name}' embedding framing changed (${rec.framing ?? "none"} → ${intendedFraming ?? "none"}); resuming as a migration.`,
         );
-        this.startMigration(rec, pcfgModel);
+        this.startMigration(rec, modelChanged ? pcfgModel : (rec.embedModel ?? CONFIG.OLLAMA_MODEL));
         continue;
       }
       // Both half-finished ('indexing') and 'ready' projects are incrementally
@@ -2853,11 +2900,18 @@ export class IndexManager {
         const fileCount = this.registry.listCachedFiles(t.indexName).length;
         const chunkCount = await countTableRows(t.tableName);
         this.registry.setIndexStats(t.indexName, fileCount, chunkCount, Date.now());
+        // Pin the model actually used for this run (per-project override or
+        // global) and the framing its embeds carried — the same resolution
+        // `indexDirectory` jobs embed with, so the pin describes the table.
+        const pcfg = readProjectConfig(t.baseDir);
+        const usedModel = pcfg?.embedModel ?? CONFIG.OLLAMA_MODEL;
         if (result.dim !== null) {
-          // Pin the model actually used for this run (per-project override or global).
-          const usedModel = readProjectConfig(t.baseDir)?.embedModel ?? CONFIG.OLLAMA_MODEL;
           this.registry.setIndexEmbedding(t.indexName, usedModel, result.dim);
         }
+        this.registry.setIndexFraming(
+          t.indexName,
+          resolveFraming(pcfg?.framing ?? CONFIG.EMBEDDING_FRAMING, usedModel),
+        );
         this.registry.setIndexStatus(t.indexName, "ready");
         const pruned = this.registry.pruneEmbeddingCache(CONFIG.EMBED_CACHE_MAX);
         console.error(
@@ -2880,10 +2934,13 @@ export class IndexManager {
   // ------------------------------------------------- O2: zero-downtime migration
 
   /**
-   * Escalates a per-project model change to the `migrate` job instead of a
-   * full reindex: every vector is rebuilt in a shadow table with the new model
-   * (search keeps serving the current table the whole time) and the registry
-   * only flips once the shadow is complete.
+   * Escalates a per-project model OR framing change to the `migrate` job
+   * instead of a full reindex: every vector is rebuilt in a shadow table with
+   * the target model and the target framing (search keeps serving the current
+   * table the whole time) and the registry only flips once the shadow is
+   * complete. The payload's framing is resolved from the effective setting
+   * under the TARGET model — a model change moves the preset with it, a
+   * framing-only change keeps the record's model and applies the new setting.
    */
   private startMigration(rec: IndexRecord, targetModel: string): IndexRecord {
     const target: IndexTarget = {
@@ -2892,17 +2949,19 @@ export class IndexManager {
       baseDir: rec.path,
     };
     this.registry.setIndexStatus(rec.name, "indexing");
-    // The watcher keeps running either way; the model-mismatch rule already
-    // suppresses its writes until the swap pins the new model.
+    // The watcher keeps running either way; the model-mismatch and framing-
+    // mismatch rules already suppress its writes until the swap pins both.
     this.ensureWatcher(target);
-    this.enqueueMigrate(rec, targetModel);
+    const setting = readProjectConfig(rec.path)?.framing ?? CONFIG.EMBEDDING_FRAMING;
+    this.enqueueMigrate(rec, targetModel, resolveFraming(setting, targetModel));
     return this.registry.getIndex(rec.name)!;
   }
 
-  private enqueueMigrate(rec: IndexRecord, targetModel: string): void {
+  private enqueueMigrate(rec: IndexRecord, targetModel: string, framing: string | null): void {
     const id = this.jobQueue.enqueue<MigrateJobPayload>(MIGRATE_JOB, {
       project: rec.name,
       targetModel,
+      framing,
     });
     // jobByIndex drives isIndexing (watcher deferral), progress and removal —
     // a running migration counts exactly like a running index job.
@@ -2915,16 +2974,20 @@ export class IndexManager {
   ): Promise<MigrateResult> {
     const rec = this.registry.getIndex(payload.project);
     if (!rec) throw this.indexNotFound(payload.project);
+    // Framing payloads written before framing existed read as the unframed pin
+    // those records could only have.
+    const targetFraming = payload.framing ?? null;
 
-    // Duplicate escalation (the model already flipped since the job was
-    // enqueued): nothing to build.
-    if (rec.embedModel === payload.targetModel) {
+    // Duplicate escalation (the model/framing already flipped since the job
+    // was enqueued): nothing to build.
+    if (rec.embedModel === payload.targetModel && (rec.framing ?? null) === targetFraming) {
       return {
         project: rec.name,
         fromTable: tableNameFor(rec),
         toTable: tableNameFor(rec),
         rows: 0,
         dim: null,
+        framing: targetFraming,
         kind: "noop",
         originalDropped: false,
       };
@@ -2941,17 +3004,18 @@ export class IndexManager {
         registry: this.registry,
         signal: ctx.signal,
         onProgress: (processed, total, message) => ctx.updateProgress(processed, total, message),
+        framing: targetFraming,
       });
       if (result.kind === "cancelled") {
         // Aborted before the commit point: the old index is intact and still
-        // serving. Back to "ready" — the model change is still pending, so the
-        // next sync re-escalates (and pre-cleans the leftover shadow).
+        // serving. Back to "ready" — the model/framing change is still pending,
+        // so the next sync re-escalates (and pre-cleans the leftover shadow).
         this.registry.setIndexStatus(rec.name, "ready");
         console.error(`[migrate] '${rec.name}' cancelled before the swap; original index intact.`);
       } else if (result.kind === "swapped") {
         console.error(
-          `[migrate] '${rec.name}' now serves '${result.toTable}' (model '${payload.targetModel}', ` +
-            `${result.rows} rows re-embedded)` +
+          `[migrate] '${rec.name}' now serves '${result.toTable}' (model '${payload.targetModel}', framing ` +
+            `${result.framing ?? "none"}, ${result.rows} rows re-embedded)` +
             (result.originalDropped
               ? `; superseded table '${result.fromTable}' dropped.`
               : `; superseded table '${result.fromTable}' left in place (drop failed) — the doctor flags it.`),
