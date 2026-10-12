@@ -2,7 +2,7 @@ import path from "node:path";
 import { readdirSync, statSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { PROJECT_CONFIG_FILE, parseProjectConfig } from "./project-config";
-import type { IndexRecord } from "./registry";
+import { tableNameFor, type IndexRecord } from "./registry";
 import type { EmbedProvider } from "../services/embed";
 import { modelTagPresent } from "../utils/model-tag";
 
@@ -406,13 +406,20 @@ export function projectCheck(s: ProjectDoctorState): DoctorCheck {
 export interface OrphanTablesState {
   /** Table names on disk (`~/.cidx/db`). */
   tables: string[];
-  /** Table names referenced by the registry. */
+  /** Table names referenced by the registry (via `tableNameFor`). */
   registeredTables: string[];
   dbDir: string;
 }
 
+/** The `_mig` suffix naming an O2 model-migration shadow table. */
+const MIG_TABLE_RE = /_mig$/;
+
 /**
- * Check 4 — disk tables the registry does not know about. (The mirror case, a
+ * Check 4 — disk tables the registry does not know about. A `*_mig` orphan is
+ * the interrupted-O2-migration leftover (the registry commit never flipped to
+ * it): same warn, but the message and hint are migration-specific — the owning
+ * project's live table is unaffected and `cidx sync` re-escalates (and
+ * pre-cleans) when the model change is still pending. (The mirror case, a
  * registry row without a table, is the per-project check's `fail` — one finding
  * per problem, not two.)
  */
@@ -429,13 +436,23 @@ export function orphanTablesCheck(s: OrphanTablesState): DoctorCheck {
         : `${s.tables.length} table(s), all registered`,
     );
   }
-  return check(
-    "tables",
-    "tables",
-    "warn",
-    `not in the registry: ${orphans.join(", ")} — never searched, only taking disk space`,
-    `remove the stale directory under ${s.dbDir} (or re-add the project with cidx index and cidx remove it)`,
-  );
+  const shadows = orphans.filter((t) => MIG_TABLE_RE.test(t));
+  const others = orphans.filter((t) => !MIG_TABLE_RE.test(t));
+  const parts: string[] = [];
+  const hints: string[] = [];
+  if (shadows.length > 0) {
+    parts.push(
+      `stale migration shadows: ${shadows.join(", ")} — an interrupted (or still in-progress) model migration left them behind; the projects' live tables are unaffected`,
+    );
+    hints.push(
+      `delete the *_mig directory under ${s.dbDir} (or re-run cidx sync on the project to redo its migration)`,
+    );
+  }
+  if (others.length > 0) {
+    parts.push(`not in the registry: ${others.join(", ")} — never searched, only taking disk space`);
+    hints.push(`remove the stale directory under ${s.dbDir} (or re-add the project with cidx index and cidx remove it)`);
+  }
+  return check("tables", "tables", "warn", parts.join(" · "), hints.join("; "));
 }
 
 /** One config file's verdict, computed by the collector. */
@@ -773,7 +790,15 @@ export async function runDoctor(ports: DoctorPorts): Promise<DoctorReport> {
   }
 
   // 4 — orphan tables (registered rows without tables are the project check's fail).
-  checks.push(orphanTablesCheck({ tables, registeredTables: indexes.map((r) => r.tableName), dbDir: settings.dbDir }));
+  // `tableNameFor` is the authority on the served table (the O2 migration moves
+  // the stored name); it falls back to the derived name for a bare record.
+  checks.push(
+    orphanTablesCheck({
+      tables,
+      registeredTables: indexes.map((r) => tableNameFor(r)),
+      dbDir: settings.dbDir,
+    }),
+  );
 
   // 5 — config files (global YAML + one .cidx.json per project).
   const files: ConfigFileFinding[] = [];

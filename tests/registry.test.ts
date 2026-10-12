@@ -2,7 +2,13 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rmSync } from "node:fs";
-import { Registry, type IndexRecord } from "../src/core/registry";
+import { Database } from "bun:sqlite";
+import {
+  Registry,
+  deriveTableName,
+  tableNameFor,
+  type IndexRecord,
+} from "../src/core/registry";
 
 function tempDbPath(): string {
   return join(tmpdir(), `mcp-test-${crypto.randomUUID()}.db`);
@@ -145,5 +151,162 @@ describe("Registry", () => {
     const changed = reg.markInterruptedJobs();
     expect(changed).toBe(1);
     expect(reg.getJob("j1")?.status).toBe("failed");
+  });
+
+  test("removeIndexDeep clears job rows for index jobs (indexName) and migrate jobs (project)", () => {
+    reg.upsertIndex(makeIndex("alpha"));
+    const now = Date.now();
+    const row = (id: string, type: string, payload: string | null) => ({
+      id,
+      type,
+      status: "completed",
+      payload,
+      progressProcessed: 0,
+      progressTotal: 0,
+      progressMessage: null,
+      result: null,
+      error: null,
+      createdAt: now,
+      startedAt: now,
+      finishedAt: now,
+    });
+    reg.saveJob(row("m1", "migrate", '{"project":"alpha","targetModel":"model-b"}'));
+    reg.saveJob(row("i1", "index", '{"target":{"indexName":"alpha"},"fresh":false}'));
+    reg.saveJob(row("o1", "index", '{"target":{"indexName":"other"}}'));
+    reg.removeIndexDeep("alpha");
+    expect(reg.getJob("m1")).toBeNull();
+    expect(reg.getJob("i1")).toBeNull();
+    expect(reg.getJob("o1")).not.toBeNull();
+  });
+});
+
+describe("table naming helpers (O2)", () => {
+  test("deriveTableName matches the createIndex recipe", () => {
+    expect(deriveTableName("my-app")).toBe("idx_my_app");
+    expect(deriveTableName("My App!")).toBe("idx_my_app");
+    expect(deriveTableName("snake_case")).toBe("idx_snake_case");
+    expect(deriveTableName("")).toBe("idx_idx");
+    expect(deriveTableName("___")).toBe("idx_idx");
+  });
+
+  test("tableNameFor prefers the stored name, falls back to the derivation", () => {
+    expect(tableNameFor({ name: "alpha", tableName: "idx_custom_2" })).toBe("idx_custom_2");
+    expect(tableNameFor({ name: "alpha", tableName: null })).toBe("idx_alpha");
+    expect(tableNameFor({ name: "alpha", tableName: "" })).toBe("idx_alpha");
+    expect(tableNameFor({ name: "alpha" })).toBe("idx_alpha");
+  });
+
+  test("a registry predating the stored table_name is migrated lazily (ALTER + derived backfill)", () => {
+    const dbPath = tempDbPath();
+    const raw = new Database(dbPath);
+    // A foreign/very-old meta.db: no table_name column at all.
+    raw.run(`CREATE TABLE indexes (
+      name TEXT PRIMARY KEY, path TEXT NOT NULL, status TEXT NOT NULL,
+      file_count INTEGER NOT NULL DEFAULT 0, chunk_count INTEGER NOT NULL DEFAULT 0,
+      embed_model TEXT, embed_dim INTEGER, last_indexed_at INTEGER,
+      created_at INTEGER NOT NULL, error TEXT
+    )`);
+    raw.run(`INSERT INTO indexes (name, path, status, created_at) VALUES ('my-app', '/tmp/my-app', 'ready', 1)`);
+    raw.close();
+
+    const lazy = new Registry(dbPath);
+    try {
+      const rec = lazy.getIndex("my-app");
+      expect(rec?.tableName).toBe("idx_my_app");
+      expect(rec?.status).toBe("ready");
+      // The altered table keeps accepting upserts (table_name is written back).
+      lazy.upsertIndex(makeIndex("my-app", { tableName: "idx_my_app" }));
+      expect(lazy.getIndex("my-app")?.embedModel).toBe("test-model");
+    } finally {
+      lazy.close();
+      rmSync(dbPath, { force: true });
+    }
+  });
+
+  test("rows stored with a null/empty table_name are backfilled from the derivation (idempotent)", () => {
+    const dbPath = tempDbPath();
+    const raw = new Database(dbPath);
+    raw.run(`CREATE TABLE indexes (
+      name TEXT PRIMARY KEY, path TEXT NOT NULL, table_name TEXT, status TEXT NOT NULL,
+      file_count INTEGER NOT NULL DEFAULT 0, chunk_count INTEGER NOT NULL DEFAULT 0,
+      embed_model TEXT, embed_dim INTEGER, last_indexed_at INTEGER,
+      created_at INTEGER NOT NULL, error TEXT
+    )`);
+    raw.run(
+      `INSERT INTO indexes (name, path, table_name, status, created_at) VALUES
+        ('alpha',  '/tmp/alpha', NULL,        'ready', 1),
+        ('beta-x', '/tmp/beta',  '',          'ready', 2),
+        ('gamma',  '/tmp/gamma', 'idx_custom','ready', 3)`,
+    );
+    raw.close();
+
+    const reg1 = new Registry(dbPath);
+    expect(reg1.getIndex("alpha")?.tableName).toBe("idx_alpha");
+    expect(reg1.getIndex("beta-x")?.tableName).toBe("idx_beta_x");
+    expect(reg1.getIndex("gamma")?.tableName).toBe("idx_custom"); // a stored name is never overwritten
+    reg1.close();
+
+    // Second open: nothing left to backfill, values stay stable.
+    const reg2 = new Registry(dbPath);
+    expect(reg2.getIndex("alpha")?.tableName).toBe("idx_alpha");
+    expect(reg2.getIndex("beta-x")?.tableName).toBe("idx_beta_x");
+    reg2.close();
+    rmSync(dbPath, { force: true });
+  });
+});
+
+describe("commitTableSwap (O2)", () => {
+  let reg: Registry;
+  let dbPath: string;
+
+  beforeEach(() => {
+    dbPath = tempDbPath();
+    reg = new Registry(dbPath);
+  });
+
+  afterEach(() => {
+    reg.close();
+    try {
+      rmSync(dbPath, { force: true });
+      rmSync(`${dbPath}-wal`, { force: true });
+      rmSync(`${dbPath}-shm`, { force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+
+  test("flips the serving table, model and stats and marks the index ready", () => {
+    reg.upsertIndex(makeIndex("alpha"));
+    reg.commitTableSwap("alpha", {
+      tableName: "idx_alpha_mig",
+      embedModel: "model-b",
+      embedDim: 4,
+      chunkCount: 12,
+      lastIndexedAt: 555,
+    });
+    const rec = reg.getIndex("alpha");
+    expect(rec).not.toBeNull();
+    expect(rec!.tableName).toBe("idx_alpha_mig");
+    expect(rec!.embedModel).toBe("model-b");
+    expect(rec!.embedDim).toBe(4);
+    expect(rec!.chunkCount).toBe(12);
+    expect(rec!.lastIndexedAt).toBe(555);
+    expect(rec!.status).toBe("ready");
+    expect(rec!.error).toBeNull();
+  });
+
+  test("clears a stale error alongside the swap (the new table is complete)", () => {
+    reg.upsertIndex(makeIndex("alpha"));
+    reg.setIndexStatus("alpha", "error", "boom");
+    reg.commitTableSwap("alpha", {
+      tableName: "idx_alpha_mig",
+      embedModel: "model-b",
+      embedDim: null,
+      chunkCount: 0,
+      lastIndexedAt: 556,
+    });
+    const rec = reg.getIndex("alpha");
+    expect(rec!.status).toBe("ready");
+    expect(rec!.error).toBeNull();
   });
 });

@@ -6,10 +6,21 @@ import { readProjectConfig, extToLanguage, languageAllowSet } from "../core/proj
 import { chunkCode } from "../chunking/chunker";
 import { extractIdTerms } from "../core/idterms";
 import { getEmbeddings } from "./embed";
-import { insertChunks, deleteFileRecords, ensureVectorIndex, ensureFtsIndex, type CodeRecord } from "./db";
+import {
+  insertChunks,
+  deleteFileRecords,
+  ensureVectorIndex,
+  ensureFtsIndex,
+  countTableRows,
+  dropTable,
+  scanTableBatches,
+  tableColumns,
+  type CodeRecord,
+} from "./db";
 import { hashContent } from "../utils/hash";
 import { mapWithConcurrency } from "../utils/concurrency";
 import { gitTrackedFiles } from "./git";
+import { tableNameFor } from "../core/registry";
 import type { Registry } from "../core/registry";
 
 /**
@@ -401,4 +412,317 @@ export async function indexDirectory(
   }
 
   return { files: processed, chunks, dim, deleted };
+}
+
+// ------------------------------------------------- O2: zero-downtime migration
+
+/**
+ * Rows read (and embedded) per shadow-build batch. Larger than one embed batch
+ * on purpose: a batch spans several files while an `EMBED_BATCH_SIZE` embed
+ * round still bounds each wire call (embedTexts batches and bounds its own
+ * concurrency inside).
+ */
+const MIGRATE_BATCH_ROWS = Math.max(CONFIG.EMBED_BATCH_SIZE * 8, 128);
+
+/** Progress + the registry (the commit point) for a migration. */
+export interface MigrateContext {
+  registry: Registry;
+  signal?: AbortSignal | undefined;
+  onProgress?: ((processed: number, total: number, message?: string) => void) | undefined;
+}
+
+export interface MigrateResult {
+  project: string;
+  /** Table the migration started from. */
+  fromTable: string;
+  /** Table the registry serves now (=== fromTable for an in-place pin). */
+  toTable: string;
+  /** Rows the committed table holds (0 when nothing was committed). */
+  rows: number;
+  /** Dimension of the newly embedded vectors (null when nothing was embedded). */
+  dim: number | null;
+  /**
+   * "swapped"  — shadow built, the registry transaction flipped to it, the old
+   *              table dropped best-effort. An empty source table commits an
+   *              in-place model pin instead (toTable === fromTable).
+   * "noop"     — the project already serves the target model.
+   * "cancelled" — aborted before the commit point: registry + original table
+   *              untouched, the partial shadow removed.
+   */
+  kind: "swapped" | "noop" | "cancelled";
+  /** The superseded table was dropped (false → an orphan the doctor flags). */
+  originalDropped: boolean;
+}
+
+/**
+ * Zero-downtime model migration (proposal O2): rebuilds every vector of the
+ * project's current table in a SHADOW table (`<current>_mig`) with the target
+ * model — the registry transaction is the commit point. Until the commit,
+ * search keeps serving the untouched original table with self-consistent
+ * vectors; only after the shadow is COMPLETE (rows re-embedded, ANN + BM25
+ * indexes built) does one registry transaction flip `{ tableName, embedModel,
+ * embedDim, chunkCount, lastIndexedAt }` and mark the index ready.
+ *
+ * Crash safety: before the transaction a crash leaves the original untouched
+ * (the partial shadow is stale garbage the doctor flags as `*_mig` and the next
+ * attempt pre-cleans); after it the registry points at the complete shadow — a
+ * failed drop of the OLD table only leaves an unregistered orphan, never a
+ * data loss. The chunk CONTENT is model-independent and is copied (re-embedded,
+ * not re-chunked), so a migration neither re-reads the working tree nor loses
+ * watcher edits — those land in the new table on the next sync.
+ *
+ * Repeated migrations nest the suffix (`idx_x` → `idx_x_mig` → `idx_x_mig_mig`):
+ * the shadow is always derived from the CURRENT stored name, so it can never
+ * collide with the table being served. (A LanceDB rename keeping the original
+ * name would need a SECOND registry commit with a broken window in between, so
+ * the rename API is deliberately not used.)
+ */
+export async function migrateTable(
+  target: IndexTarget,
+  targetModel: string,
+  ctx: MigrateContext,
+): Promise<MigrateResult> {
+  const { registry, signal, onProgress } = ctx;
+  const project = target.indexName;
+  // The stored name — after the first migration this is NOT the derived
+  // default, so the shadow name keeps nesting instead of colliding with the
+  // table being served.
+  const fromTable = tableNameFor({ name: project, tableName: target.tableName });
+  const shadowName = `${fromTable}_mig`;
+
+  const noop = (): MigrateResult => ({
+    project,
+    fromTable,
+    toTable: fromTable,
+    rows: 0,
+    dim: null,
+    kind: "noop",
+    originalDropped: false,
+  });
+
+  if ((await tableColumns(fromTable)).size === 0) {
+    // Nothing to migrate from: a missing table cannot be re-embedded, and
+    // pretending a migration happened would hide the hole behind an empty
+    // table. Point the user at a full reindex (the honest remedy).
+    throw new Error(
+      `table '${fromTable}' of '${project}' does not exist — nothing to migrate; run a full reindex instead`,
+    );
+  }
+
+  if ((await countTableRows(fromTable)) === 0) {
+    // An existing but empty table has no vectors to re-embed — and LanceDB
+    // cannot create an empty one (the first insert pins the vector dimension).
+    // Pin the target model in place: the registry transaction IS the whole
+    // migration; future writes (watcher/next sync) build the table with the
+    // new model.
+    registry.commitTableSwap(project, {
+      tableName: fromTable,
+      embedModel: targetModel,
+      embedDim: null,
+      chunkCount: 0,
+      lastIndexedAt: Date.now(),
+    });
+    return { ...noop(), kind: "swapped" };
+  }
+
+  let committed = false;
+  const dropShadow = async (): Promise<void> => {
+    try {
+      await dropTable(shadowName);
+    } catch (err) {
+      console.error(`[indexer] failed to clean up migration shadow '${shadowName}':`, err);
+    }
+  };
+
+  try {
+    // A stale shadow (a previously interrupted attempt — the doctor flags it)
+    // is dropped and rebuilt from scratch.
+    await dropTable(shadowName);
+
+    const totalRows = await countTableRows(fromTable);
+    onProgress?.(0, totalRows, "starting migration");
+
+    let processed = 0;
+    let dim: number | null = null;
+
+    await scanTableBatches(
+      fromTable,
+      MIGRATE_BATCH_ROWS,
+      async (batch) => {
+        let lastFile = "";
+        let i = 0;
+        while (i < batch.length) {
+          const filePath = batch[i]!.filePath;
+          let j = i;
+          while (j < batch.length && batch[j]!.filePath === filePath) j++;
+          const rows = batch.slice(i, j);
+          lastFile = filePath;
+
+          // Re-embed the content (cache-first) and the doc legs — the same
+          // embedTexts/caching recipe as indexing, keyed on the TARGET model.
+          const vectors = await embedTexts(
+            rows.map((r) => r.content),
+            targetModel,
+            registry,
+            signal,
+          );
+          const docIdx: number[] = [];
+          const docTexts: string[] = [];
+          if (CONFIG.DOCSTRINGS) {
+            for (let k = 0; k < rows.length; k++) {
+              const doc = rows[k]!.doc;
+              if (doc && doc.trim().length > 0) {
+                docIdx.push(k);
+                docTexts.push(doc);
+              }
+            }
+          }
+          const docVecs =
+            docIdx.length > 0 ? await embedTexts(docTexts, targetModel, registry, signal) : null;
+          // Abort mid-batch: vectors half-filled with nulls are never written.
+          if (signal?.aborted) return;
+
+          const records: (CodeRecord | null)[] = new Array(rows.length).fill(null);
+          for (let k = 0; k < rows.length; k++) {
+            const row = rows[k]!;
+            const vector = vectors[k];
+            // A missing vector without an abort means the backend under-delivered
+            // (fewer embeddings than inputs). Committing a shadow with silently
+            // dropped chunks would corrupt search after the swap — fail the job
+            // instead (the shadow is cleaned up, the original keeps serving; the
+            // sync re-escalates and retries).
+            if (!vector) {
+              if (signal?.aborted) continue;
+              throw new Error(
+                `migration of '${project}': the embedding backend returned no vector for '${filePath}' chunk ${k}`,
+              );
+            }
+            if (dim === null) dim = vector.length;
+            const rec: CodeRecord = {
+              // ids are re-numbered per file — the chunks' own content/position
+              // is what matters, and the shadow is built file-aligned.
+              id: `${filePath}#${k}`,
+              filePath,
+              content: row.content,
+              vector,
+              language: row.language ?? "",
+              symbolName: row.symbolName ?? "",
+              symbolType: row.symbolType ?? "",
+              doc: row.doc ?? null,
+              doc_vector: null,
+              // Identifier-leg terms are pure CPU (no embedding) — recomputed
+              // so the shadow carries them even when the source table predates.
+              id_terms: extractIdTerms(row.content) || null,
+            };
+            // Line numbers pass through as-is (absent stays absent, not 0).
+            if (row.startLine != null) rec.startLine = row.startLine;
+            if (row.endLine != null) rec.endLine = row.endLine;
+            records[k] = rec;
+          }
+          if (docVecs) {
+            for (let d = 0; d < docIdx.length; d++) {
+              const rec = records[docIdx[d]!];
+              const vec = docVecs[d];
+              if (!vec) {
+                if (signal?.aborted) continue;
+                throw new Error(
+                  `migration of '${project}': the embedding backend returned no doc vector (row '${docIdx[d]}' of '${filePath}')`,
+                );
+              }
+              if (rec) rec.doc_vector = vec;
+            }
+          }
+          const clean: CodeRecord[] = [];
+          for (const r of records) if (r) clean.push(r);
+          if (clean.length > 0) await insertChunks(shadowName, clean);
+
+          i = j;
+        }
+        processed += batch.length;
+        onProgress?.(processed, totalRows, `re-embedding ${lastFile}`);
+      },
+      { signal },
+    );
+
+    if (signal?.aborted) {
+      await dropShadow();
+      return {
+        project,
+        fromTable,
+        toTable: fromTable,
+        rows: 0,
+        dim: null,
+        kind: "cancelled",
+        originalDropped: false,
+      };
+    }
+
+    // --- Build ALL search indexes on the shadow, mirroring indexDirectory ---
+    try {
+      const created = await ensureVectorIndex(shadowName, CONFIG.VECTOR_INDEX_THRESHOLD);
+      if (created) console.error(`[indexer] built ANN vector index for '${shadowName}'.`);
+    } catch (err) {
+      console.error(`[indexer] failed to build vector index for '${shadowName}':`, err);
+    }
+    try {
+      const created = await ensureVectorIndex(shadowName, CONFIG.VECTOR_INDEX_THRESHOLD, "doc_vector");
+      if (created) console.error(`[indexer] built ANN doc_vector index for '${shadowName}'.`);
+    } catch (err) {
+      console.error(`[indexer] failed to build doc_vector index for '${shadowName}':`, err);
+    }
+    try {
+      const built = await ensureFtsIndex(shadowName);
+      if (built > 0) console.error(`[indexer] built ${built} BM25/FTS index(es) for '${shadowName}'.`);
+    } catch (err) {
+      console.error(`[indexer] failed to build FTS index for '${shadowName}':`, err);
+    }
+
+    // --- THE COMMIT POINT: one registry transaction flips the project. ---
+    const rows = await countTableRows(shadowName);
+    try {
+      registry.commitTableSwap(project, {
+        tableName: shadowName,
+        embedModel: targetModel,
+        embedDim: dim,
+        chunkCount: rows,
+        lastIndexedAt: Date.now(),
+      });
+      committed = true;
+    } catch (err) {
+      // The registry refused — the shadow is an orphan, the original untouched.
+      onProgress?.(processed, totalRows, "registry commit failed");
+      throw err;
+    }
+
+    // --- Best-effort drop of the superseded table (post-commit). A failure
+    // leaves it unregistered → the doctor flags it; search already serves the
+    // shadow, so nothing is lost. ---
+    let originalDropped = false;
+    try {
+      await dropTable(fromTable);
+      originalDropped = true;
+    } catch (err) {
+      console.error(
+        `[indexer] failed to drop the superseded table '${fromTable}' for '${project}' ` +
+          "(it is no longer registered — the doctor flags it as an orphan):",
+        err,
+      );
+    }
+
+    onProgress?.(rows, totalRows, "migration committed");
+    return {
+      project,
+      fromTable,
+      toTable: shadowName,
+      rows,
+      dim,
+      kind: "swapped",
+      originalDropped,
+    };
+  } catch (err) {
+    // Build/commit failure: the original table + registry are untouched — the
+    // shadow was never pointed to and can be discarded.
+    if (!committed) await dropShadow();
+    throw err;
+  }
 }

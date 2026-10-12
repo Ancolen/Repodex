@@ -37,3 +37,22 @@ export interface JobContext<TPayload = unknown> {
 export type JobHandler<TPayload = unknown, TResult = unknown> = (
   ctx: JobContext<TPayload>,
 ) => Promise<TResult>;
+
+// ------------------------------------------------------- registered job types
+// Payload types + type constants for the registered job handlers; the handlers
+// live with their managers (IndexManager registers `index` and `migrate` at
+// daemon boot via JobQueue.registerHandler).
+
+/** The async indexing job: (re)index the project's table from the working tree. */
+export const INDEX_JOB_TYPE = "index";
+
+/** The zero-downtime model migration job (proposal O2): rebuild every vector of the
+ * project's current table in a shadow table with `targetModel` and swap the
+ * registry to it in one transaction once the shadow is complete. Search keeps
+ * serving the old table until the swap. */
+export const MIGRATE_JOB_TYPE = "migrate";
+
+export interface MigrateJobPayload {
+  project: string;
+  targetModel: string;
+}

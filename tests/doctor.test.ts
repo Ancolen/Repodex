@@ -355,6 +355,33 @@ describe("doctor — orphanTablesCheck", () => {
   });
 });
 
+describe("doctor — stale O2 migration shadows (orphanTablesCheck)", () => {
+  test("a *_mig orphan is reported as an interrupted-migration shadow with a migrate hint", () => {
+    const c = orphanTablesCheck({ tables: ["idx_api", "idx_api_mig"], registeredTables: ["idx_api"], dbDir: "/h/.cidx/db" });
+    expect(c.status).toBe("warn");
+    expect(c.detail).toContain("stale migration shadows: idx_api_mig");
+    expect(c.detail).toContain("interrupted (or still in-progress) model migration");
+    expect(c.detail).not.toContain("not in the registry");
+    expect(c.hint).toContain("/h/.cidx/db");
+    expect(c.hint).toContain("cidx sync");
+  });
+
+  test("shadows and plain orphans are reported separately in one finding", () => {
+    const c = orphanTablesCheck({ tables: ["idx_api_mig", "idx_ghost"], registeredTables: ["idx_api"], dbDir: "/h/.cidx/db" });
+    expect(c.status).toBe("warn");
+    expect(c.detail).toContain("stale migration shadows: idx_api_mig");
+    expect(c.detail).toContain("not in the registry: idx_ghost");
+    expect(c.hint).toContain("*_mig");
+    expect(c.hint).toContain("/h/.cidx/db");
+  });
+
+  test("a live shadow table (post-swap name) is registered, not flagged", () => {
+    const c = orphanTablesCheck({ tables: ["idx_api_mig"], registeredTables: ["idx_api_mig"], dbDir: "/h/.cidx/db" });
+    expect(c.status).toBe("ok");
+    expect(c.detail).toContain("all registered");
+  });
+});
+
 // ------------------------------------------------------------------- config
 
 describe("doctor — inspectConfigFile (yaml)", () => {
