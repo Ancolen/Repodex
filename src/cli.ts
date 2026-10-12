@@ -386,12 +386,15 @@ async function cmdFind(positionals: string[], flags: Record<string, string | boo
   await requireDaemon();
   const name = positionals.join(" ");
   if (!name) {
-    console.error('Usage: cidx find <symbolName> [--project x] [--limit n] [--language x] [--type x]');
+    console.error('Usage: cidx find <symbolName> [--project x] [--limit n] [--fuzzy [bool]] [--language x] [--type x]');
     process.exit(1);
   }
-  const body: { name: string; project?: string; limit?: number; language?: string; symbolType?: string } = { name };
+  const body: { name: string; project?: string; limit?: number; fuzzy?: boolean; language?: string; symbolType?: string } = { name };
   if (typeof flags.project === "string") body.project = flags.project;
   if (typeof flags.limit === "string") body.limit = Number(flags.limit);
+  // --fuzzy false keeps the strict exact/prefix-only behavior (default-on).
+  if (flags.fuzzy === true || flags.fuzzy === "true") body.fuzzy = true;
+  else if (flags.fuzzy === "false") body.fuzzy = false;
   if (typeof flags.language === "string") body.language = flags.language;
   if (typeof flags.type === "string") body.symbolType = flags.type;
   const results = await api<any[]>("POST", "/find", body);
@@ -414,7 +417,8 @@ function printResults(results: any[]): void {
           ? `score ${r._distance.toFixed(3)}`
           : "";
     const docHit = r._docHit ? "  [doc hit]" : "";
-    console.log(`\n${i + 1}. [${r.project}] ${loc}${sym}${score ? `  (${score})` : ""}${docHit}`);
+    const fuzzyMark = r.fuzzy ? "  [⚠ fuzzy]" : "";
+    console.log(`\n${i + 1}. [${r.project}] ${loc}${sym}${score ? `  (${score})` : ""}${docHit}${fuzzyMark}`);
     if (r.signature) console.log(`   ↳ ${r.signature}`);
     if (Array.isArray(r.contextBefore)) {
       r.contextBefore.forEach((l: string) => console.log(`   · ${l}`));
@@ -1033,10 +1037,14 @@ const COMMANDS: Record<string, CmdDoc> = {
     flags: [
       ["--project <name>", "Search only in this project (if not given, all)."],
       ["--limit <n>", "Maximum results (default: 20)."],
+      ["--fuzzy [bool]", "Fuzzy fallback when exact + prefix find nothing (default on). --fuzzy false keeps the strict exact/prefix-only behavior."],
       ["--language <lang>", "Filter by language."],
       ["--type <type>", "Filter by symbol type."],
     ],
-    details: ["Uses no vectors → independent of the embedding model, works on every index."],
+    details: [
+      "Uses no vectors → independent of the embedding model, works on every index.",
+      "A typo falls back to an n-gram fuzzy match, marked [⚠ fuzzy]; tables indexed before the fuzzy tier existed need an index job (reindex) to gain it.",
+    ],
     examples: ["cidx find loginUser", "cidx find IndexManager --type class"],
   },
   refs: {

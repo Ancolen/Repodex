@@ -193,6 +193,7 @@ function buildServer(deps: McpDeps): Server {
         project?: string;
         path?: string;
         limit?: number;
+        fuzzy?: boolean;
         language?: string;
         symbolType?: string;
       };
@@ -204,7 +205,7 @@ function buildServer(deps: McpDeps): Server {
         const results = await deps.manager.findSymbol(args.name, project, args.limit ?? 20, {
           language: args.language,
           symbolType: args.symbolType,
-        });
+        }, { fuzzy: args.fuzzy });
         return { content: [{ type: "text", text: formatResults(results) }] };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

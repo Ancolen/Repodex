@@ -18,6 +18,7 @@ import {
   searchTable,
   searchTableText,
   searchSymbol,
+  searchSymbolFuzzy,
   searchContent,
   tableMetadata,
   tableSymbolsWithContent,
@@ -207,6 +208,23 @@ export interface SearchOptions extends SearchFilters {
    * - true/undefined → include them when the columns exist (default on).
    */
   doc?: boolean | undefined;
+}
+
+/** Optional behavior of the symbol-name search (`find_symbol`). */
+export interface SymbolQueryOpts {
+  /**
+   * When exact + prefix matching find nothing, fall back to a fuzzy tier: an
+   * n-gram (trigram) BM25 match over the table's `symbolName` FTS index.
+   * Every fallback hit carries `fuzzy: true`.
+   *
+   * - false → strict exact/prefix-only contract (pre-S2 behavior).
+   * - true/undefined → allow the fallback (default).
+   *
+   * Tables that never built the n-gram symbol FTS index (indexed before S2)
+   * never fuzzy — the fallback tier simply stays empty; their next index job
+   * (or a reindex) builds the index.
+   */
+  fuzzy?: boolean | undefined;
 }
 
 /** One occurrence of a symbol name found in the indexed code. */
@@ -1000,25 +1018,39 @@ export class IndexManager {
    * Direct search by symbol name (exact/prefix). Does not use vectors, so it
    * requires no model compatibility and is fully precise. The engine of the
    * `find_symbol` tool.
+   *
+   * Fuzzy fallback (S2): when exact + prefix find nothing, a fuzzy tier
+   * searches the table's n-gram FTS index over `symbolName` (`searchSymbolFuzzy`)
+   * and every hit carries `fuzzy: true` — opt out with `fuzzy: false`. Tables
+   * whose index jobs never built the n-gram symbol FTS (pre-2.5-era tables)
+   * never fuzzy; their next index job builds it.
    */
   async findSymbol(
     name: string,
     project?: string,
     limit = 20,
     filters?: SearchFilters,
+    opts?: SymbolQueryOpts,
   ): Promise<ScopedSearchResult[]> {
     const where = buildWhere(filters);
+    const allowFuzzy = opts?.fuzzy !== false;
     if (project) {
       const rec = this.registry.getIndex(project);
       if (!rec) throw this.indexNotFound(project);
-      const rows = await searchSymbol(rec.tableName, name, limit, where);
+      let rows = await searchSymbol(rec.tableName, name, limit, where);
+      if (rows.length === 0 && allowFuzzy) {
+        rows = await this.fuzzyFallback(rec.tableName, name, limit, where);
+      }
       return this.stripEmbeddings(await this.enrich(rows.map((r) => this.scope(r, project, rec.lastIndexedAt)), 0));
     }
     const indexes = this.registry.listIndexes();
     const perTable = await Promise.all(
       indexes.map(async (rec) => {
         try {
-          const rows = await searchSymbol(rec.tableName, name, limit, where);
+          let rows = await searchSymbol(rec.tableName, name, limit, where);
+          if (rows.length === 0 && allowFuzzy) {
+            rows = await this.fuzzyFallback(rec.tableName, name, limit, where);
+          }
           return rows.map((r) => this.scope(r, rec.name, rec.lastIndexedAt));
         } catch {
           return [] as ScopedSearchResult[];
@@ -1026,6 +1058,23 @@ export class IndexManager {
       }),
     );
     return this.stripEmbeddings(await this.enrich(perTable.flat().slice(0, limit), 0));
+  }
+
+  /**
+   * The S2 fallback tier, run on one table after a strict miss: n-gram fuzzy
+   * symbol hits, every row marked `fuzzy: true` (the marker is set here — the
+   * tier's existence is a public-result contract, like `signature`).
+   */
+  private async fuzzyFallback(
+    tableName: string,
+    name: string,
+    limit: number,
+    where: string | undefined,
+  ): Promise<SearchResult[]> {
+    return (await searchSymbolFuzzy(tableName, name, limit, where)).map((r) => ({
+      ...r,
+      fuzzy: true,
+    }));
   }
 
   /** Wraps a raw row with project + freshness metadata. */

@@ -48,6 +48,7 @@ export function formatResults(results: ScopedSearchResult[]): string {
       const meta = [
         relevance,
         r._docHit ? "doc hit" : "",
+        r.fuzzy ? "⚠ fuzzy" : "",
         r.indexedAt ? `indexed: ${fmtTime(r.indexedAt)}` : "",
       ]
         .filter(Boolean)
