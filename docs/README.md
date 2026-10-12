@@ -6,9 +6,9 @@ This folder is the **canonical, living documentation** for the project. The root
 
 ## At a glance
 
-- **Current version:** `2.4.0` (docstring / comment embedding + doc search legs)
-- **Status:** core architecture, hybrid search (now with rerank / MMR / docstring legs), multi-language chunking (incl. Godot), and all robustness/security fixes are **complete and stable**. See [`status.md`](./status.md) for the full done / not-done breakdown.
-- **Test suite:** `bun test` — 603/603 passing (1644 expectations).
+- **Current version:** `2.6.0` (the entire proposals backlog shipped: search quality — boost / fuzzy / expansion / blame / framing; code intelligence — coupling / hotspots; agent UX — resources, events, query log; ops — zero-downtime migration, stats/compact, idle shutdown, job priority; doccheck — judge + watch mode)
+- **Status:** core architecture, hybrid search (rerank / MMR / docstring legs / boost), multi-language chunking (incl. Godot), every code-intelligence tool, and all robustness/security fixes are **complete and stable** — the proposals backlog is empty. See [`status.md`](./status.md) for the full done / not-done breakdown.
+- **Test suite:** `bun test` — 1052/1052 passing (3434 expectations), including a persistent daemon/Control-API integration battery (`tests/integration/`).
 
 ## Documentation map
 

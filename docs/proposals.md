@@ -2,7 +2,7 @@
 
 > Detailed designs for the 💡 Proposed items tracked in [`status.md`](./status.md). Shipped proposals move to [`changelog.md`](./changelog.md) and [`features.md`](./features.md); this file is where a proposal is fleshed out **before** implementation starts. Each proposal below carries: motivation, design, files touched, risks, impact/effort, and acceptance criteria.
 >
-> Three short proposals (`recency`, `maxFileSizeBytes`, `search + outline`) live only in `status.md`'s table — everything here is new. IDs (`S1`, `C2`, `A1`, `O3`, …) are stable references used in `status.md`.
+> **Everything in this file has now shipped** (2.5.0: `S1`, `C1`, `C2`, `A1`, `O1`, `D1`; 2.6.0: the rest) — the sections remain as the historical design record, each headed by a tombstone noting where it shipped and where the as-built result diverged from the plan. New proposals start in `status.md` and earn a section here when they need a real design. IDs (`S1`, `C2`, `A1`, `O3`, …) are stable references used in `status.md`.
 
 | ID | Proposal | Category | Impact | Effort |
 |----|----------|----------|--------|--------|
@@ -20,7 +20,7 @@
 | [O3](#o3-table-stats--compact) | Table stats / compact | Ops | Low | Low |
 | [O4](#o4-daemon-idle-shutdown) | Daemon idle shutdown | Ops | Low | Low |
 
-**Suggested order** (getiri/efor balance, updated for this set): `C4`, `S3`, `A2`, `C5`, `S2`, `A3`, `O3`, `S4`, `C3`, `O4`, `O2`. (`C1` change impact, `C2` API diff and `D1` `check_docs` shipped — see their tombstones below.)
+**Suggested order**: _(nothing left to order — every proposal in this file has shipped; `S1`/`C1`/`C2`/`A1`/`O1`/`D1` in 2.5.0, the rest in 2.6.0 — see each section's tombstone for the as-built deviations)._
 
 ---
 
@@ -37,6 +37,8 @@
 ### S2. `find_symbol` fuzzy fallback
 
 **Impact: Medium · Effort: Low-Medium**
+
+> **Shipped in 2.6.0** — see [changelog](./changelog.md) and [features](./features.md). One design deviation from the text below: no `symbol_trigrams` column was needed — `@lancedb/lancedb` 0.30 has a native **n-gram tokenizer**, so the fuzzy tier is a second FTS index over `symbolName` via the table's `Index.fts` config. The tier is **default-on with an opt-out** (`fuzzy: false`), and runs only when exact AND prefix both miss.
 
 #### Motivation
 
@@ -68,6 +70,8 @@
 ### S3. Path/surface boost
 
 **Impact: Medium · Effort: Low**
+
+> **Shipped in 2.6.0** — see [changelog](./changelog.md) and [features](./features.md). As designed below, plus two load-bearing refinements: only **RRF-merged** lists are re-scored (a single-leg list carries its native metric under the same `_score` field — re-scaling it would silently change its meaning), and the boost runs **before** `refineAndSlice` so the reranker/MMR see the adjusted order.
 
 #### Motivation
 
@@ -102,6 +106,8 @@ RRF is rank-only — it can't see that one hit is a 300-line generated file in `
 ### S4. Query expansion (local LLM)
 
 **Impact: Medium · Effort: Low-Medium**
+
+> **Shipped in 2.6.0** — see [changelog](./changelog.md) and [features](./features.md). Deviation from the text below: variants do **not** ride `searchBatch` — the manager runs them through the same per-project pipeline (`tableRows` → rerank/MMR per variant) so framing and the reranker apply to each, RRF-merges them into the base ranking, and reports the outcome in the envelope (`expanded` / `expandNote`). **Variants are never query-logged** (S4's rewrites would pollute A3's zero-hit analytics). Off by default until `search.expand.model` is set.
 
 #### Motivation
 
@@ -152,6 +158,8 @@ An agent's first query is often intent-shaped and under-specified ("auth check m
 
 **Impact: Medium · Effort: Medium**
 
+> **Shipped in 2.6.0** — see [changelog](./changelog.md) and [features](./features.md). Deviation from the text below: the size term is an honest **proxy** (chunk count + distinct symbol count per file), not a complexity metric — the report never claims otherwise; test files / entry points are demoted into `review` rather than excluded; and freshness is split (table-derived feeds are a `lastIndexedAt`-keyed snapshot — stale until a reindex — while churn runs `git log` live per call).
+
 #### Motivation
 
 Dead code says "unused"; hotspots say "over-changed and over-coupled" — the churn×complexity intersection where bugs and refactoring fatigue actually live. All inputs are already available: git history (`search_commits`' engine), chunk counts, symbol sizes, dead-code scores, and (after C5) coupling.
@@ -185,6 +193,8 @@ Dead code says "unused"; hotspots say "over-changed and over-coupled" — the ch
 
 **Impact: Medium · Effort: Low-Medium**
 
+> **Shipped in 2.6.0** — see [changelog](./changelog.md) and [features](./features.md). Deviations from the text below: blame runs once per hit **file** (not per chunk), memoized per SHA within the call, capped at **8 files** per search with `blameSkipped` reporting the rest; and the results moved into a small **envelope** — `{ results, blameNotARepo?, blameSkipped? }` — a deliberate wire change so the skip/not-a-repo facts can travel with the payload. This supersedes the `recency` small-proposal.
+
 #### Motivation
 
 `indexedAt` tells the agent *when the index saw it*; it can't say *who last changed this symbol and when* — the first question in any "why is this code like this" investigation. This is the stronger form of the `recency` proposal already in `status.md`.
@@ -217,6 +227,8 @@ Dead code says "unused"; hotspots say "over-changed and over-coupled" — the ch
 ### C5. Coupling metrics
 
 **Impact: Low-Medium · Effort: Low**
+
+> **Shipped in 2.6.0** — see [changelog](./changelog.md) and [features](./features.md). As designed below (`get_coupling`, the 18th MCP tool), with external/unresolved imports deliberately excluded from the fan metrics and counted separately (`externalImports`) so package noise can't skew the internal picture.
 
 #### Motivation
 
@@ -293,7 +305,7 @@ The two adjudicated non-findings taught as much as the findings: CLAUDE's "16 em
 
 **Report**: `{ checked: {docs[], spans, claims, indexFreshness, window?, skipped?}, verdict: {consistent, findings, needsReview, undocumented}, findings, needsReview, undocumented, omitted, maxChars, notes }`, budgeted via a new size-generic `applyBudgetBySize` (`applyCharBudget` stays untouched) with `maxChars` default 12000. Stable `D-<n>` ids in doc order; `indexFreshness` + the FRESHNESS caveat in the tool description cover the just-renamed-symbol race. Exit code mirrors `cidx doctor`: 1 only when `findings.length > 0`.
 
-**Later phases (out of D1a scope)**: D1b adds a local instruct-model semantic judge (`doccheck.judgeModel`) over the claims deterministic checks cannot reach, reusing the `rerank.ts` logprob machinery, with low-confidence verdicts flowing into `needsReview`; D1c adds a watch/loop mode via a `doccheck` job type. The report schema already carries both hooks.
+**Later phases (out of D1a scope)**: D1b adds a local instruct-model semantic judge (`doccheck.judgeModel`) over the claims deterministic checks cannot reach, reusing the `rerank.ts` logprob machinery, with low-confidence verdicts flowing into `needsReview`; D1c adds a watch/loop mode via a `doccheck` job type. The report schema already carries both hooks. **Both shipped in 2.6.0** — D1b's judge resolves `needsReview` items out (it can only clear doubts, never produce drift findings; `checked.judge` reports what ran) and D1c's `doccheck` job re-runs the check after every successful index/sync/migrate job when `doccheck.watch` is on (default off), storing the latest report for `cidx doccheck --last` — see [changelog](./changelog.md).
 
 #### Files touched
 
@@ -329,6 +341,8 @@ Shipped (unreleased) — see [`changelog.md`](./changelog.md) ("Unreleased" → 
 
 **Impact: Medium · Effort: Low-Medium**
 
+> **Shipped in 2.6.0** — see [changelog](./changelog.md) and [features](./features.md). As designed below, plus the plumbing the design anticipated needing: a daemon **event ring** (`GET /events?since=<cursor>` over the Control API, `job-completed` / `index-added` / `index-removed` via `IndexManager.onIndexEvent`) that the stdio bridge polls every 3 s to forward `notifications/message` + `resources/list_changed`. HTTP stays stateless (read-on-demand resources only). The bridge's `/bridge-session` registration doubles as the O4 idle guardrail.
+
 #### Motivation
 
 Agents poll `get_index_status` in a loop while a project indexes, and re-fetch `list_indexes` to discover projects. MCP's native vocabulary for both is *resources* (readable, listable state) and *notifications* (`listChanged`); using them removes polling and makes discovery free.
@@ -360,6 +374,8 @@ Agents poll `get_index_status` in a loop while a project indexes, and re-fetch `
 ### A3. Search analytics / query log
 
 **Impact: Low-Medium · Effort: Low**
+
+> **Shipped in 2.6.0** — see [changelog](./changelog.md) and [features](./features.md). As designed below (`query_log` in the registry, `queryLogSize` cap, `cidx stats` zero-hit + latency report), with one addition from the S4 interaction: **expansion variants are never logged** — the log records the user's query, not the machine's rewrites.
 
 #### Motivation
 
@@ -401,6 +417,8 @@ Shipped (unreleased) — see [`changelog.md`](./changelog.md) ("Unreleased" → 
 
 **Impact: Medium · Effort: Medium-High**
 
+> **Shipped in 2.6.0** — see [changelog](./changelog.md) and [features](./features.md). As designed below (the `migrate` job + shadow table), with the commit point made concrete: the swap is a **single sqlite transaction** on the registry row, and the table name became an explicit `indexes.table_name` column (lazy migration; `tableNameFor(record)` the single accessor) so the watcher and every per-table path follow a mid-flight swap. The same escalation now also covers **framing changes** (2.6.0's per-model task framing pins `IndexRecord.framing` the way `embedModel` is pinned); doctor detects stale shadow leftovers and boot restore re-enqueues interrupted migrates.
+
 #### Motivation
 
 Changing a project's embedding model today means the next `sync` escalates to a full reindex **on the live table** — searches during the reindex mix stale and fresh vectors, and a failed reindex can leave the project half-migrated. The vectors also can't be *translated* — but the *re-embed* can run off to the side and swap atomically.
@@ -434,6 +452,8 @@ Changing a project's embedding model today means the next `sync` escalates to a 
 
 **Impact: Low · Effort: Low**
 
+> **Shipped in 2.6.0** — see [changelog](./changelog.md) and [features](./features.md). The proposal's "only if the pinned LanceDB has it" guard resolved: `Table.optimize` exists in the pinned `@lancedb/lancedb` 0.30.0 (verified before building) — `cidx compact` runs it per project, refusing with **409** while a job is running for that project.
+
 #### Motivation
 
 `~/.cidx/` grows silently (LanceDB tables, embedding cache, query log) and nothing reports it. Also, LanceDB tables accumulate fragments after thousands of watcher writes; a maintenance hook keeps ANN/FTS healthy.
@@ -461,6 +481,8 @@ Changing a project's embedding model today means the next `sync` escalates to a 
 ### O4. Daemon idle shutdown
 
 **Impact: Low · Effort: Low**
+
+> **Shipped in 2.6.0** — see [changelog](./changelog.md) and [features](./features.md). As designed below (`daemon.idleTimeoutMinutes`, default 0 = off; the pure `shouldIdleShutdown` decision function; exit code 0 + log line so systemd can tell an idle exit from a crash). The bridge interplay landed concretely: the stdio bridge registers a session (A2's `POST /bridge-session`), and an open session counts as activity — the daemon never idles out under a live MCP client.
 
 #### Motivation
 

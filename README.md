@@ -14,11 +14,11 @@ A single long-lived daemon manages **multiple projects**. By sending commands to
 
 - 🚀 **Asynchronous daemon** — the server opens instantly, indexing runs in the background on a job queue; while one project is being indexed, search continues uninterrupted in the others. Thanks to a configurable **worker pool** (`jobConcurrency`, default 2), multiple projects can be indexed in parallel; a long/large job does not block other projects.
 - 🗂️ **Multi-project** — each project lives in its own isolated LanceDB table (`idx_<name>`); search a single project or all projects.
-- 🔎 **Hybrid search** — semantic **vector** + **BM25** exact-term, merged with **RRF**. `hybrid` / `vector` / `text` modes; `language` / `symbolType` / `pathGlob` filters; **reranker on by default** for precision and **MMR** to drop near-duplicate results; `--max-chars` caps returned text; **docstring search legs** match intent queries against each symbol's docstring/doc-comment (`[doc hit]` markers).
-- 🎯 **`find_symbol`** — finds a symbol directly by its name (exact + prefix); requires no vector, fully precise.
+- 🔎 **Hybrid search** — semantic **vector** + **BM25** exact-term, merged with **RRF**. `hybrid` / `vector` / `text` modes; `language` / `symbolType` / `pathGlob` filters; **reranker on by default** for precision and **MMR** to drop near-duplicate results; **path/surface boost** nudges rankings toward `src/` over `build/` (tests/generated demoted); **query expansion** (opt-in, local LLM) rewrites an intent query into variants and merges; **blame enrichment** (opt-in) stamps results with `lastAuthor` / `lastCommitDate` / `churnCommits`; `--max-chars` caps returned text; **docstring search legs** match intent queries against each symbol's docstring/doc-comment (`[doc hit]` markers).
+- 🎯 **`find_symbol`** — finds a symbol directly by its name (exact + prefix); requires no vector, fully precise. A **fuzzy tier** (n-gram BM25, on by default) recovers typos when exact + prefix both miss.
 - 🔗 **`find_references`** — finds where a symbol is **used** (call sites + definition) as `file:line` occurrences; complements `find_symbol` for impact/refactor analysis. Honest about its cap (`total`/`truncated`); doc artifacts count as evidence unless `includeDocs: false`.
 - 🧭 **`get_repo_overview`** — a structural onboarding summary of a project (language distribution, symbol-type breakdown, top-level directories, likely entry points, largest files); aggregated from the index with no LLM.
-- 🧠 **Code intelligence** — `get_dependencies` (a file's import graph: what it imports + who imports it), `get_call_graph` (who calls a symbol and what it calls, as bounded trees), `find_dead_code` (potential dead symbols, scored conservatively), and `search_commits` (git-history / commit-message search — "when/why was X added", file history). All are derived from the existing index or run `git log` live — **no reindex, no schema change**.
+- 🧠 **Code intelligence** — `get_dependencies` (a file's import graph: what it imports + who imports it), `get_call_graph` (who calls a symbol and what it calls, as bounded trees), `find_dead_code` (potential dead symbols, scored conservatively), `get_coupling` (fanIn/fanOut/instability per file), `get_hotspots` (the churn × size tech-debt report: "over-changed and over-coupled"), and `search_commits` (git-history / commit-message search — "when/why was X added", file history). All are derived from the existing index or run `git log` live — **no reindex, no schema change**.
 - 🪟 **Rich results** — each search result carries a derived `signature`, the `indexedAt` freshness stamp, and an optional `--context N` window of surrounding lines read live from the file.
 - 🌳 **Smart chunking** — splitting at function/class/method boundaries with `web-tree-sitter` (AST); grammars for 16 languages (JS/TS/TSX, Python, Go, Rust, Java, C, C++, C#, PHP, Ruby, Kotlin, Swift, Scala, GDScript) embedded in the binary. By **descending into namespace/module/mod**, symbols (function/class/struct/interface/enum/record/trait) are extracted correctly in each language. Character-based fallback for languages without a grammar. Results are returned with a `file:line` range.
 - 🎮 **Godot support** — GDScript (`.gd`) gets full AST chunking (`class_name`, inner classes, `signal`, `enum`, `func`/`_init`), `extends "res://…"` + `preload`/`load` dependency resolution against the project root, and dead-code scoring that understands engine virtuals (`_ready`, `_process`, …) and editor-connected `_on_*` handlers. Godot text formats — `.gdshader`, `.tscn`, `.tres`, `project.godot` — are indexed with character-based chunking (searchable text, no symbols); the `.godot/` cache directory is ignored.
@@ -27,7 +27,8 @@ A single long-lived daemon manages **multiple projects**. By sending commands to
 - 👀 **Live watching** — `chokidar` + debounce; supports atomic save/rename; obeys `.gitignore`/`.cidxignore` rules.
 - 🌿 **Git awareness** — respects `.gitignore`, optional git-tracked-only files, automatic incremental sync on branch change.
 - 💾 **Persistent state** — registry, file cache and job state with `bun:sqlite`; resumes where it left off even if the daemon restarts.
-- 🔌 **Multiple transports** — **Streamable HTTP** (`/mcp`, recommended) + **SSE** (`/sse`, legacy) for AI agents; a **stdio bridge** (`cidx mcp`) for clients that expect stdio like Claude Desktop.
+- 🔌 **Multiple transports** — **Streamable HTTP** (`/mcp`, recommended) + **SSE** (`/sse`, legacy) for AI agents; a **stdio bridge** (`cidx mcp`) for clients that expect stdio like Claude Desktop (it forwards index-completion notifications + exposes MCP resources).
+- 🛰️ **Ops built in** — `cidx doctor` (one read-only diagnostic pass), `cidx stats` (table sizes + query analytics: zero-hit queries as an index-gap signal), `cidx compact` (reclaim table space), **zero-downtime model migration** (change the embedding model without taking search down), optional idle shutdown, and a job queue with priority ordering.
 - 🔒 **Secure** — both servers listen only on `127.0.0.1`; CORS restricted to localhost + Host-header (DNS-rebinding) protection on every endpoint.
 - 📦 **Single binary** — standalone executable via `bun build --compile` (`dist/cidx`); grammars embedded.
 
@@ -174,8 +175,12 @@ PURGE_DATA=1 ./uninstall.sh   # also deletes the ~/.cidx data
 | `commits <project\|dir> [query] [flags]` | Git-history / commit-message search (when/why a feature was added, file history) |
 | `pack "<query>" [flags]` | Context pack: search hits + per-hit file outline + imports + context lines, in ONE call |
 | `impact <symbol\|file> [flags]` | Change impact: one ranked answer to "if I change X, what breaks?" |
+| `coupling [project\|dir] [flags]` | Coupling metrics per file: fanIn / fanOut / instability, banded (hubs, change magnets, unstable leaves) |
+| `hotspots [project\|dir] [flags]` | Hotspot / tech-debt report: churn × size, promoted by dead code + coupling |
 | `apidiff <project\|dir> <base> [flags]` | Public-API diff between two git refs (breaking symbols surfaced) |
-| `doccheck <project\|path> [flags]` | Doc–code conformance: checks the project's markdown docs against the code (deterministic, no LLM); exit 1 on drift |
+| `doccheck <project\|path> [--last] [flags]` | Doc–code conformance: checks the project's markdown docs against the code (deterministic, no LLM); `--last` prints the stored watch snapshot; exit 1 on drift |
+| `stats [project]` | Table stats: rows, disk size, index freshness + query analytics (zero-hit queries, latency) |
+| `compact <name>` | Reclaims table space via the native LanceDB optimize (refuses while a job runs) |
 | `doctor` | Read-only diagnostic pass over the whole install (ok/warn/fail + fix hints) |
 | `config [path]` | Shows the active YAML configuration (or its path) |
 | `mcp` (`stdio`) | Starts the stdio MCP bridge (Claude Desktop etc.) |
@@ -231,7 +236,10 @@ cidx search "config" --path "src/*"                      # file path pattern
 - **`--mmr [true|false]`**: MMR diversification re-orders the top results so they aren't near-duplicates (e.g. copies of the same function). On by default (`search.mmr.lambda`, default 0.5); `--mmr false` keeps a pure relevance order.
 - **`--max-chars <n>`**: cap the returned text to ~n characters — results are kept whole in ranked order while they fit (top-1 always returned), so you can raise `--limit` for recall without bloating output.
 - **`--doc [true|false]`** (default true): each symbol's docstring / doc-comment is embedded into a separate `doc_vector` column, and hybrid search merges doc-vector + doc-BM25 legs alongside the code legs — so intent queries ("how to do X") can hit the *documentation* even when the code body doesn't match. Results found via a doc leg carry a `[doc hit]` marker. `--doc false` skips the doc legs for a faster pure-code lookup. Only affects tables indexed with 2.4.0+ (reindex older projects).
-- The **`--language`**, **`--type`**, **`--path`** filters work with `search`; `--language`/`--type` can also be used with `find`.
+- **`--boost [true|false]`** (default on): small multiplicative re-scoring after the RRF merge — short-path and conventional source-root (`src`, `lib`, `app`) results nudged up, test and generated (`dist`, `build`, `vendor`…) files nudged down. The reranker/MMR see the adjusted order. `--boost false` keeps a pure relevance order; tune via `search.boost` in config.
+- **`--blame`** (off by default): stamps each result with `lastAuthor` / `lastCommitDate` / `churnCommits` via one `git blame` per hit file (≤ 8 files; extras reported). The result payload is an envelope: `{ results, blameNotARepo?, blameSkipped? }` — API clients that consumed the bare array must read `results`.
+- **`--expand`** (off by default): a local LLM (`search.expand.model`) rewrites the query into up to 3 variants (symbol-shaped + rephrased) and merges their rankings into the base — better recall for intent-shaped queries.
+- The **`--language`**, **`--type`**, **`--path`** filters work with `search`; `--language`/`--type` can also be used with `find`, and `find` supports **`--fuzzy [true|false]`** (default on — `--fuzzy false` keeps strict exact/prefix-only behavior).
 
 Open a result directly in your editor (`open` — searches, prints the result list, then launches `$VISUAL`/`$EDITOR` at the matching line; `--pick n` selects the n-th result, default 1):
 
@@ -271,6 +279,8 @@ cidx deps src/core/index-manager.ts        # import graph: what it imports + who
 cidx callgraph searchIndex                 # callers/callees of a function (bounded trees)
 cidx callgraph src/core/index-manager.ts --direction callees --depth 2
 cidx deadcode backend --min-confidence 70  # potential dead code candidates (verify before deleting)
+cidx coupling backend                      # fanIn/fanOut/instability per file (hubs, magnets)
+cidx hotspots backend --since '30 days ago'  # churn × size tech-debt report (critical/warm/review)
 cidx commits backend "login flow"          # when/why was this feature added
 cidx commits backend --path src/auth --since '2 weeks ago' --files   # file history + changed files
 ```
@@ -335,9 +345,9 @@ For clients that support Streamable HTTP:
 
 Every tool that takes a `project` also takes a **`path`** — a file/dir inside the project, whose owning project is inferred (an explicit `project` wins). Nothing given: the search family searches all projects; the per-project report tools use the single indexed project or error naming them. An unknown project name comes back with the available projects (and the likeliest intended one), so the caller can self-correct in one turn.
 
-- `search_codebase(query, project?, limit?, mode?, language?, symbolType?, pathGlob?, contextLines?, rerank?, mmr?, maxChars?, doc?)` — hybrid search; if `project` is not given, in all projects. `mode` = `hybrid`/`vector`/`text`. Each result carries a derived `signature` + `indexedAt`; `contextLines > 0` adds ±N surrounding lines read live from the file; reranking and MMR diversification are on by default (pass `rerank: false` / `mmr: false` to skip); `maxChars` caps returned text (results kept whole while they fit); docstring/doc-comment search legs are on by default (`doc: false` skips them; doc-hit results carry a `[doc hit]` marker).
-- `search_codebase_batch(queries, project?, limit?, mode?, language?, symbolType?, pathGlob?, contextLines?, rerank?, mmr?, maxChars?, doc?)` — run several queries in one round-trip; results grouped per query (`## Query: "…"` sections). Same options/behavior as `search_codebase`, applied per query.
-- `find_symbol(name, project?, path?, limit?, language?, symbolType?)` — finds a symbol by name (exact + prefix).
+- `search_codebase(query, project?, path?, limit?, mode?, language?, symbolType?, pathGlob?, contextLines?, rerank?, mmr?, boost?, maxChars?, doc?, blame?, expand?)` — hybrid search; if `project` is not given, in all projects. `mode` = `hybrid`/`vector`/`text`. Returns an envelope `{ results, blameNotARepo?, blameSkipped?, expanded?, expandNote? }`. Each result carries a derived `signature` + `indexedAt`; `contextLines > 0` adds ±N surrounding lines read live from the file; reranking, MMR and the path/surface boost are on by default (pass `rerank: false` / `mmr: false` / `boost: false` to skip); `maxChars` caps returned text (results kept whole while they fit); docstring/doc-comment search legs are on by default (`doc: false` skips them; doc-hit results carry a `[doc hit]` marker); `blame: true` stamps `lastAuthor`/`lastCommitDate`/`churnCommits`; `expand: true` runs local-LLM query expansion.
+- `search_codebase_batch(queries, project?, path?, limit?, mode?, language?, symbolType?, pathGlob?, contextLines?, rerank?, mmr?, boost?, maxChars?, doc?, blame?, expand?)` — run several queries in one round-trip; results grouped per query (`## Query: "…"` sections, the envelope notes per group). Same options/behavior as `search_codebase`, applied per query.
+- `find_symbol(name, project?, path?, limit?, fuzzy?, language?, symbolType?)` — finds a symbol by name (exact + prefix); when both miss, a fuzzy n-gram tier (default on, `fuzzy: false` opts out) recovers typos — fuzzy hits carry `fuzzy: true`.
 - `find_references(name, project?, path?, limit?, includeDocs?, language?, symbolType?)` — finds where a symbol is used (call sites + definition) as `file:line` occurrences. Honest about its cap (`total`/`truncated`); doc artifacts count as evidence unless `includeDocs: false`.
 - `get_repo_overview(project?, path?)` — structural onboarding summary (languages, symbol types, top directories, entry points, largest files).
 - `list_indexes()` — lists indexed projects and their statuses.
@@ -351,7 +361,9 @@ Every tool that takes a `project` also takes a **`path`** — a file/dir inside 
 - `get_context_pack(query, project?, path?, limit?, maxChars?, contextLines?, language?, symbolType?, pathGlob?)` — one call assembling the hybrid-search core plus, per hit, the file's symbol outline, forward imports and surrounding context lines, all under a single pack-level character budget (hits kept whole, top hit always returned, the rest reported as `omitted`; the search filters narrow the underlying search exactly as `search_codebase`'s do).
 - `get_api_diff(project?, path?, base, head?)` — public-API diff between two git refs compared as exported-symbol surfaces: symbols classified `removed` / `signature-changed` / `visibility-narrowed` (all breaking), `added`, `unchanged`; the historical side is re-parsed from git with the same tree-sitter recipe. No indexing, no reindex.
 - `get_change_impact(symbol?, path?, project?, depth?, limit?)` — one ranked answer to "if I change X, what breaks?": direct callers (call graph) outrank importing files (dependency graph), which outrank loose textual mentions; test files surface as `coveredBy` instead of production consumers.
-- `check_docs(project?, path?, files?, ignore?, since?, window?, noUndocumented?, ...)` — doc–code conformance checker: every backtick span in the project's markdown docs is classified and resolved against the code, **deterministically** (no Ollama, no LLM). `findings` = drift (only total-resolution misses, confidence ≥ 90); `needsReview` = everything uncertain; `undocumented` = exported symbols no doc mentions (advisory). `since`/`window` restrict the report to docs/code that actually changed; the CLI exits 1 only on drift.
+- `get_coupling(project?, path?, limit?)` — coupling metrics per file (fanIn / fanOut / instability / externalImports), banded into hubs, change magnets and unstable leaves. Rides the dependency-graph cache — no reindex.
+- `get_hotspots(project?, path?, since?, limit?)` — the churn × size tech-debt report: which files are over-changed and over-coupled (critical / warm / review bands), with dead-code density and coupling as debt signals. Churn runs `git log` live; a non-repo is reported, not thrown.
+- `check_docs(project?, path?, files?, ignore?, since?, window?, judge?, last?, noUndocumented?, ...)` — doc–code conformance checker: every backtick span in the project's markdown docs is classified and resolved against the code, **deterministically** (no Ollama, no LLM). `findings` = drift (only total-resolution misses, confidence ≥ 90); `needsReview` = everything uncertain; `undocumented` = exported symbols no doc mentions (advisory). `since`/`window` restrict the report to docs/code that actually changed; with `doccheck.judgeModel` configured, a local instruct model re-judges the uncertain items (`judge: false` skips); `last: true` returns the stored snapshot of the last watch-mode run instead of a fresh check. The CLI exits 1 only on drift.
 
 ### Index freshness (important for agents)
 
@@ -403,8 +415,15 @@ embedding:
   cacheMax: 50000             # max records in the content-hash embedding cache
   provider: auto              # auto | ollama | llamacpp; auto = an Ollama that serves the model wins, else a live llama-server
   llamacppUrl: http://127.0.0.1:8080  # llama-server base URL; start with -m <model.gguf> -a <model> --ctx-size 2048 --ubatch-size 2048 --embedding (ubatch ≥ tokens per chunk — char-estimated chunks can tokenize larger than maxChunkTokens)
+  framing: none               # none | auto; auto = per-model task prefixes (EmbeddingGemma 2 docs/queries, qwen3 query instruction) — measured +0.06–0.08 MRR; unknown models stay unframed; a change re-embeds via migration
 
 search:
+  queryLogSize: 10000         # max rows kept in the local query log (search analytics via 'cidx stats'); 0 = off
+  expand:
+    model: ""                 # local-LLM query expander (an INSTRUCT model, not the embedding model); empty = expand:true degrades to the base search with a note
+    url: ""                   # expansion base URL; empty = same server as the embedding backend
+    maxVariants: 3            # max variant queries one expanded search may add
+    timeoutMs: 10000          # the single completion call aborts at this deadline
   rerank:
     enabled: true             # on by default; auto-disables if the reranker model is absent on the backend
     model: qwen3-reranker-q8  # causal-LM reranker; scored via yes/no token logprobs
@@ -416,18 +435,36 @@ search:
     enabled: true             # diversify the top results (Maximal Marginal Relevance)
     lambda: 0.5               # 1.0 = pure relevance, 0.0 = pure diversity (0.5 dedupes near-duplicates)
     topK: 20                  # how many candidates to diversify over before slicing to limit
+  boost:
+    enabled: true             # nudge RRF-merged results by path/surface signals (single-leg results untouched)
+    shortPath: 0.1            # max bonus for short project-relative paths (log-scale fade-in)
+    sourceRoot: 0.05          # bonus when a path starts with a conventional source root
+    testDemotion: 0.85        # demotion multiplier for test files
+    generatedDemotion: 0.8    # demotion multiplier for generated paths (gen/dist/build/vendor/node_modules, .pb.go, .min.*)
+    sourceRoots: ["src", "lib", "app"]
+
+doccheck:
+  maxChars: 12000             # per-call char budget over the rendered findings
+  undocumentedLimit: 25       # max undocumented-symbol entries per report
+  judgeModel: ""              # local instruct model re-judging uncertain claims; empty = off
+  judgeUrl: ""                # judge base URL; empty = same server as the embedding backend
+  watch: false                # after each successful index/migrate job, re-run the check and store the report ('cidx doccheck <project> --last' reads it)
 
 indexing:
   maxChunkSize: 1500
   overlapSize: 200
   maxChunkTokens: 512         # approximate per-chunk token cap (effective size = min(maxChunkSize, maxChunkTokens*4)); lower to split big chunks, then reindex
   docstrings: true            # extract each symbol's docstring/comment and embed it into a separate doc_vector (doc search legs); false = no extra embed calls
+  maxFileSizeBytes: 0         # skip files larger than this many bytes (oversized-data-file guard); 0 = off; .cidx.json can override per project
   allowedExtensions: [".ts", ".js", ".py", ".go", ".rs", ".java", ".cpp", ".c", ".cs", ".php", ".rb", ".gd", ".gdshader", ".tscn", ".tres", ".godot", "..."]
   ignoredDirs: ["node_modules", ".git", "dist", ".godot", "..."]
   vectorIndexThreshold: 50000 # an ANN vector index is built when a table exceeds this chunk count
   respectGitignore: true      # also obey .gitignore rules
   gitTrackedOnly: false       # if true, index only git-tracked files
   jobConcurrency: 2           # number of projects (jobs) indexed in parallel at the same time
+
+daemon:
+  idleTimeoutMinutes: 0       # exit after N minutes without activity (requests, jobs, open MCP sessions); 0 = off; every entry point restarts the daemon on demand
 
 # NOTE: the YAML list REPLACES the in-code default wholesale — an existing
 # config.yml written before Godot support does not pick up the new extensions
@@ -438,7 +475,7 @@ watcher:
   debounceMs: 300
 ```
 
-**Priority:** in-code defaults < YAML < environment variables. Environment variables can also be used for a quick temporary override: `CIDX_HOME`, `EMBED_PROVIDER`, `LLAMACPP_URL`, `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX`, `MCP_PORT`, `CONTROL_PORT`, `EMBED_BATCH_SIZE`, `EMBED_CONCURRENCY`, `EMBED_CACHE_MAX`, `MAX_CHUNK_TOKENS`, `VECTOR_INDEX_THRESHOLD`, `JOB_CONCURRENCY`, `RERANK_MODEL`, `RERANK_URL`, `RERANK_TOP_K`, `RERANK_CONCURRENCY`, `RERANK_NUM_CTX`, `MMR_LAMBDA`, `MMR_TOP_K`. You can define additional ignore rules by placing a `.cidxignore` at a project root (`.gitignore` is also obeyed).
+**Priority:** in-code defaults < YAML < environment variables. Environment variables can also be used for a quick temporary override: `CIDX_HOME`, `EMBED_PROVIDER`, `LLAMACPP_URL`, `EMBEDDING_FRAMING`, `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX`, `MCP_PORT`, `CONTROL_PORT`, `EMBED_BATCH_SIZE`, `EMBED_CONCURRENCY`, `EMBED_CACHE_MAX`, `MAX_CHUNK_TOKENS`, `MAX_FILE_SIZE_BYTES`, `VECTOR_INDEX_THRESHOLD`, `JOB_CONCURRENCY`, `QUERY_LOG_SIZE`, `EXPAND_MODEL`, `EXPAND_URL`, `EXPAND_MAX_VARIANTS`, `EXPAND_TIMEOUT_MS`, `BOOST_ENABLED`, `BOOST_SHORT_PATH`, `BOOST_SOURCE_ROOT`, `BOOST_TEST_DEMOTION`, `BOOST_GENERATED_DEMOTION`, `RERANK_MODEL`, `RERANK_URL`, `RERANK_TOP_K`, `RERANK_CONCURRENCY`, `RERANK_NUM_CTX`, `MMR_LAMBDA`, `MMR_TOP_K`, `DOC_CHECK_JUDGE_MODEL`, `DOC_CHECK_JUDGE_URL`, `DOC_CHECK_WATCH`, `DAEMON_IDLE_TIMEOUT_MINUTES`. You can define additional ignore rules by placing a `.cidxignore` at a project root (`.gitignore` is also obeyed).
 
 > 💡 **Exclude large data folders.** Since `allowedExtensions` includes `.json`, generated/very large JSON data files (e.g. HuggingFace `tokenizer.json`, fixture/static data) get split into thousands of chunks and embedded — this slows down indexing and pollutes search results. Exclude such folders by placing a `.cidxignore` at the project root:
 > ```gitignore
@@ -456,13 +493,16 @@ The global `~/.cidx/config.yml` applies to every project. A project root can car
 {
   "languages": ["typescript", "gdscript"],
   "ignore": ["vendor/**", "*.gen.ts"],
-  "embedModel": "qwen3-embedding:8b-q8_0"
+  "embedModel": "qwen3-embedding:8b-q8_0",
+  "maxFileSizeBytes": 1048576
 }
 ```
 
 - **`languages`** — allowlist of language labels (same labels as the `language` search filter: `typescript`, `python`, `gdscript`, `markdown`, …). Files with no label for their extension are dropped while the filter is active; already-indexed files that no longer pass are pruned on the next `sync` (and removed live by the watcher).
 - **`ignore`** — extra ignore patterns layered on top of `.gitignore` + `.cidxignore`.
-- **`embedModel`** — a per-project embedding model. Set it **before the first index** (the model is pinned to the project at creation). Changing it later escalates the next `sync` to a full reindex, and the watcher skips writes until that reindex runs, so vectors from two models never share a table. Queries are always embedded with the model the table was built with.
+- **`embedModel`** — a per-project embedding model. Set it **before the first index** (the model is pinned to the project at creation). Changing it later escalates the next `sync` into a **zero-downtime migration** (a shadow table is re-embedded off to the side and swapped in atomically — search keeps serving throughout), and the watcher skips writes until that migration runs, so vectors from two models never share a table. Queries are always embedded with the model the table was built with.
+- **`framing`** — a per-project override of the global `embedding.framing` (`none` | `auto`): per-model task prefixes for retrieval-tuned embedding models (measured +0.06–0.08 MRR). Like `embedModel`, it is pinned per project and a change migrates rather than mixing.
+- **`maxFileSizeBytes`** — a per-project override of the global `indexing.maxFileSizeBytes`: files strictly larger than this are skipped before chunking (and pruned by the next sync's deleted-file cleanup).
 
 The file is read fresh on every index job and watcher event — no daemon restart needed.
 
