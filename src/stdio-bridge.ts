@@ -551,6 +551,7 @@ async function main(): Promise<void> {
             noUndocumented: args.noUndocumented,
             since: args.since,
             window: args.window,
+            judge: args.judge,
           });
           return ok(formatDocCheck(report));
         }

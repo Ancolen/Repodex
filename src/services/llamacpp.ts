@@ -13,9 +13,13 @@ export interface LlamaServerModels {
 }
 
 /** Probes the OpenAI-compatible `/v1/models` endpoint (never throws). */
-export async function probeLlamaServer(url: string, timeoutMs = 5000): Promise<LlamaServerModels> {
+export async function probeLlamaServer(
+  url: string,
+  timeoutMs = 5000,
+  fetchFn: typeof fetch = fetch,
+): Promise<LlamaServerModels> {
   try {
-    const resp = await fetch(`${url}/v1/models`, { signal: AbortSignal.timeout(timeoutMs) });
+    const resp = await fetchFn(`${url}/v1/models`, { signal: AbortSignal.timeout(timeoutMs) });
     if (!resp.ok) return { up: true, models: [] };
     const data = (await resp.json()) as { data?: Array<{ id?: string }> };
     return {
@@ -34,12 +38,13 @@ interface OpenAIEmbeddingsResponse {
 }
 
 /**
- * Hard ceiling for one wire request (embeds and rerank alike). A wedged
- * llama-server (observed once on llama.cpp master in Oct 2026: a task launched
- * and never released its slot, stalling every concurrent job) must surface as
- * an error — and a skipped file / neutral score — instead of a hung daemon.
+ * Hard ceiling for one wire request (embeds, rerank and the doccheck judge
+ * alike). A wedged llama-server (observed once on llama.cpp master in Oct 2026:
+ * a task launched and never released its slot, stalling every concurrent job)
+ * must surface as an error — and a skipped file / neutral score — instead of a
+ * hung daemon.
  */
-const REQUEST_TIMEOUT_MS = 120_000;
+export const REQUEST_TIMEOUT_MS = 120_000;
 
 /**
  * Embeds a batch of texts through `POST /v1/embeddings` (an array `input` is
@@ -94,8 +99,12 @@ export interface LlamaLogprobEntry {
   logprob?: number;
 }
 
-/** Extracts the first token's top-logprobs table from either response shape. */
-function extractTopLogprobs(raw: unknown): LlamaLogprobEntry[] {
+/**
+ * Extracts the first token's top-logprobs table from either response shape.
+ * Shared with the doccheck semantic judge (`services/docjudge.ts`), whose wire
+ * client hits the very same completions endpoint.
+ */
+export function extractTopLogprobs(raw: unknown): LlamaLogprobEntry[] {
   if (raw == null) return [];
   if (!Array.isArray(raw)) {
     // OpenAI wrapper: { content: [ { logprob, top_logprobs: [...] } ] }

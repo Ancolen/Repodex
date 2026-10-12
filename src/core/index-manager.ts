@@ -131,12 +131,16 @@ import {
   isDocPath,
   HISTORICAL_FILE_RE,
   type DocCheckChunk,
+  type DocCheckOpts,
   type DocCheckReport,
   type DocCheckState,
   type DocFile,
+  type DocJudge,
   type DocSymbol,
 } from "./doccheck";
 export type { DocCheckReport, DocFinding, UndocumentedEntry } from "./doccheck";
+// D1b — the semantic judge's wire client (built here, injected into the engine).
+import { createDocJudge, createJudgeAvailabilityProbe } from "../services/docjudge";
 import { collectDocFiles, listRootFiles, readProjectManifest } from "../services/docfiles";
 // A2 — event stream: the events the daemon subscribes to (job completion,
 // index add/remove) and forwards into its in-memory ring for GET /events.
@@ -3209,6 +3213,38 @@ export class IndexManager {
   }
 
   /**
+   * Probes once (cached) whether the doccheck semantic-judge model
+   * (`doccheck.judgeModel`, proposal D1b) exists on the resolved backend —
+   * the `ensureRerankAvailable` precedent, down to the session-cached verdict
+   * and the auto-disable on a miss: judge-on-config with an absent model
+   * degrades to judge-off for the run instead of storming the backend. The
+   * probe itself (wire + caching + the one-time miss log) lives in
+   * `services/docjudge.ts` so it is testable with an injected fetch.
+   */
+  private judgeProbe: (() => Promise<boolean>) | null = null;
+
+  async ensureJudgeAvailable(): Promise<boolean> {
+    const model = CONFIG.DOC_CHECK_JUDGE_MODEL;
+    if (model.length === 0) return false;
+    if (this.judgeProbe === null) {
+      this.judgeProbe = createJudgeAvailabilityProbe({
+        model,
+        resolveUrl: () => this.resolveJudgeUrl(),
+        resolveProvider: async () => (await resolveEmbedBackend()).provider,
+        onMiss: (message) => console.error(message),
+      });
+    }
+    return this.judgeProbe();
+  }
+
+  /** The judge's base URL: `doccheck.judgeUrl`, else the embedding backend's server (rerank precedent). */
+  private async resolveJudgeUrl(): Promise<string> {
+    if (CONFIG.DOC_CHECK_JUDGE_URL) return CONFIG.DOC_CHECK_JUDGE_URL;
+    const backend = await resolveEmbedBackend();
+    return backend.url;
+  }
+
+  /**
    * Refines the candidate pool and slices to `limit`:
    *   1. (optional) rerank — re-score by the cross-encoder and sort by precision;
    *   2. (optional) MMR — select a relevant-and-diverse subset.
@@ -3640,13 +3676,20 @@ export class IndexManager {
   // ---------------------------------------------------- doc–code conformance (D1)
 
   /**
-   * Deterministic doc–code conformance check (proposal D1): assemble the pure
-   * engine's state (docs from disk, code chunks from the cached snapshot, the
-   * path universe from the indexed file set + root listing + manifest) and run
-   * it. NO Ollama calls — same state in, same report out. Optional drift
-   * window (`since` ref or `window: true`) post-filters findings to those whose
-   * doc or code side actually changed since the anchor; anything that degrades
-   * is reported in `notes`, never silently widened.
+   * Doc–code conformance check (proposal D1): assemble the pure engine's
+   * state (docs from disk, code chunks from the cached snapshot, the path
+   * universe from the indexed file set + root listing + manifest) and run it.
+   * NO embedding calls — same state in, same report out. Optional drift window
+   * (`since` ref or `window: true`) post-filters findings to those whose doc or
+   * code side actually changed since the anchor; anything that degrades is
+   * reported in `notes`, never silently widened.
+   *
+   * Semantic judge (D1b): when `doccheck.judgeModel` is configured, a local
+   * instruct model (probed once via `ensureJudgeAvailable`) re-adjudicates the
+   * claims the deterministic checks could not reach — high-confidence
+   * "consistent" verdicts drop them out of `needsReview`; the judge never
+   * produces drift findings. `judge: false` skips it per call. With no
+   * configured model nothing is probed and the report is byte-identical.
    */
   async checkDocs(opts: {
     project?: string;
@@ -3659,6 +3702,8 @@ export class IndexManager {
     noUndocumented?: boolean;
     since?: string;
     window?: boolean;
+    /** Per-call judge opt-out (`judge: false`, CLI `--judge false`); absent → config behavior. */
+    judge?: boolean;
   } = {}): Promise<DocCheckReport> {
     // Project resolution (the getCallGraph pattern): from a file path, an
     // explicit name, or the single indexed project.
@@ -3737,11 +3782,33 @@ export class IndexManager {
       lastIndexedAt: rec.lastIndexedAt,
     };
 
-    const report = runDocCheck(state, {
+    // Semantic judge (D1b): config-on + per-call opt-out + a one-time
+    // availability probe. Unavailable or skipped, the judge is NOT injected —
+    // the engine then emits the honest `checked.judge` block (available: false,
+    // zero counters) and the run notes the degradation.
+    const judgeOpts: Pick<DocCheckOpts, "judge" | "judgeModel"> = {};
+    if (CONFIG.DOC_CHECK_JUDGE_MODEL.length > 0) {
+      judgeOpts.judgeModel = CONFIG.DOC_CHECK_JUDGE_MODEL;
+      if (opts.judge !== false) {
+        if (await this.ensureJudgeAvailable()) {
+          judgeOpts.judge = createDocJudge({ model: CONFIG.DOC_CHECK_JUDGE_MODEL });
+        } else {
+          notes.push(
+            `doccheck.judgeModel '${CONFIG.DOC_CHECK_JUDGE_MODEL}' is not available on the backend — the semantic judge is off for this run`,
+          );
+        }
+      } else {
+        notes.push("the semantic judge was disabled for this call (judge: false / --judge false)");
+      }
+    }
+
+    const report = await runDocCheck(state, {
       limit: opts.limit,
       maxChars: opts.maxChars ?? CONFIG.DOC_CHECK_MAX_CHARS,
       undocumentedLimit: opts.undocumentedLimit ?? CONFIG.DOC_CHECK_UNDOCUMENTED,
       noUndocumented: opts.noUndocumented,
+      judge: judgeOpts.judge,
+      judgeModel: judgeOpts.judgeModel,
     });
 
     report.checked.truncated = discovery.truncated || snapshot.truncated;

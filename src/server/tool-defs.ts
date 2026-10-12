@@ -633,7 +633,11 @@ export const TOOL_DEFINITIONS: Tool[] = [
       "changed — with a degradation note instead of a silent full scan when the anchor does not " +
       "resolve. FRESHNESS: evidence comes from the index, which lags edits by ~1-2s — a symbol " +
       "renamed moments ago may read as drift until the watcher syncs; `checked.indexFreshness` shows " +
-      "what the report was built from. No schema change, no reindex.",
+      "what the report was built from. No schema change, no reindex. Optional semantic judge (D1b, " +
+      "off by default): with `doccheck.judgeModel` in config, a local instruct model re-judges the " +
+      "uncertain claims via yes/no completion logprobs — a high-confidence consistent verdict drops " +
+      "the claim out of `needsReview` (`checked.judge` surfaces model/available/judged/resolved); the " +
+      "judge never produces drift findings and `judge: false` skips it per call.",
     inputSchema: {
       type: "object",
       properties: {
@@ -647,6 +651,7 @@ export const TOOL_DEFINITIONS: Tool[] = [
         noUndocumented: { type: "boolean", description: "Skip reverse coverage (exported symbols no doc mentions) entirely." },
         since: { type: "string", description: "A git ref; keep only findings whose doc or code side changed since that commit." },
         window: { type: "boolean", description: "Anchor the drift window at the docs' own last commit instead of 'since'." },
+        judge: { type: "boolean", description: "Set false to skip the semantic judge for this call even when doccheck.judgeModel is configured." },
       },
       required: [],
     },

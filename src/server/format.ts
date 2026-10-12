@@ -627,7 +627,9 @@ function docCheckFindingLine(f: DocFinding): string {
 /**
  * Converts a doc–code conformance report to text, sections in severity order:
  * drift findings → needs review → undocumented. Deterministic input →
- * deterministic output (same report, same bytes).
+ * deterministic output (same report, same bytes). The semantic judge (D1b) is
+ * surfaced only when the report carries `checked.judge` — absent on the pure
+ * deterministic path, so those renders stay byte-identical.
  */
 export function formatDocCheck(r: DocCheckReport): string {
   const lines: string[] = [];
@@ -638,6 +640,14 @@ export function formatDocCheck(r: DocCheckReport): string {
   if (c.window) {
     lines.push(
       `Window: since ${c.window.since} — ${c.window.docsChanged} doc file(s), ${c.window.codeChanged} code file(s) changed`,
+    );
+  }
+  if (c.judge) {
+    const j = c.judge;
+    lines.push(
+      j.available
+        ? `Judge: ${j.model} — ${j.judged} claim(s) judged, ${j.resolved} resolved as consistent (dropped from needs review)${j.failed > 0 ? `, ${j.failed} failed` : ""}`
+        : `Judge: ${j.model || "(unset)"} — NOT available this run, nothing judged`,
     );
   }
   const skipped = Object.entries(c.skipped)

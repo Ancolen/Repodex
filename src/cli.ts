@@ -895,10 +895,10 @@ async function cmdHotspots(positionals: string[], flags: Record<string, string |
 
 /**
  * `cidx doccheck [project|path] [--since ref] [--window] [--files a,b] [--ignore a,b]
- *  [--limit n] [--max-chars n] [--no-undocumented]`
+ *  [--limit n] [--max-chars n] [--no-undocumented] [--judge false]`
  *
- * Deterministic doc–code conformance check. Exit code 1 only when there are
- * drift findings (CI/hook-friendly); needsReview/undocumented never set it.
+ * Doc–code conformance check. Exit code 1 only when there are drift findings
+ * (CI/hook-friendly); needsReview/undocumented never set it.
  */
 async function cmdDoccheck(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
   await requireDaemon();
@@ -914,6 +914,7 @@ async function cmdDoccheck(positionals: string[], flags: Record<string, string |
     noUndocumented?: boolean;
     since?: string;
     window?: boolean;
+    judge?: boolean;
   } = {};
   // A positional that exists on disk → path mode; otherwise a project name.
   if (arg) {
@@ -933,6 +934,9 @@ async function cmdDoccheck(positionals: string[], flags: Record<string, string |
   if (typeof flags["max-chars"] === "string") body.maxChars = Number(flags["max-chars"]);
   if (typeof flags["undocumented-limit"] === "string") body.undocumentedLimit = Number(flags["undocumented-limit"]);
   if (flags["no-undocumented"] === true) body.noUndocumented = true;
+  // D1b: --judge false skips the semantic judge for this call (default-on via config).
+  if (flags.judge === true || flags.judge === "true") body.judge = true;
+  else if (flags.judge === "false") body.judge = false;
   const r = await api<any>("POST", "/doccheck", body);
   console.log(formatDocCheck(r));
   if ((r.findings ?? []).length > 0) process.exit(1);
@@ -1286,6 +1290,7 @@ const COMMANDS: Record<string, CmdDoc> = {
       ["--limit <n>", "Max findings/review items kept (default 100)."],
       ["--max-chars <n>", "Char budget over rendered findings (kept whole)."],
       ["--no-undocumented", "Skip the 'exported but undocumented' advisory section."],
+      ["--judge false", "Skip the semantic judge for this call even when doccheck.judgeModel is configured."],
     ],
     details: [
       "Identifier/path/dep/endpoint/cmd/flag/env/config claims from backtick spans, resolved against",
@@ -1293,6 +1298,9 @@ const COMMANDS: Record<string, CmdDoc> = {
       "doubt goes to 'needs review'. Historical files, planned regions and fenced examples are never",
       "accused. Exit code 1 only when there are drift findings (CI/hook-friendly).",
       "Evidence comes from the index (lags edits by ~1-2s) — see checked.indexFreshness.",
+      "With doccheck.judgeModel set in config, a local instruct model re-judges the uncertain claims",
+      "(yes/no logprobs); consistent verdicts drop them out of 'needs review' — the judge never",
+      "produces drift findings. Default off.",
     ],
     examples: ["cidx doccheck .", "cidx doccheck repodex --window", "cidx doccheck api --since v1.2.0"],
   },
