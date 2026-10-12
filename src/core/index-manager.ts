@@ -43,6 +43,10 @@ import { probeLlamaServer } from "../services/llamacpp";
 import { modelTagPresent } from "../utils/model-tag";
 import { readProjectConfig } from "./project-config";
 import { rerankScores } from "../services/rerank";
+// S4 — query expansion (local LLM): the variant generator (never throws — any
+// failure degrades to the base search) and the weighted RRF merge that keeps
+// the original query's ranking dominant.
+import { expandQuery, mergeVariantRankings } from "../services/expand";
 import { selectMMR } from "../utils/mmr";
 import { applyPathBoost, type PathBoostConfig } from "../utils/boost";
 import { applyCharBudget, applyPackBudget } from "../utils/budget";
@@ -133,6 +137,14 @@ const MIGRATE_JOB = MIGRATE_JOB_TYPE;
  */
 const BLAME_FILE_CAP = 8;
 
+/**
+ * Per-VARIANT fetch floor for an expanded search (proposal S4): variant
+ * queries fetch at `max(limit, 10)`, never at the caller's (possibly large)
+ * `limit` — the merged pool is refined once anyway, so a big caller limit
+ * must not multiply the variant fetches.
+ */
+const EXPAND_FETCH_MIN = 10;
+
 export interface IndexJobPayload {
   target: IndexTarget;
   /** If true, the existing table+cache are cleared and indexed from scratch. */
@@ -173,6 +185,10 @@ export interface BatchSearchGroup {
   blameNotARepo?: boolean;
   /** Hit files whose blame was skipped by the per-search file cap (no silent caps). */
   blameSkipped?: number;
+  /** S4: variant rankings merged into this query's results (0 = the base search alone). */
+  expanded?: number;
+  /** S4: expansion was requested but did not run — the reason (the base search is unchanged). */
+  expandNote?: string;
 }
 
 /**
@@ -187,6 +203,30 @@ export interface SearchEnvelope {
   blameNotARepo?: boolean;
   /** Hit files whose blame was skipped by the per-search file cap (no silent caps). */
   blameSkipped?: number;
+  /**
+   * S4 (opt-in `expand`): how many expansion-variant rankings were merged into
+   * these results. 0 = the base ranking alone (the request degraded — see
+   * `expandNote`). Absent when expansion was not requested, so the no-expand
+   * envelope is unchanged.
+   */
+  expanded?: number;
+  /**
+   * S4: expansion was requested but could not contribute — the reason (no
+   * model configured / backend unreachable / malformed response / no usable
+   * variants). The base search ran unchanged.
+   */
+  expandNote?: string;
+}
+
+/**
+ * S4 — the expand-related notes carried from the orchestration down to the
+ * envelope (`finishSearch`). Internal plumbing only: nothing here is part of a
+ * public schema (the public `expand` flag is a plain boolean; the count and the
+ * note are envelope OUTPUTS).
+ */
+interface ExpandNotes {
+  expanded?: number;
+  expandNote?: string;
 }
 
 /** One assembled hit of a context pack: the search hit plus its file's shape and imports. */
@@ -282,6 +322,19 @@ export interface SearchOptions extends SearchFilters {
    * `blameSkipped`). Off by default: it costs one git call per hit file.
    */
   blame?: boolean | undefined;
+  /**
+   * Local-LLM query expansion (proposal S4, opt-in per call — default false):
+   * one completion call produces 2-3 variant queries and their rankings merge
+   * into the base ranking (RRF, the original query's list first at weight 1,
+   * every variant at 0.5 — original rank dominance) BEFORE the refinement
+   * pipeline, so boost/rerank/MMR run once over the merged list. Variant
+   * searches run through the same internal core as the batch machinery, each
+   * capped at `max(limit, 10)`, and never write query-log rows. Costs one
+   * extra local round-trip; ANY failure (no `search.expand.model` configured,
+   * backend down, malformed response) degrades to the base search with an
+   * envelope note (`expanded` / `expandNote`).
+   */
+  expand?: boolean | undefined;
 }
 
 /**
@@ -951,30 +1004,20 @@ export class IndexManager {
     const startedAt = Date.now();
     const rec = this.registry.getIndex(name);
     if (!rec) throw this.indexNotFound(name);
-    const mode = opts?.mode ?? "hybrid";
-    // The query is embedded with the model the table was built with (the record
-    // pins it — global config or a .cidx.json per-project override), so vectors
-    // are always comparable. A legacy record without a model falls back to the
-    // global config.
-    const projectModel = rec.embedModel ?? CONFIG.OLLAMA_MODEL;
-    const vector =
-      mode === "text" ? null : await cachedEmbed(query, projectModel, this.registry, (t) => getEmbedding(t, projectModel));
-    const rerankOn = this.wantRerank(opts);
-    const mmrOn = this.wantMMR(opts);
-    const boostOn = this.wantBoost(opts);
-    const fetchLimit = rerankOn || mmrOn ? Math.max(limit, CONFIG.RERANK_TOP_K, CONFIG.MMR_TOP_K) : limit;
-    const { rows, rrfMerged } = await this.searchOnTable(rec.tableName, query, vector, fetchLimit, opts);
-    // Path/surface boost: after the RRF merge, BEFORE rerank/MMR — the boost
-    // adjusts relevance input only (rerank/MMR see the adjusted order). RRF-
-    // merged lists only: single-leg lists keep their native metric untouched
-    // (a text leg surfaces raw BM25 as `_score`, a vector leg `_distance`).
-    const boosted = boostOn && rrfMerged ? applyPathBoost(rows, this.pathBoostCfg(true), rec.path) : rows;
-    const refined = await this.refineAndSlice(boosted, query, limit, mode, rerankOn, mmrOn);
-    const scoped = refined.map((r) => this.scope(r, name, rec.lastIndexedAt));
-    const enriched = await this.enrich(scoped, opts?.contextLines ?? 0);
-    const env = await this.finishSearch(enriched, opts);
-    this.logQuery(startedAt, name, query, mode, env.results.length);
-    return env;
+    // S4 — opt-in query expansion: the variant rankings merge with the base
+    // ranking BEFORE the refinement pipeline (boost → rerank → MMR run ONCE
+    // over the merged list). Any degradation falls back to the plain pipeline
+    // over the already-fetched base ranking, with the reason on the envelope.
+    if (opts?.expand === true) {
+      const exp = await this.gatherExpansion(rec, query, limit, opts);
+      if (exp.lists.length === 0) {
+        return this.finishSingleProject(rec, exp.base.rows, exp.base.rrfMerged, query, limit, opts, startedAt, exp.notes);
+      }
+      const merged = this.mergeExpandedLists([exp.base.rows, ...exp.lists]);
+      return this.finishSingleProject(rec, merged, true, query, limit, opts, startedAt, exp.notes);
+    }
+    const { rows, rrfMerged } = await this.tableRows(rec, query, limit, opts);
+    return this.finishSingleProject(rec, rows, rrfMerged, query, limit, opts, startedAt);
   }
 
   /** Search across all projects; results are merged and ranked. */
@@ -988,39 +1031,233 @@ export class IndexManager {
       const env: SearchEnvelope = { results: [] };
       return env;
     }
-    const rerankOn = this.wantRerank(opts);
-    const mmrOn = this.wantMMR(opts);
-    const boostOn = this.wantBoost(opts);
-    const boostCfg = this.pathBoostCfg(boostOn);
-    const fetchLimit = rerankOn || mmrOn ? Math.max(limit, CONFIG.RERANK_TOP_K, CONFIG.MMR_TOP_K) : limit;
+    // S4 — opt-in query expansion (cross-project): the variant rankings merge
+    // with the base cross-table ranking; the path/surface boost is applied per
+    // project AFTER the merge (every merged row carries a fused `_score`), then
+    // the usual refinement. Degraded → the plain pipeline with the note.
+    if (opts?.expand === true) {
+      const exp = await this.gatherExpansionAll(query, limit, opts);
+      if (exp.lists.length === 0) {
+        // Degraded: re-run the plain cross-project pipeline — its per-table
+        // boost semantics ARE "the base search". Rare path (the expansion wire
+        // call failed after the base was fetched); costs one extra re-fetch.
+        return this.plainSearchAll(query, limit, opts, startedAt, exp.notes);
+      }
+      const merged = this.mergeExpandedLists([exp.base, ...exp.lists]);
+      const ranked = this.rankCombined(this.boostByProject(merged, this.pathBoostCfg(this.wantBoost(opts))), mode);
+      const refined = await this.refineAndSlice(ranked, query, limit, mode, this.wantRerank(opts), this.wantMMR(opts));
+      const enriched = await this.enrich(refined, opts?.contextLines ?? 0);
+      const env = await this.finishSearch(enriched, opts, exp.notes);
+      this.logQuery(startedAt, null, query, mode, env.results.length);
+      return env;
+    }
+    return this.plainSearchAll(query, limit, opts, startedAt);
+  }
 
+  /**
+   * The widened fetch a refinement-ready list needs (rerank/MMR read a wider
+   * candidate pool than the caller's `limit`).
+   */
+  private fetchLimitFor(limit: number, opts?: SearchOptions): number {
+    return this.wantRerank(opts) || this.wantMMR(opts)
+      ? Math.max(limit, CONFIG.RERANK_TOP_K, CONFIG.MMR_TOP_K)
+      : limit;
+  }
+
+  /**
+   * ONE plain table search, scoped to its project — the un-refined leg the
+   * public pipelines refine. The query vector is embedded with the model the
+   * TABLE was built with (the record pins it — global config or a `.cidx.json`
+   * per-project override), so vectors are always comparable; a legacy record
+   * without a model falls back to the global config. No boost/rerank/MMR/
+   * enrichment, no query log: the plain search and the S4 expansion merge both
+   * refine the result once, and the expansion VARIANT searches (internal, not
+   * logged) fetch at an explicit cap.
+   */
+  private async tableRows(
+    rec: IndexRecord,
+    query: string,
+    limit: number,
+    opts?: SearchOptions,
+    fetchOverride?: number,
+  ): Promise<{ rows: ScopedSearchResult[]; rrfMerged: boolean }> {
+    const mode = opts?.mode ?? "hybrid";
+    const fetchLimit = fetchOverride ?? this.fetchLimitFor(limit, opts);
+    const projectModel = rec.embedModel ?? CONFIG.OLLAMA_MODEL;
+    const vector =
+      mode === "text" ? null : await cachedEmbed(query, projectModel, this.registry, (t) => getEmbedding(t, projectModel));
+    const { rows, rrfMerged } = await this.searchOnTable(rec.tableName, query, vector, fetchLimit, opts);
+    return { rows: rows.map((r) => this.scope(r, rec.name, rec.lastIndexedAt)), rrfMerged };
+  }
+
+  /**
+   * The plain single-project refinement pipeline: path/surface boost (RRF-
+   * merged lists only — the boost adjusts relevance input only, BEFORE
+   * rerank/MMR) → rerank/MMR slice → signature/context enrichment → the
+   * public envelope (blame + payload boundary + char budget) → the ONE
+   * query-log row. Shared by the plain search and the S4 expansion merge, so
+   * the merged list goes through the exact same last mile.
+   */
+  private async finishSingleProject(
+    rec: IndexRecord,
+    rows: ScopedSearchResult[],
+    rrfMerged: boolean,
+    query: string,
+    limit: number,
+    opts?: SearchOptions,
+    startedAt: number = Date.now(),
+    notes?: ExpandNotes,
+  ): Promise<SearchEnvelope> {
+    const mode = opts?.mode ?? "hybrid";
+    const boosted =
+      this.wantBoost(opts) && rrfMerged ? applyPathBoost(rows, this.pathBoostCfg(true), rec.path) : rows;
+    const refined = await this.refineAndSlice(boosted, query, limit, mode, this.wantRerank(opts), this.wantMMR(opts));
+    const enriched = await this.enrich(refined, opts?.contextLines ?? 0);
+    const env = await this.finishSearch(enriched, opts, notes);
+    this.logQuery(startedAt, rec.name, query, mode, env.results.length);
+    return env;
+  }
+
+  /**
+   * S4 — the expansion merge (single project): weighted RRF with the ORIGINAL
+   * query's ranking as the first list (weight 1 — it keeps rank dominance),
+   * every variant at 0.5. Every merged row carries the fused `_score` (a row
+   * object copy — raw LanceDB rows are non-extensible proxies).
+   */
+  private mergeExpandedLists(lists: ScopedSearchResult[][]): ScopedSearchResult[] {
+    return mergeVariantRankings(lists, (r) => `${r.project}\u0000${String(r.id)}`).map(({ item, score }) => ({
+      ...item,
+      _score: score,
+    }));
+  }
+
+  /**
+   * S4 — generates the expansion variants and runs their searches through the
+   * same internal core the batch machinery funnels through, each fetch capped
+   * at `max(limit, EXPAND_FETCH_MIN)` (NOT the caller's limit — the merged
+   * pool is refined once anyway). The variant searches are INTERNAL: they must
+   * not write query-log rows, so they never pass through the public
+   * `searchIndex`/`searchAll` (which log exactly once on their exit) — the
+   * caller-visible query logs once from its own call, on the shared last mile.
+   *
+   * Retry-free degradation: ANY failure (no model configured, backend
+   * unreachable, HTTP error, timeout, malformed response, no usable variants)
+   * returns an empty variant list plus a note — never a failure of the base
+   * search, whose ranking is fetched concurrently with the expansion call and
+   * reused as-is on the degrade path.
+   */
+  private async gatherExpansion(
+    rec: IndexRecord,
+    query: string,
+    limit: number,
+    opts: SearchOptions,
+  ): Promise<{ base: { rows: ScopedSearchResult[]; rrfMerged: boolean }; lists: ScopedSearchResult[][]; notes: ExpandNotes }> {
+    const [res, base] = await Promise.all([expandQuery(query), this.tableRows(rec, query, limit, opts)]);
+    const notes: ExpandNotes = { expanded: res.variants.length };
+    if (res.error) notes.expandNote = `query expansion did not run (${res.error}) — results are the plain base search`;
+    if (res.variants.length === 0) return { base, lists: [], notes };
+    const capped = Math.max(limit, EXPAND_FETCH_MIN);
+    const lists = await Promise.all(
+      res.variants.map(async (v) => (await this.tableRows(rec, v, limit, opts, capped)).rows),
+    );
+    return { base, lists, notes };
+  }
+
+  /**
+   * Path/surface boost over a CROSS-PROJECT merged ranking (S4): each row is
+   * boosted against its OWN project root (the merged list is rank-sorted per
+   * project group first — the plain path boosts per table for the same
+   * reason), then re-ranked globally by the adjusted score. Every merged row
+   * carries the S4 fused `_score`, so the whole list is boostable — the
+   * single-leg guard inside `applyPathBoost` never bites here.
+   */
+  private boostByProject(rows: ScopedSearchResult[], cfg: PathBoostConfig): ScopedSearchResult[] {
+    if (!cfg.enabled || rows.length === 0) return rows;
+    const byProject = new Map<string, ScopedSearchResult[]>();
+    for (const r of rows) {
+      const group = byProject.get(r.project);
+      if (group) group.push(r);
+      else byProject.set(r.project, [r]);
+    }
+    const boosted: ScopedSearchResult[] = [];
+    for (const [name, group] of byProject) {
+      boosted.push(...applyPathBoost(group, cfg, this.registry.getIndex(name)?.path));
+    }
+    return boosted.sort((a, b) => (b._score ?? 0) - (a._score ?? 0));
+  }
+
+  /**
+   * The plain cross-project search: each table is queried with a vector
+   * embedded by ITS OWN model (per-project overrides make models differ), the
+   * boost applies per table BEFORE the cross-table merge (the same semantics
+   * pre-S4), then the usual refinement. The S4 expansion merge reuses the same
+   * table loop WITHOUT the boost (it boosts per project after its own merge —
+   * see `gatherExpansionAll`/`boostByProject`).
+   */
+  private async plainSearchAll(
+    query: string,
+    limit: number,
+    opts?: SearchOptions,
+    startedAt: number = Date.now(),
+    notes?: ExpandNotes,
+  ): Promise<SearchEnvelope> {
+    const mode = opts?.mode ?? "hybrid";
+    const rows = await this.crossTableRows(query, this.fetchLimitFor(limit, opts), opts, this.wantBoost(opts));
+    const refined = await this.refineAndSlice(rows, query, limit, mode, this.wantRerank(opts), this.wantMMR(opts));
+    const enriched = await this.enrich(refined, opts?.contextLines ?? 0);
+    const env = await this.finishSearch(enriched, opts, notes);
+    this.logQuery(startedAt, null, query, mode, env.results.length);
+    return env;
+  }
+
+  /**
+   * One ranked cross-table row list for a query (no boost unless `perTableBoost`
+   * is set — the plain semantics). The S4 internal variant searches land here
+   * too, at an explicit fetch cap.
+   */
+  private async crossTableRows(
+    query: string,
+    fetchLimit: number,
+    opts?: SearchOptions,
+    perTableBoost = false,
+  ): Promise<ScopedSearchResult[]> {
+    const mode = opts?.mode ?? "hybrid";
+    const boostCfg = perTableBoost ? this.pathBoostCfg(true) : undefined;
     const perTable = await Promise.all(
-      indexes.map(async (rec) => {
+      this.registry.listIndexes().map(async (rec) => {
         try {
-          // Each table is queried with a vector embedded by the model the table
-          // was built with (per-project overrides make models differ between
-          // projects). Caveat: cross-project ranking mixes distances from
-          // different embedding spaces when models differ.
           const model = rec.embedModel ?? CONFIG.OLLAMA_MODEL;
           const vector = mode === "text" ? null : await cachedEmbed(query, model, this.registry, (t) => getEmbedding(t, model));
           const { rows, rrfMerged } = await this.searchOnTable(rec.tableName, query, vector, fetchLimit, opts);
           // Boost per table (each row's factor comes from its own path), RRF-
           // merged lists only: the boosted `_score` then drives the cross-table
           // sort in rankCombined. Single-leg lists keep their native metric.
-          const adjusted = boostOn && rrfMerged ? applyPathBoost(rows, boostCfg, rec.path) : rows;
+          const adjusted = boostCfg && rrfMerged ? applyPathBoost(rows, boostCfg, rec.path) : rows;
           return adjusted.map((r) => this.scope(r, rec.name, rec.lastIndexedAt));
         } catch {
           return [] as ScopedSearchResult[];
         }
       }),
     );
+    return this.rankCombined(perTable.flat(), mode);
+  }
 
-    const ranked = this.rankCombined(perTable.flat(), mode);
-    const refined = await this.refineAndSlice(ranked, query, limit, mode, rerankOn, mmrOn);
-    const enriched = await this.enrich(refined, opts?.contextLines ?? 0);
-    const env = await this.finishSearch(enriched, opts);
-    this.logQuery(startedAt, null, query, mode, env.results.length);
-    return env;
+  /** S4 — the cross-project analogue of `gatherExpansion` (see there). */
+  private async gatherExpansionAll(
+    query: string,
+    limit: number,
+    opts: SearchOptions,
+  ): Promise<{ base: ScopedSearchResult[]; lists: ScopedSearchResult[][]; notes: ExpandNotes }> {
+    const [res, base] = await Promise.all([
+      expandQuery(query),
+      this.crossTableRows(query, this.fetchLimitFor(limit, opts), opts),
+    ]);
+    const notes: ExpandNotes = { expanded: res.variants.length };
+    if (res.error) notes.expandNote = `query expansion did not run (${res.error}) — results are the plain base search`;
+    if (res.variants.length === 0) return { base, lists: [], notes };
+    const capped = Math.max(limit, EXPAND_FETCH_MIN);
+    const lists = await Promise.all(res.variants.map((v) => this.crossTableRows(v, capped, opts)));
+    return { base, lists, notes };
   }
 
   /**
@@ -1028,13 +1265,22 @@ export class IndexManager {
    * enrichment (BEFORE the char budget — its handful of small fields must not
    * bill against the budget, and the budget keeps dropping whole hits on top
    * of them), then the public payload boundary (no embedding columns), wrapped
-   * in the envelope that carries the blame notes.
+   * in the envelope that carries the blame notes — and, when expansion was
+   * requested (S4), the variant count / degrade note.
    */
-  private async finishSearch(rows: ScopedSearchResult[], opts?: SearchOptions): Promise<SearchEnvelope> {
+  private async finishSearch(
+    rows: ScopedSearchResult[],
+    opts?: SearchOptions,
+    notes?: ExpandNotes,
+  ): Promise<SearchEnvelope> {
     const blame = opts?.blame === true ? await this.applyBlame(rows) : undefined;
     const env: SearchEnvelope = { results: this.stripEmbeddings(applyCharBudget(rows, opts?.maxChars)) };
     if (blame?.notARepo === true) env.blameNotARepo = true;
     if (blame?.skipped !== undefined && blame.skipped > 0) env.blameSkipped = blame.skipped;
+    if (notes) {
+      env.expanded = notes.expanded ?? 0;
+      if (notes.expandNote !== undefined) env.expandNote = notes.expandNote;
+    }
     return env;
   }
 
@@ -1043,6 +1289,11 @@ export class IndexManager {
    * blank query strings are de-duped; each query reuses searchIndex/searchAll
    * (so rerank/MMR/maxChars + the shared query cache apply per query). Returns
    * one group per distinct query, in first-seen order.
+   *
+   * S4: with `expand: true` in `opts`, EVERY group's query pays its own
+   * expansion round-trip (the batch path funnels through the same two public
+   * searches, so the flag inherits for free); each group carries its own
+   * `expanded` / `expandNote` envelope fields.
    */
   async searchBatch(
     queries: string[],
@@ -1062,6 +1313,8 @@ export class IndexManager {
         const group: BatchSearchGroup = { query, results: env.results };
         if (env.blameNotARepo === true) group.blameNotARepo = true;
         if (env.blameSkipped !== undefined) group.blameSkipped = env.blameSkipped;
+        if (env.expanded !== undefined) group.expanded = env.expanded;
+        if (env.expandNote !== undefined) group.expandNote = env.expandNote;
         return group;
       }),
     );

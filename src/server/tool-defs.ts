@@ -114,6 +114,15 @@ export const TOOL_DEFINITIONS: Tool[] = [
             "≤ 8 files; extras are reported as the blameSkipped envelope note). Off by default — it costs one " +
             "git call per hit file.",
         },
+        expand: {
+          type: "boolean",
+          description:
+            "Query expansion (opt-in, default false). Pass true to turn this query into 2-3 variant queries " +
+            "via a local expansion LLM (needs search.expand.model configured) and merge their rankings into " +
+            "this search's — the original query keeps rank dominance. Costs one extra local LLM round-trip " +
+            "(~0.5-2 s). Any failure degrades transparently to the plain base search; the envelope carries " +
+            "'expanded' (variant count) and, when expansion did not run, an 'expandNote' reason.",
+        },
       },
       required: ["query"],
     },
@@ -182,6 +191,13 @@ export const TOOL_DEFINITIONS: Tool[] = [
             "Ownership/blame enrichment (opt-in, default false; same semantics as search_codebase's 'blame'), " +
             "applied per query. Each result is stamped with lastAuthor / lastCommitDate / churnCommits from one " +
             "'git blame --porcelain' per hit file (≤ 8; extras reported as a per-group blameSkipped note).",
+        },
+        expand: {
+          type: "boolean",
+          description:
+            "Query expansion (opt-in, default false; same semantics as search_codebase's 'expand'), applied " +
+            "PER QUERY — every query pays its own expansion round-trip and its own 'expanded'/'expandNote' " +
+            "per-group note.",
         },
       },
       required: ["queries"],

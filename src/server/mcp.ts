@@ -86,6 +86,7 @@ function buildServer(deps: McpDeps): Server {
         maxChars?: number;
         doc?: boolean;
         blame?: boolean;
+        expand?: boolean;
       };
       const limit = args.limit ?? 5;
       const opts = {
@@ -100,6 +101,7 @@ function buildServer(deps: McpDeps): Server {
         maxChars: args.maxChars,
         doc: args.doc,
         blame: args.blame,
+        expand: args.expand,
       };
       try {
         // 'path' anchors the search to the project containing it; neither → all projects.
@@ -136,6 +138,7 @@ function buildServer(deps: McpDeps): Server {
         maxChars?: number;
         doc?: boolean;
         blame?: boolean;
+        expand?: boolean;
       };
       if (!Array.isArray(args.queries) || args.queries.length === 0) {
         return {
@@ -156,6 +159,7 @@ function buildServer(deps: McpDeps): Server {
         maxChars: args.maxChars,
         doc: args.doc,
         blame: args.blame,
+        expand: args.expand,
       };
       try {
         // 'path' anchors the search to the project containing it; neither → all projects.
