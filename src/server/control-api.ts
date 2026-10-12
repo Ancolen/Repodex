@@ -716,6 +716,42 @@ export function startControlApi(
     }
   });
 
+  /**
+   * The STORED latest doc-check report per project (D1c watch mode, `cidx
+   * doccheck --last`): the snapshot the `doccheck` job last wrote after a
+   * successful index/sync/migrate run. A SNAPSHOT — its `ts` says when it was
+   * stored, and the caller must surface that; this route never runs a fresh
+   * check (that is POST /doccheck). Query params: `project` or `path` (at
+   * least one — the same anchor rule as POST /doccheck). Unknown project →
+   * self-healing 404; a known project without a stored report → 404 with the
+   * "enable doccheck.watch / run doccheck first" hint.
+   */
+  app.get("/doccheck/last", async (req, res) => {
+    const project = typeof req.query.project === "string" ? req.query.project : undefined;
+    const filePath = typeof req.query.path === "string" ? req.query.path : undefined;
+    if (!project && !filePath) {
+      res.status(400).json({ error: "Provide a 'project' name and/or a 'path' (at least one is required)." });
+      return;
+    }
+    const opts: { project?: string; path?: string } = {};
+    if (project) opts.project = project;
+    if (filePath) opts.path = filePath;
+    try {
+      const found = await deps.manager.lastDocCheckReport(opts);
+      if (!found) {
+        res.status(404).json({
+          error: `No stored doccheck report for '${opts.project ?? opts.path}' — enable doccheck.watch or run a doccheck job first (fresh check: POST /doccheck).`,
+        });
+        return;
+      }
+      res.json(found);
+    } catch (err) {
+      // An unknown project name is a 404 (like POST /doccheck); anything else is a bad request.
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(msg.startsWith("Index not found") || msg.startsWith("No indexed project") ? 404 : 400).json({ error: msg });
+    }
+  });
+
   /** Project-level coupling metrics over the dependency graph (`cidx coupling`). */
   app.post("/coupling", async (req, res) => {
     const { project, path: projectPath, limit } = (req.body ?? {}) as {

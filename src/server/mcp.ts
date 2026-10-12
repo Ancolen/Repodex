@@ -38,6 +38,7 @@ import {
   formatApiDiff,
   formatImpact,
   formatDocCheck,
+  formatDocCheckStored,
   formatCoupling,
   formatHotspots,
 } from "./format";
@@ -648,6 +649,7 @@ export function buildServer(deps: McpDeps): Server {
         since?: string;
         window?: boolean;
         judge?: boolean;
+        last?: boolean;
       };
       if (!args.project && !args.path) {
         return {
@@ -680,6 +682,30 @@ export function buildServer(deps: McpDeps): Server {
       if (typeof args.window === "boolean") opts.window = args.window;
       if (typeof args.judge === "boolean") opts.judge = args.judge;
       try {
+        // D1c watch mode: `last: true` reads the STORED snapshot instead of
+        // running a fresh check — an empty store is an honest "nothing yet"
+        // (not an error); the snapshot's ts is surfaced in the text.
+        if (args.last === true) {
+          const lastOpts: { project?: string; path?: string } = {};
+          if (typeof opts.project === "string") lastOpts.project = opts.project;
+          if (typeof opts.path === "string") lastOpts.path = opts.path;
+          const found = await deps.manager.lastDocCheckReport(lastOpts);
+          if (!found) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "No stored doccheck report for this project yet — enable `doccheck.watch` (a report is stored after each successful index/migrate job) or run a fresh check_docs.",
+                },
+              ],
+            };
+          }
+          const stored = formatDocCheckStored(found.project, found.ts, found.report);
+          return {
+            content: [{ type: "text", text: stored }],
+            structuredContent: { docCheckLast: found },
+          };
+        }
         const report = await deps.manager.checkDocs(opts);
         return { content: [{ type: "text", text: formatDocCheck(report) }], structuredContent: { docCheck: report } };
       } catch (err) {

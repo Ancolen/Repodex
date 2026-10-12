@@ -187,6 +187,14 @@ export interface IndexerConfig {
     judgeModel: string;
     /** The judge's base URL; empty = the resolved embedding backend (like `search.rerank.url`). */
     judgeUrl: string;
+    /**
+     * Watch/loop mode (proposal D1c, default off): when true, every successful
+     * `index`/`migrate` job completion enqueues a `doccheck` job for that
+     * project (never more than one queued/running per project), which re-runs
+     * the deterministic check and stores the latest report in the registry —
+     * `cidx doccheck <project> --last` reads that snapshot.
+     */
+    watch: boolean;
   };
   daemon: {
     /**
@@ -262,7 +270,7 @@ const DEFAULTS: IndexerConfig = {
       sourceRoots: ["src", "lib", "app"],
     },
   },
-  doccheck: { maxChars: 12000, undocumentedLimit: 25, judgeModel: "", judgeUrl: "" },
+  doccheck: { maxChars: 12000, undocumentedLimit: 25, judgeModel: "", judgeUrl: "", watch: false },
   daemon: { idleTimeoutMinutes: 0 },
 };
 
@@ -338,6 +346,7 @@ doccheck:
   undocumentedLimit: ${DEFAULTS.doccheck.undocumentedLimit}   # max undocumented-symbol entries per report
   judgeModel: "${DEFAULTS.doccheck.judgeModel}"                # local instruct model that re-judges uncertain claims via yes/no logprobs; empty = off
   judgeUrl: "${DEFAULTS.doccheck.judgeUrl}"                    # judge base URL; empty = same server as the embedding backend
+  watch: ${DEFAULTS.doccheck.watch}                    # after each successful index/migrate job, re-run the deterministic check and store the report (cidx doccheck <project> --last reads it)
 
 watcher:
   debounceMs: ${DEFAULTS.watcher.debounceMs}        # reindexing delay after a file change
@@ -356,6 +365,12 @@ function num(v: string | undefined): number | undefined {
   if (v === undefined || v === "") return undefined;
   const n = Number(v);
   return Number.isFinite(n) ? n : undefined;
+}
+/** Env mirror for boolean flags: only the four canonical spellings resolve. */
+function envBool(v: string | undefined): boolean | undefined {
+  if (v === "true" || v === "1") return true;
+  if (v === "false" || v === "0") return false;
+  return undefined;
 }
 function strArray(v: unknown): string[] | undefined {
   return Array.isArray(v) && v.every((x) => typeof x === "string") ? (v as string[]) : undefined;
@@ -565,6 +580,9 @@ export const RESOLVED: IndexerConfig = {
       DEFAULTS.doccheck.undocumentedLimit,
     judgeModel: process.env.DOC_CHECK_JUDGE_MODEL ?? y.doccheck?.judgeModel ?? DEFAULTS.doccheck.judgeModel,
     judgeUrl: process.env.DOC_CHECK_JUDGE_URL ?? y.doccheck?.judgeUrl ?? DEFAULTS.doccheck.judgeUrl,
+    watch:
+      envBool(process.env.DOC_CHECK_WATCH) ??
+      (typeof y.doccheck?.watch === "boolean" ? y.doccheck.watch : DEFAULTS.doccheck.watch),
   },
   daemon: {
     // A negative value is deliberately passed through: shouldIdleShutdown
@@ -638,6 +656,7 @@ export const CONFIG = {
   DOC_CHECK_UNDOCUMENTED: RESOLVED.doccheck.undocumentedLimit,
   DOC_CHECK_JUDGE_MODEL: RESOLVED.doccheck.judgeModel,
   DOC_CHECK_JUDGE_URL: RESOLVED.doccheck.judgeUrl,
+  DOC_CHECK_WATCH: RESOLVED.doccheck.watch,
 
   HOST: RESOLVED.server.host,
   MCP_PORT: RESOLVED.server.mcpPort,

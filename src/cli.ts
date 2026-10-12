@@ -9,7 +9,7 @@ import { resolveEditor, buildEditorArgs } from "./utils/editor";
 import type { QueryLogStats, SearchEnvelope } from "./core/index-manager";
 import type { StatsReport } from "./core/stats";
 import type { CompactResult } from "./services/db";
-import { formatContextPack, formatReferences, formatApiDiff, formatImpact, formatDocCheck, formatBlameNote, formatEnvelopeNotes, formatQueryLogStats, formatCoupling, formatStatsSections, formatCompactResult, formatHotspots } from "./server/format";
+import { formatContextPack, formatReferences, formatApiDiff, formatImpact, formatDocCheck, formatDocCheckStored, formatBlameNote, formatEnvelopeNotes, formatQueryLogStats, formatCoupling, formatStatsSections, formatCompactResult, formatHotspots } from "./server/format";
 
 const BASE = `http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}`;
 
@@ -895,10 +895,13 @@ async function cmdHotspots(positionals: string[], flags: Record<string, string |
 
 /**
  * `cidx doccheck [project|path] [--since ref] [--window] [--files a,b] [--ignore a,b]
- *  [--limit n] [--max-chars n] [--no-undocumented] [--judge false]`
+ *  [--limit n] [--max-chars n] [--no-undocumented] [--judge false] [--last]`
  *
  * Doc–code conformance check. Exit code 1 only when there are drift findings
- * (CI/hook-friendly); needsReview/undocumented never set it.
+ * (CI/hook-friendly); needsReview/undocumented never set it. `--last` prints
+ * the STORED latest report (the doccheck watch job's snapshot) instead of
+ * running a fresh check — its store time is surfaced so a stale snapshot never
+ * reads as a fresh check.
  */
 async function cmdDoccheck(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
   await requireDaemon();
@@ -937,6 +940,23 @@ async function cmdDoccheck(positionals: string[], flags: Record<string, string |
   // D1b: --judge false skips the semantic judge for this call (default-on via config).
   if (flags.judge === true || flags.judge === "true") body.judge = true;
   else if (flags.judge === "false") body.judge = false;
+  // D1c watch mode: --last prints the STORED latest report for the project.
+  if (flags.last === true) {
+    const q = body.project
+      ? `project=${encodeURIComponent(body.project)}`
+      : body.path
+        ? `path=${encodeURIComponent(body.path)}`
+        : "";
+    const r = await api<{ project: string; ts: number; findings: unknown[]; report: any }>(
+      "GET",
+      `/doccheck/last${q ? `?${q}` : ""}`,
+    );
+    // Honesty: the snapshot's store time leads the output — it must never read
+    // as a fresh check.
+    console.log(formatDocCheckStored(r.project, r.ts, r.report));
+    if ((r.report.findings ?? []).length > 0) process.exit(1);
+    return;
+  }
   const r = await api<any>("POST", "/doccheck", body);
   console.log(formatDocCheck(r));
   if ((r.findings ?? []).length > 0) process.exit(1);
@@ -1291,6 +1311,7 @@ const COMMANDS: Record<string, CmdDoc> = {
       ["--max-chars <n>", "Char budget over rendered findings (kept whole)."],
       ["--no-undocumented", "Skip the 'exported but undocumented' advisory section."],
       ["--judge false", "Skip the semantic judge for this call even when doccheck.judgeModel is configured."],
+      ["--last", "Print the STORED latest report (doccheck watch snapshot) instead of running a fresh check."],
     ],
     details: [
       "Identifier/path/dep/endpoint/cmd/flag/env/config claims from backtick spans, resolved against",
@@ -1301,8 +1322,11 @@ const COMMANDS: Record<string, CmdDoc> = {
       "With doccheck.judgeModel set in config, a local instruct model re-judges the uncertain claims",
       "(yes/no logprobs); consistent verdicts drop them out of 'needs review' — the judge never",
       "produces drift findings. Default off.",
+      "--last reads the snapshot the doccheck.watch job stored after a successful index/migrate",
+      "run (config doccheck.watch, default off) — its store time leads the output; without a",
+      "stored report the command fails with a hint instead of pretending to check fresh.",
     ],
-    examples: ["cidx doccheck .", "cidx doccheck repodex --window", "cidx doccheck api --since v1.2.0"],
+    examples: ["cidx doccheck .", "cidx doccheck repodex --window", "cidx doccheck repodex --last"],
   },
   commits: {
     usage: "commits <project|dir> [query] [flags]",

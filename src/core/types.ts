@@ -67,3 +67,16 @@ export interface MigrateJobPayload {
    */
   framing?: string | null;
 }
+
+/**
+ * The doc–code conformance job (proposal D1c, watch/loop mode): re-runs the
+ * deterministic `checkDocs` over the project and stores the latest report in
+ * the registry (`doccheck_reports`, one snapshot per project). Enqueued after a
+ * successful index/sync/migrate job when `doccheck.watch` is on — the handler
+ * is cheap and embedding-free (the reranker-free deterministic path).
+ */
+export const DOC_CHECK_JOB_TYPE = "doccheck";
+
+export interface DocCheckJobPayload {
+  project: string;
+}

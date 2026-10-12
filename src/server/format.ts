@@ -694,6 +694,21 @@ export function formatDocCheck(r: DocCheckReport): string {
   return lines.join("\n");
 }
 
+/**
+ * The `--last` / stored-report rendering (proposal D1c watch mode): the
+ * SNAPSHOT header leads — its store time is surfaced so a stale snapshot never
+ * reads as a fresh check — followed by the stored report itself. Shared by the
+ * MCP server, the stdio bridge and the CLI, so all three surfaces state the
+ * staleness exactly the same way.
+ */
+export function formatDocCheckStored(project: string, ts: number, report: DocCheckReport): string {
+  const when = new Date(ts).toISOString();
+  return (
+    `Stored doc–code report for ${project} — snapshot from ${when} (doccheck.watch job; NOT a fresh check)\n` +
+    formatDocCheck(report)
+  );
+}
+
 // ---------------------------------------------------------- query log (A3)
 
 /**
