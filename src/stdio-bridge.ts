@@ -46,6 +46,7 @@ import {
   formatImpact,
   formatDocCheck,
   formatCoupling,
+  formatHotspots,
 } from "./server/format";
 
 const BASE = `http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}`;
@@ -473,6 +474,20 @@ async function main(): Promise<void> {
           return {
             content: [{ type: "text" as const, text: formatCoupling(report) }],
             structuredContent: { coupling: report },
+          };
+        }
+        // ---- hotspot / technical-debt report (proposal C3) ----
+        case "get_hotspots": {
+          const report = await api<Parameters<typeof formatHotspots>[0]>("POST", "/hotspots", {
+            project: args.project,
+            path: args.path,
+            since: args.since,
+            limit: args.limit,
+          });
+          // Readable text for the model + the structured object for JSON consumers.
+          return {
+            content: [{ type: "text" as const, text: formatHotspots(report) }],
+            structuredContent: { hotspots: report },
           };
         }
         default:

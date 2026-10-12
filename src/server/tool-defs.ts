@@ -668,4 +668,41 @@ export const TOOL_DEFINITIONS: Tool[] = [
       required: [],
     },
   },
+  {
+    name: "get_hotspots",
+    description:
+      "HOTSPOT / TECHNICAL-DEBT REPORT for one project (no schema change, no reindex): the " +
+      "churn × size intersection where bugs and refactoring fatigue live. Score = churn x size, " +
+      "log-scaled — a deliberate PROXY (size = chunk count + distinct symbol count per file, NOT " +
+      "cyclomatic complexity; the report never claims otherwise). Debt signals adjust the score: " +
+      "dead-code density (zero-reference symbols at 'uncertain'-or-better confidence, the " +
+      "find_dead_code scoring) and coupling (fanIn + fanOut from the dependency graph) promote; " +
+      "test files and entry points are demoted into 'review' (a hot, well-exercised test file is " +
+      "not a hotspot). Sectioned into three ranked bands: critical (score >= 50, address first), " +
+      "warm (>= 25), review (everything below, incl. demoted files) — each capped by 'limit' " +
+      "(default 20) with honest totals + truncated flags; files that score 0 with no debt signal " +
+      "are counted ('notListed'), not listed. Churn window: 'since' (git date syntax, default " +
+      "'90 days ago'); a non-repo is REPORTED (notARepo) — churn degrades to empty. FRESHNESS: the " +
+      "table-derived feeds (size, dead-code density) come from a snapshot cached on the last index " +
+      "(stale by design until a reindex; surfaced via snapshotTruncated when the table row cap hit), " +
+      "while churn runs git log LIVE on every call and coupling rides the dependency-graph cache — " +
+      "so a file edited moments ago already shows its churn but not its new size.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: {
+          type: "string",
+          description: "The project to analyze (optional when 'path' is given, or when exactly one project is indexed).",
+        },
+        path: {
+          type: "string",
+          description:
+            "Alternative to 'project': a file/dir inside the project (the owning project is inferred). Ignored when 'project' is also given.",
+        },
+        since: { type: "string", description: "Churn window, git --since date syntax (default: '90 days ago')." },
+        limit: { type: "number", description: "Cap per band (default: 20); exceeding it sets 'truncated'." },
+      },
+      required: [],
+    },
+  },
 ];
