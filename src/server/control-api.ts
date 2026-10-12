@@ -137,7 +137,7 @@ export function startControlApi(
   app.use(express.json());
 
   app.get("/ping", (_req, res) => {
-    res.json({ ok: true, version: "2.4.0", pid: process.pid });
+    res.json({ ok: true, version: "2.5.0", pid: process.pid });
   });
 
   app.get("/indexes", (_req, res) => {

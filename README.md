@@ -402,7 +402,7 @@ ollama:
 embedding:
   cacheMax: 50000             # max records in the content-hash embedding cache
   provider: auto              # auto | ollama | llamacpp; auto = an Ollama that serves the model wins, else a live llama-server
-  llamacppUrl: http://127.0.0.1:8080  # llama-server base URL; start it with -m <model.gguf> -a <model> --ctx-size 1024 --embedding
+  llamacppUrl: http://127.0.0.1:8080  # llama-server base URL; start with -m <model.gguf> -a <model> --ctx-size 2048 --ubatch-size 2048 --embedding (ubatch ≥ tokens per chunk — char-estimated chunks can tokenize larger than maxChunkTokens)
 
 search:
   rerank:

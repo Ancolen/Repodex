@@ -41,7 +41,7 @@ export interface McpDeps {
 /** Builds a configured MCP Server instance for each connection. */
 function buildServer(deps: McpDeps): Server {
   const server = new Server(
-    { name: "cidx", version: "2.4.0" },
+    { name: "cidx", version: "2.5.0" },
     { capabilities: { tools: {} } },
   );
 
