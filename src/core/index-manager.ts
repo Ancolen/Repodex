@@ -2863,6 +2863,7 @@ export class IndexManager {
         console.error(
           `[index] '${t.indexName}' ready: ${result.files} files, ${result.chunks} chunks` +
             (result.deleted > 0 ? `, ${result.deleted} deleted cleaned up` : "") +
+            (result.skippedOversized > 0 ? `, ${result.skippedOversized} oversized skipped` : "") +
             ` → ${t.tableName}` +
             (pruned > 0 ? ` (cache prune: ${pruned})` : ""),
         );

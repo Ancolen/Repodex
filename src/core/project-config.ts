@@ -12,14 +12,15 @@ import { TEXT_LANG_BY_EXT } from "../chunking/chunker";
  *   "languages":   ["typescript", "python"],  // allowlist of language labels
  *   "ignore":      ["vendor/**", "*.gen.ts"], // extra ignore patterns
  *   "embedModel":  "qwen3-embedding:8b-q8_0", // per-project embedding model
+ *   "maxFileSizeBytes": 1048576,              // files larger than this are not indexed
  *   "doccheck":    { "files": ["docs/**"], "ignore": ["drafts/**"] }
  * }
  *
  * Applied at index time (full index/sync and watcher writes). Changes only take
- * effect after a reindex — except `languages`/`ignore`, which the incremental
- * sync also picks up through the deleted-file cleanup, and `embedModel`, which
- * triggers a full reindex automatically (vectors from two models can never
- * share a table).
+ * effect after a reindex — except `languages`/`ignore`/`maxFileSizeBytes`, which
+ * the incremental sync also picks up through the deleted-file cleanup, and
+ * `embedModel`, which triggers a full reindex automatically (vectors from two
+ * models can never share a table).
  */
 
 export interface ProjectConfig {
@@ -29,6 +30,14 @@ export interface ProjectConfig {
   ignore?: string[];
   /** Per-project embedding model override (Ollama tag). */
   embedModel?: string;
+  /**
+   * Files strictly larger than this many bytes are not indexed (an
+   * oversized-data-file guard; the global default is `indexing.maxFileSizeBytes`
+   * in cidx.yml, 0 = off). Positive integer. Filtered-out files are absent from
+   * `collectFiles` output, so the deleted-file cleanup prunes them on the next
+   * sync — the same semantics as the `languages` allowlist.
+   */
+  maxFileSizeBytes?: number | undefined;
   /**
    * Per-project `doccheck` block (proposal D1): narrows which documentation
    * files the doc–code conformance checker looks at. It never changes what is
@@ -80,6 +89,16 @@ export function parseProjectConfig(raw: unknown, source: string): ProjectConfig 
       valid = true;
     } else {
       console.error(`[project-config] '${source}': 'embedModel' must be a non-empty string; skipping it.`);
+    }
+  }
+  if (obj.maxFileSizeBytes !== undefined) {
+    if (typeof obj.maxFileSizeBytes === "number" && Number.isInteger(obj.maxFileSizeBytes) && obj.maxFileSizeBytes > 0) {
+      out.maxFileSizeBytes = obj.maxFileSizeBytes;
+      valid = true;
+    } else {
+      console.error(
+        `[project-config] '${source}': 'maxFileSizeBytes' must be a positive integer (bytes); skipping it.`,
+      );
     }
   }
   if (obj.doccheck !== undefined) {

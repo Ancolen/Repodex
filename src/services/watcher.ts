@@ -1,7 +1,7 @@
 import chokidar, { type FSWatcher } from "chokidar";
 import path from "node:path";
 import { CONFIG } from "../config";
-import { buildIgnore, isPathIgnored, indexFile, removeFileIndex, type IndexTarget } from "./indexer";
+import { buildIgnore, isPathIgnored, indexFile, removeFileIndex, effectiveMaxFileSizeBytes, type IndexTarget } from "./indexer";
 import { readProjectConfig, extToLanguage, languageAllowSet } from "../core/project-config";
 import { tableNameFor } from "../core/registry";
 import type { Registry } from "../core/registry";
@@ -62,8 +62,8 @@ export function startWatcher(target: IndexTarget, opts: WatchOptions = {}): FSWa
       const ig = await igPromise;
       // Per-project config is read fresh per event so watcher writes follow the
       // same rules as the next full index (`.cidx.json` `languages` allowlist +
-      // `embedModel` override; extra `ignore` patterns still come from the
-      // startup matcher, matching the .cidxignore semantics above).
+      // `embedModel` override + `maxFileSizeBytes`; extra `ignore` patterns still
+      // come from the startup matcher, matching the .cidxignore semantics above).
       const pcfg = readProjectConfig(target.baseDir);
       const langSet = languageAllowSet(pcfg);
       const lang = extToLanguage(path.extname(filePath));
@@ -89,7 +89,19 @@ export function startWatcher(target: IndexTarget, opts: WatchOptions = {}): FSWa
         return;
       }
       if (action === "index") {
-        await indexFile(targetNow(rec), filePath, opts.registry, undefined, pcfg?.embedModel);
+        // The maxFileSizeBytes guard lives inside indexFile (skip before
+        // chunking, logged there at the same level as the other skips); a file
+        // that grew past the limit stays out of the table this way, and the
+        // next sync prunes any records it had (it is then absent from
+        // collectFiles, mirroring the `languages` semantics).
+        await indexFile(
+          targetNow(rec),
+          filePath,
+          opts.registry,
+          undefined,
+          pcfg?.embedModel,
+          effectiveMaxFileSizeBytes(pcfg),
+        );
       } else {
         await removeFileIndex(targetNow(rec), filePath, opts.registry);
       }
