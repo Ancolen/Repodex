@@ -62,6 +62,13 @@ export interface JobRow {
   id: string;
   type: string;
   status: string;
+  /**
+   * Queue priority (claim order: higher first, enqueue order within equal
+   * values). Optional on the row shape because legacy literals predate the
+   * column; the schema is `NOT NULL DEFAULT 0` and `saveJob` writes
+   * `priority ?? 0`, so a row never persists without one.
+   */
+  priority?: number;
   payload: string | null; // JSON
   progressProcessed: number;
   progressTotal: number;
@@ -202,6 +209,7 @@ export class Registry {
         id                 TEXT PRIMARY KEY,
         type               TEXT NOT NULL,
         status             TEXT NOT NULL,
+        priority           INTEGER NOT NULL DEFAULT 0,
         payload            TEXT,
         progress_processed INTEGER NOT NULL DEFAULT 0,
         progress_total     INTEGER NOT NULL DEFAULT 0,
@@ -248,6 +256,9 @@ export class Registry {
     // Stored embedding framing (per-model task prefixes): ensure the column on
     // a registry that predates it, idempotent (see ensureFramingColumn).
     this.ensureFramingColumn();
+    // Job priority (queue claim order): ensure the column on a registry whose
+    // `jobs` table predates it, idempotent (see ensureJobsPriorityColumn).
+    this.ensureJobsPriorityColumn();
   }
 
   /**
@@ -290,6 +301,21 @@ export class Registry {
     const cols = this.db.query(`PRAGMA table_info(indexes)`).all() as { name: string | null }[];
     if (!cols.some((c) => c.name === "framing")) {
       this.db.run(`ALTER TABLE indexes ADD COLUMN framing TEXT`);
+    }
+  }
+
+  /**
+   * Lazy schema migration for job priority: a foreign meta.db whose `jobs`
+   * table predates the column gets it added lazily rather than failing every
+   * boot. No data backfill follows — DEFAULT 0 IS the legacy value: every row
+   * stored before the column existed was effectively enqueued at the default
+   * (interactive) priority, and SQLite materializes exactly that default for
+   * the ALTER-added NOT NULL column. Idempotent, like the rest of `migrate()`.
+   */
+  private ensureJobsPriorityColumn(): void {
+    const cols = this.db.query(`PRAGMA table_info(jobs)`).all() as { name: string | null }[];
+    if (!cols.some((c) => c.name === "priority")) {
+      this.db.run(`ALTER TABLE jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0`);
     }
   }
 
@@ -710,13 +736,13 @@ export class Registry {
     this.db
       .query(
         `INSERT INTO jobs
-           (id, type, status, payload, progress_processed, progress_total,
+           (id, type, status, priority, payload, progress_processed, progress_total,
             progress_message, result, error, created_at, started_at, finished_at)
          VALUES
-           ($id, $type, $status, $payload, $pp, $pt, $pm, $result, $error,
+           ($id, $type, $status, $priority, $payload, $pp, $pt, $pm, $result, $error,
             $createdAt, $startedAt, $finishedAt)
          ON CONFLICT(id) DO UPDATE SET
-           status=$status, payload=$payload, progress_processed=$pp,
+           status=$status, priority=$priority, payload=$payload, progress_processed=$pp,
            progress_total=$pt, progress_message=$pm, result=$result,
            error=$error, started_at=$startedAt, finished_at=$finishedAt`,
       )
@@ -724,6 +750,7 @@ export class Registry {
         $id: row.id,
         $type: row.type,
         $status: row.status,
+        $priority: row.priority ?? 0,
         $payload: row.payload,
         $pp: row.progressProcessed,
         $pt: row.progressTotal,
@@ -778,6 +805,9 @@ export class Registry {
       id: r.id as string,
       type: r.type as string,
       status: r.status as string,
+      // Defensive: a row that somehow reached the disk without a priority (a
+      // foreign DB, a half-migrated copy) reads as the default it can only mean.
+      priority: (r.priority as number | null) ?? 0,
       payload: (r.payload as string | null) ?? null,
       progressProcessed: r.progress_processed as number,
       progressTotal: r.progress_total as number,

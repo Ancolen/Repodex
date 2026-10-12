@@ -261,6 +261,7 @@ describe("collectStats — the /stats payload shape (fake ports)", () => {
     type: "index",
     status: "running",
     payload: {},
+    priority: 0,
     progress: { processed: 4, total: 8 },
     createdAt: 1,
   };

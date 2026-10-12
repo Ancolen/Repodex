@@ -178,6 +178,124 @@ describe("Registry", () => {
     expect(reg.getJob("i1")).toBeNull();
     expect(reg.getJob("o1")).not.toBeNull();
   });
+
+  test("jobs: priority defaults to 0 and round-trips through saveJob/getJob", () => {
+    const row = (id: string, priority?: number) => ({
+      id,
+      type: "index",
+      status: "queued",
+      ...(priority !== undefined ? { priority } : {}),
+      payload: null,
+      progressProcessed: 0,
+      progressTotal: 0,
+      progressMessage: null,
+      result: null,
+      error: null,
+      createdAt: 1,
+      startedAt: null,
+      finishedAt: null,
+    });
+    // A row literal from before the column existed still persists (as 0).
+    reg.saveJob(row("legacy-literal"));
+    expect(reg.getJob("legacy-literal")?.priority).toBe(0);
+    reg.saveJob(row("bg", -5));
+    reg.saveJob(row("boosted", 7));
+    expect(reg.getJob("bg")?.priority).toBe(-5);
+    expect(reg.getJob("boosted")?.priority).toBe(7);
+    // The finish() UPDATE path (same id saved again) keeps the priority.
+    reg.saveJob({ ...row("bg", -5), status: "completed", finishedAt: 9 });
+    expect(reg.getJob("bg")?.status).toBe("completed");
+    expect(reg.getJob("bg")?.priority).toBe(-5);
+  });
+});
+
+describe("jobs priority — lazy migration on a legacy-shaped DB", () => {
+  test("a jobs table predating the priority column is ALTERed with the DEFAULT 0", () => {
+    const dbPath = tempDbPath();
+    const raw = new Database(dbPath);
+    // A foreign/very-old meta.db: no priority column on jobs at all.
+    raw.run(`CREATE TABLE jobs (
+      id                 TEXT PRIMARY KEY,
+      type               TEXT NOT NULL,
+      status             TEXT NOT NULL,
+      payload            TEXT,
+      progress_processed INTEGER NOT NULL DEFAULT 0,
+      progress_total     INTEGER NOT NULL DEFAULT 0,
+      progress_message   TEXT,
+      result             TEXT,
+      error              TEXT,
+      created_at         INTEGER NOT NULL,
+      started_at         INTEGER,
+      finished_at        INTEGER
+    )`);
+    raw.run(`INSERT INTO jobs (id, type, status, created_at) VALUES ('legacy-1', 'index', 'queued', 1)`);
+    raw.close();
+
+    const lazy = new Registry(dbPath);
+    try {
+      // The legacy row reads as the (interactive) default it was effectively enqueued at.
+      expect(lazy.getJob("legacy-1")?.priority).toBe(0);
+      expect(lazy.getJob("legacy-1")?.status).toBe("queued");
+      expect(lazy.markInterruptedJobs()).toBe(1);
+      expect(lazy.getJob("legacy-1")?.status).toBe("failed");
+      // The ALTERed table accepts priority writes, and the UPDATE path keeps them.
+      lazy.saveJob({
+        id: "legacy-2",
+        type: "index",
+        status: "queued",
+        priority: -5,
+        payload: null,
+        progressProcessed: 0,
+        progressTotal: 0,
+        progressMessage: null,
+        result: null,
+        error: null,
+        createdAt: 2,
+        startedAt: null,
+        finishedAt: null,
+      });
+      expect(lazy.getJob("legacy-2")?.priority).toBe(-5);
+      lazy.saveJob({
+        id: "legacy-2",
+        type: "index",
+        status: "completed",
+        priority: -5,
+        payload: null,
+        progressProcessed: 1,
+        progressTotal: 1,
+        progressMessage: null,
+        result: null,
+        error: null,
+        createdAt: 2,
+        startedAt: 2,
+        finishedAt: 3,
+      });
+      expect(lazy.getJob("legacy-2")?.status).toBe("completed");
+      expect(lazy.getJob("legacy-2")?.priority).toBe(-5);
+    } finally {
+      lazy.close();
+      rmSync(dbPath, { force: true });
+    }
+  });
+
+  test("a nullable priority column with a NULL row reads as the default 0", () => {
+    const dbPath = tempDbPath();
+    const raw = new Database(dbPath);
+    raw.run(`CREATE TABLE jobs (
+      id TEXT PRIMARY KEY, type TEXT NOT NULL, status TEXT NOT NULL,
+      priority INTEGER, created_at INTEGER NOT NULL, finished_at INTEGER
+    )`);
+    raw.run(`INSERT INTO jobs (id, type, status, priority, created_at) VALUES ('n1', 'index', 'failed', NULL, 1)`);
+    raw.close();
+
+    const r = new Registry(dbPath);
+    try {
+      expect(r.getJob("n1")?.priority).toBe(0);
+    } finally {
+      r.close();
+      rmSync(dbPath, { force: true });
+    }
+  });
 });
 
 describe("table naming helpers (O2)", () => {
