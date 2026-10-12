@@ -6,6 +6,34 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ---
 
+## Unreleased
+
+### Fixed
+
+- **Astral-character-safe chunk boundaries** (found in production the day
+  2.6.0 shipped): `splitLarge`'s overlapping window cut at UTF-16 code-unit
+  positions, so a 4-byte emoji straddling the 1500-char boundary was split in
+  half — a chunk ended (or the next one started) on a lone surrogate,
+  `JSON.stringify` escaped it to `\ud83d`, and llama.cpp's strict JSON parser
+  rejected the whole embed request. The file then **failed to index on every
+  sync** (first seen with Turkish emoji in print strings and winston
+  error-payload logs; Ollama's lenient Go parser had silently masked the whole
+  class before the llama.cpp backend). Both cut edges now slide one code unit
+  to stay on character boundaries
+  (`alignStartToCodePoint` / `alignEndToCodePoint`, `src/utils/text.ts`);
+  the docstring `MAX_DOC_CHARS` cap and the signature cap cut through the same
+  helpers. Files affected this way are not in the mtime cache (they never
+  indexed), so the next sync retries and heals them — no reindex needed.
+- **Wire-level surrogate guard**: the raw backend clients
+  (`llamacpp.ts` embeddings + rerank prompt, `ollama.ts` embeddings) and the
+  hand-rolled rerank / expand prompt bodies pass text through
+  `sanitizeLoneSurrogates` before `JSON.stringify`, so a lone surrogate in any
+  input (e.g. a malformed query, or a legacy pre-fix row) degrades to U+FFFD
+  instead of a hard HTTP 400. Valid pairs pass through untouched and clean
+  text is byte-identical, so embed cache keys never drift.
+
+---
+
 ## 2.6.0 (2026-10-13)
 
 Seventeen items — the **entire remaining [`proposals.md`](./proposals.md) backlog** (S2, S3, S4, C3, C4, C5, A2, A3, O2, O3, O4, D1b, D1c) plus the deferred list (`maxFileSizeBytes` guard, job priority, persistent integration tests) and one measured lever (per-model task framing) — implemented in three parallel waves and merged sequentially. Test suite: 618 → **1052/1052** passing (3434 expectations, ~9 s); `bun run typecheck` clean. Everything is additive — no reindex is required unless a feature is explicitly opted into (framing, fuzzy tier). **One wire change to know about:** the search endpoints now return a small **envelope** instead of a bare array — see the C4 entry below.
