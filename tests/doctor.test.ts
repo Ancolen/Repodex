@@ -17,8 +17,8 @@ import {
   formatBytes,
   inspectConfigFile,
   measureDiskUsage,
-  ollamaCheck,
-  ollamaModelPresent,
+  backendCheck,
+  type BackendProbeState,
   orphanTablesCheck,
   projectCheck,
   projectFindings,
@@ -27,6 +27,7 @@ import {
   type DoctorPorts,
   type ProjectDoctorState,
 } from "../src/core/doctor";
+import { modelTagPresent } from "../src/utils/model-tag";
 
 /** The 2.4.0 schema — every column a fresh table carries. */
 const FRESH_COLUMNS = [
@@ -58,7 +59,7 @@ function projectState(overrides: Partial<ProjectDoctorState> = {}): ProjectDocto
     tableRows: 120,
     columns: FRESH_COLUMNS,
     indices: FRESH_INDICES,
-    modelInOllama: true,
+    modelOnBackend: true,
     vectorIndexThreshold: 50000,
     docstringsEnabled: true,
     ...overrides,
@@ -73,7 +74,7 @@ function ports(overrides: Partial<DoctorPorts> = {}): DoctorPorts {
     tableColumns: async () => [],
     rowCount: async () => 0,
     tableIndices: async () => [],
-    ollama: async () => ({ reachable: true, models: ["qwen3-embedding:latest", "qwen3-reranker-q8:latest"] }),
+    backend: async () => BACKEND_OK,
     rerankerAvailable: async () => true,
     configPath: () => null,
     readText: async () => null,
@@ -88,7 +89,6 @@ function ports(overrides: Partial<DoctorPorts> = {}): DoctorPorts {
     settings: {
       home: "/home/dev/.cidx",
       dbDir: "/home/dev/.cidx/db",
-      ollamaUrl: "http://127.0.0.1:11434",
       embedModel: "qwen3-embedding",
       docstrings: true,
       vectorIndexThreshold: 50000,
@@ -125,45 +125,83 @@ describe("doctor — daemonCheck", () => {
   });
 });
 
-// ------------------------------------------------------------------- ollama
+// ------------------------------------------------------------------- backend
 
-describe("doctor — ollamaModelPresent", () => {
+const BACKEND_OK: BackendProbeState = {
+  provider: "ollama",
+  url: "http://127.0.0.1:11434",
+  up: true,
+  models: ["qwen3-embedding:latest", "qwen3-reranker-q8:latest"],
+};
+
+describe("doctor — modelTagPresent", () => {
   test("matches an exact tag, a bare name against its :latest tag, and a pinned variant", () => {
     const models = ["qwen3-embedding:latest", "qwen3-embedding:8b-q8_0", "llama3"];
-    expect(ollamaModelPresent(models, "qwen3-embedding")).toBe(true);
-    expect(ollamaModelPresent(models, "qwen3-embedding:latest")).toBe(true);
-    expect(ollamaModelPresent(models, "qwen3-embedding:8b-q8_0")).toBe(true);
-    expect(ollamaModelPresent(models, "llama3")).toBe(true);
-    expect(ollamaModelPresent(models, "qwen3-reranker-q8")).toBe(false);
-    expect(ollamaModelPresent(models, "")).toBe(false);
+    expect(modelTagPresent(models, "qwen3-embedding")).toBe(true);
+    expect(modelTagPresent(models, "qwen3-embedding:latest")).toBe(true);
+    expect(modelTagPresent(models, "qwen3-embedding:8b-q8_0")).toBe(true);
+    expect(modelTagPresent(models, "llama3")).toBe(true);
+    expect(modelTagPresent(models, "qwen3-reranker-q8")).toBe(false);
+    expect(modelTagPresent(models, "")).toBe(false);
   });
 });
 
-describe("doctor — ollamaCheck", () => {
+describe("doctor — backendCheck", () => {
+  test("no reachable backend is a fail with the both-servers hint", () => {
+    const c = backendCheck({ provider: null, url: "", up: false, models: [] }, "qwen3-embedding");
+    expect(c.status).toBe("fail");
+    expect(c.hint).toContain("ollama serve");
+    expect(c.hint).toContain("llama-server");
+    expect(c.hint).toContain("embedding.provider");
+  });
+
   test("unreachable Ollama is a fail with the serve hint", () => {
-    const c = ollamaCheck({ url: "http://127.0.0.1:11434", model: "qwen3-embedding", reachable: false, models: [] });
+    const c = backendCheck(
+      { provider: "ollama", url: "http://127.0.0.1:11434", up: false, models: [] },
+      "qwen3-embedding",
+    );
     expect(c.status).toBe("fail");
     expect(c.hint).toContain("ollama serve");
   });
 
-  test("a missing embedding model is a fail with the pull hint", () => {
-    const c = ollamaCheck({
-      url: "http://127.0.0.1:11434",
-      model: "qwen3-embedding",
-      reachable: true,
-      models: ["llama3"],
-    });
+  test("an unreachable llama-server is a fail naming llama-server", () => {
+    const c = backendCheck(
+      { provider: "llamacpp", url: "http://127.0.0.1:8080", up: false, models: [] },
+      "embeddinggemma-2",
+    );
+    expect(c.status).toBe("fail");
+    expect(c.detail).toContain("llama-server");
+    expect(c.hint).toContain("llama-server -m");
+  });
+
+  test("a missing embedding model is a fail with the pull hint (Ollama)", () => {
+    const c = backendCheck(
+      { provider: "ollama", url: "http://127.0.0.1:11434", up: true, models: ["llama3"] },
+      "qwen3-embedding",
+    );
     expect(c.status).toBe("fail");
     expect(c.hint).toContain("ollama pull qwen3-embedding");
   });
 
+  test("a missing embedding model is a fail with the restart hint (llama-server)", () => {
+    const c = backendCheck(
+      { provider: "llamacpp", url: "http://127.0.0.1:8080", up: true, models: ["some-other-model"] },
+      "embeddinggemma-2",
+    );
+    expect(c.status).toBe("fail");
+    expect(c.hint).toContain("restart llama-server");
+  });
+
   test("a reachable Ollama with the configured model is ok", () => {
-    const c = ollamaCheck({
-      url: "http://127.0.0.1:11434",
-      model: "qwen3-embedding",
-      reachable: true,
-      models: ["qwen3-embedding:latest"],
-    });
+    const c = backendCheck(BACKEND_OK, "qwen3-embedding");
+    expect(c.status).toBe("ok");
+  });
+
+  test("a live llama-server serving the model alias is ok", () => {
+    const c = backendCheck(
+      { provider: "llamacpp", url: "http://127.0.0.1:8080", up: true, models: ["embeddinggemma-2"] },
+      "embeddinggemma-2",
+    );
     expect(c.status).toBe("ok");
   });
 });
@@ -280,13 +318,13 @@ describe("doctor — projectCheck (registry ↔ table sanity)", () => {
   });
 
   test("a project model missing from Ollama is a fail", () => {
-    const c = projectCheck(projectState({ embedModel: "qwen3-embedding:8b-q8_0", modelInOllama: false }));
+    const c = projectCheck(projectState({ embedModel: "qwen3-embedding:8b-q8_0", modelOnBackend: false }));
     expect(c.status).toBe("fail");
     expect(c.hint).toContain("ollama pull qwen3-embedding:8b-q8_0");
   });
 
   test("an unknown model list (Ollama unreachable) does not fail the project", () => {
-    expect(projectCheck(projectState({ modelInOllama: null })).status).toBe("ok");
+    expect(projectCheck(projectState({ modelOnBackend: null })).status).toBe("ok");
   });
 
   test("the hint comes from the worst finding", () => {
@@ -492,7 +530,7 @@ describe("doctor — runDoctor (collector over fake ports)", () => {
 
     expect(report.status).toBe("ok");
     expect(report.checks.map((c) => c.id)).toEqual([
-      "ollama", "reranker", "project:api", "tables", "config", "disk",
+      "backend", "reranker", "project:api", "tables", "config", "disk",
     ]);
     for (const c of report.checks) expect(c.status).toBe("ok");
     expect(byId(report.checks, "project:api")?.detail).toContain("schema current");
@@ -534,7 +572,7 @@ describe("doctor — runDoctor (collector over fake ports)", () => {
   test("an unreachable Ollama fails the run and skips the per-project model verdict", async () => {
     const report = await runDoctor(
       ports({
-        ollama: async () => ({ reachable: false, models: [] }),
+        backend: async () => ({ provider: null, url: "", up: false, models: [] }),
         indexes: () => [
           {
             name: "api",
@@ -558,8 +596,8 @@ describe("doctor — runDoctor (collector over fake ports)", () => {
     );
 
     expect(report.status).toBe("fail");
-    expect(byId(report.checks, "ollama")?.status).toBe("fail");
-    // modelInOllama is unknown, not false — the project check stays ok.
+    expect(byId(report.checks, "backend")?.status).toBe("fail");
+    // modelOnBackend is unknown, not false — the project check stays ok.
     expect(byId(report.checks, "project:api")?.status).toBe("ok");
   });
 

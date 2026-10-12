@@ -19,6 +19,13 @@ import { parse as parseYaml } from "yaml";
  * old one does, it is moved once at startup (see migrateLegacyHome).
  */
 
+/**
+ * The embedding backend. `auto` probes both (an Ollama that has the configured
+ * model wins; a live llama-server next); `ollama`/`llamacpp` pin one.
+ */
+export type EmbedProviderSetting = "auto" | "ollama" | "llamacpp";
+const EMBED_PROVIDER_VALUES: readonly string[] = ["auto", "ollama", "llamacpp"];
+
 export interface IndexerConfig {
   home: string;
   server: { host: string; mcpPort: number; controlPort: number };
@@ -35,7 +42,13 @@ export interface IndexerConfig {
      */
     numCtx: number;
   };
-  embedding: { cacheMax: number };
+  embedding: {
+    cacheMax: number;
+    /** Which embedding backend to talk to (see services/embed.ts for the auto rules). */
+    provider: EmbedProviderSetting;
+    /** Base URL of a `llama-server` process (OpenAI-compatible endpoints). */
+    llamacppUrl: string;
+  };
   indexing: {
     maxChunkSize: number;
     overlapSize: number;
@@ -81,6 +94,13 @@ export interface IndexerConfig {
        * Ollama's 4096 default allocation.
        */
       numCtx: number;
+      /**
+       * Base URL for reranker requests. Empty = follow the embedding backend's
+       * resolved URL. Set it when the reranker model lives on a different
+       * server from the embedding model (a llama.cpp reranker must: one
+       * llama-server serves one model).
+       */
+      url: string;
     };
     mmr: {
       /** If true, MMR diversifies the top results by default (per-call override via the search API). */
@@ -114,7 +134,7 @@ const DEFAULTS: IndexerConfig = {
     concurrency: 4,
     numCtx: 1024,
   },
-  embedding: { cacheMax: 50000 },
+  embedding: { cacheMax: 50000, provider: "auto", llamacppUrl: "http://127.0.0.1:8080" },
   indexing: {
     maxChunkSize: 1500,
     overlapSize: 200,
@@ -148,7 +168,7 @@ const DEFAULTS: IndexerConfig = {
   },
   watcher: { debounceMs: 300 },
   search: {
-    rerank: { enabled: true, model: "qwen3-reranker-q8", topK: 20, concurrency: 4, numCtx: 1024 },
+    rerank: { enabled: true, model: "qwen3-reranker-q8", topK: 20, concurrency: 4, numCtx: 1024, url: "" },
     mmr: { enabled: true, lambda: 0.5, topK: 20 },
   },
   doccheck: { maxChars: 12000, undocumentedLimit: 25 },
@@ -175,6 +195,8 @@ ollama:
 
 embedding:
   cacheMax: ${DEFAULTS.embedding.cacheMax}       # max records in the content-hash embedding cache
+  provider: ${DEFAULTS.embedding.provider}       # auto | ollama | llamacpp; auto = an Ollama that has the model wins, else a live llama-server
+  llamacppUrl: ${DEFAULTS.embedding.llamacppUrl}  # base URL of llama-server; start it: llama-server -m <model.gguf> -a <model> --ctx-size <numCtx> --embedding
 
 indexing:
   maxChunkSize: ${DEFAULTS.indexing.maxChunkSize}
@@ -195,8 +217,9 @@ search:
     enabled: ${DEFAULTS.search.rerank.enabled}            # on by default; auto-disables if the reranker model is absent in Ollama
     model: ${DEFAULTS.search.rerank.model}    # causal-LM reranker; scored via yes/no token logprobs
     topK: ${DEFAULTS.search.rerank.topK}                  # how many candidates to rerank before slicing to limit
-    concurrency: ${DEFAULTS.search.rerank.concurrency}              # concurrent reranker calls to Ollama
+    concurrency: ${DEFAULTS.search.rerank.concurrency}              # concurrent reranker calls to the backend
     numCtx: ${DEFAULTS.search.rerank.numCtx}              # Ollama num_ctx for the rerank prompt (query + one chunk + template ≈ 500 tokens)
+    url: ""                     # reranker base URL; empty = same server as the embedding backend (a llama.cpp reranker usually needs its own)
   mmr:
     enabled: true              # diversify the top results (Maximal Marginal Relevance)
     lambda: 0.5                # 1.0 = pure relevance, 0.0 = pure diversity
@@ -315,6 +338,13 @@ export const RESOLVED: IndexerConfig = {
   },
   embedding: {
     cacheMax: num(process.env.EMBED_CACHE_MAX) ?? y.embedding?.cacheMax ?? DEFAULTS.embedding.cacheMax,
+    provider: (() => {
+      const raw = process.env.EMBED_PROVIDER ?? y.embedding?.provider ?? DEFAULTS.embedding.provider;
+      if (EMBED_PROVIDER_VALUES.includes(raw)) return raw as EmbedProviderSetting;
+      console.error(`[config] embedding.provider: '${raw}' is not one of auto/ollama/llamacpp — using 'auto'`);
+      return "auto" as const;
+    })(),
+    llamacppUrl: process.env.LLAMACPP_URL ?? y.embedding?.llamacppUrl ?? DEFAULTS.embedding.llamacppUrl,
   },
   indexing: {
     maxChunkSize: y.indexing?.maxChunkSize ?? DEFAULTS.indexing.maxChunkSize,
@@ -359,6 +389,7 @@ export const RESOLVED: IndexerConfig = {
         DEFAULTS.search.rerank.concurrency,
       numCtx:
         num(process.env.RERANK_NUM_CTX) ?? y.search?.rerank?.numCtx ?? DEFAULTS.search.rerank.numCtx,
+      url: process.env.RERANK_URL ?? y.search?.rerank?.url ?? DEFAULTS.search.rerank.url,
     },
     mmr: {
       enabled:
@@ -393,6 +424,8 @@ export const CONFIG = {
   EMBED_BATCH_SIZE: RESOLVED.ollama.batchSize,
   EMBED_CONCURRENCY: RESOLVED.ollama.concurrency,
   EMBED_CACHE_MAX: RESOLVED.embedding.cacheMax,
+  EMBED_PROVIDER: RESOLVED.embedding.provider,
+  LLAMACPP_URL: RESOLVED.embedding.llamacppUrl,
 
   ALLOWED_EXTENSIONS: RESOLVED.indexing.allowedExtensions,
   GLOBAL_IGNORED_DIRS: RESOLVED.indexing.ignoredDirs,
@@ -412,6 +445,7 @@ export const CONFIG = {
   RERANK_TOP_K: RESOLVED.search.rerank.topK,
   RERANK_CONCURRENCY: RESOLVED.search.rerank.concurrency,
   RERANK_NUM_CTX: RESOLVED.search.rerank.numCtx,
+  RERANK_URL: RESOLVED.search.rerank.url,
 
   MMR_ENABLED: RESOLVED.search.mmr.enabled,
   MMR_LAMBDA: RESOLVED.search.mmr.lambda,

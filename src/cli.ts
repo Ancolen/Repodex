@@ -1207,10 +1207,10 @@ const COMMANDS: Record<string, CmdDoc> = {
   },
   doctor: {
     usage: "doctor",
-    summary: "One read-only diagnostic pass: daemon, Ollama, models, tables, schema, config, disk.",
+    summary: "One read-only diagnostic pass: daemon, embedding backend, models, tables, schema, config, disk.",
     details: [
       "Every check reports ok / warn / fail with a one-line fix hint.",
-      "Checks the daemon, Ollama + the configured embed model, the reranker probe, each project's table and schema freshness (pre-2.4.0 tables get the reindex hint), ANN/FTS index presence, file-cache sanity, orphan tables, config-file validity, and the disk usage of the data root.",
+      "Checks the daemon, the embedding backend (Ollama or llama-server) + the configured embed model, the reranker probe, each project's table and schema freshness (pre-2.4.0 tables get the reindex hint), ANN/FTS index presence, file-cache sanity, orphan tables, config-file validity, and the disk usage of the data root.",
       "Read-only — doctor never mutates anything. Exits 1 only when a check fails.",
     ],
     examples: ["cidx doctor"],
@@ -1295,8 +1295,8 @@ function printHelp(): void {
   const lines: string[] = [];
   lines.push(`cidx ${CLI_VERSION} — local, multi-project, asynchronous code search daemon`);
   lines.push("");
-  lines.push("Indexes codebases with Ollama embeddings; offers AI agents hybrid (semantic +");
-  lines.push("exact-term) search over MCP. A single daemon manages multiple projects.");
+  lines.push("Indexes codebases with local embeddings (Ollama or llama-server); offers AI agents");
+  lines.push("hybrid (semantic + exact-term) search over MCP. A single daemon manages multiple projects.");
   lines.push("");
   lines.push("USAGE");
   lines.push("  cidx <command> [arguments]            (alias: repodex)");
@@ -1354,10 +1354,11 @@ function printHelp(): void {
   lines.push("  Add extra ignore rules by placing a .cidxignore at the project root (.gitignore is also obeyed).");
   lines.push("");
   lines.push("ENVIRONMENT VARIABLES (temporary override)");
-  lines.push("  CIDX_HOME, CIDX_CONFIG, OLLAMA_URL, OLLAMA_MODEL, OLLAMA_NUM_CTX, MCP_PORT,");
-  lines.push("  CONTROL_PORT, EMBED_BATCH_SIZE, EMBED_CONCURRENCY, EMBED_CACHE_MAX,");
-  lines.push("  MAX_CHUNK_TOKENS, VECTOR_INDEX_THRESHOLD, JOB_CONCURRENCY, RERANK_MODEL,");
-  lines.push("  RERANK_TOP_K, RERANK_CONCURRENCY, RERANK_NUM_CTX, MMR_LAMBDA, MMR_TOP_K");
+  lines.push("  CIDX_HOME, CIDX_CONFIG, EMBED_PROVIDER, LLAMACPP_URL, OLLAMA_URL, OLLAMA_MODEL,");
+  lines.push("  OLLAMA_NUM_CTX, MCP_PORT, CONTROL_PORT, EMBED_BATCH_SIZE, EMBED_CONCURRENCY,");
+  lines.push("  EMBED_CACHE_MAX, MAX_CHUNK_TOKENS, VECTOR_INDEX_THRESHOLD, JOB_CONCURRENCY,");
+  lines.push("  RERANK_MODEL, RERANK_URL, RERANK_TOP_K, RERANK_CONCURRENCY, RERANK_NUM_CTX,");
+  lines.push("  MMR_LAMBDA, MMR_TOP_K");
   lines.push("");
   lines.push("DATA LOCATION");
   lines.push(`  Root:    ${CONFIG.ROOT_DIR}`);

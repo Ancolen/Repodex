@@ -7,6 +7,8 @@ import { hostGuard } from "./host-guard";
 import { fileOutline } from "../chunking/chunker";
 import { measureDiskUsage, runDoctor, type DoctorPorts } from "../core/doctor";
 import { countTableRows, listTables, tableColumns } from "../services/db";
+import { probeOllama, resolveEmbedBackend } from "../services/embed";
+import { probeLlamaServer } from "../services/llamacpp";
 import type { JobQueue } from "../core/job-queue";
 import { indexNotFoundMessage } from "../core/index-manager";
 import type { IndexManager } from "../core/index-manager";
@@ -75,19 +77,23 @@ function doctorPorts(deps: ControlDeps): DoctorPorts {
       const t = await conn.openTable(table);
       return (await t.listIndices()).map((ix) => ({ columns: ix.columns, indexType: ix.indexType }));
     },
-    ollama: async () => {
+    backend: async () => {
       try {
-        const r = await fetch(`${CONFIG.OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(5000) });
-        if (!r.ok) return { reachable: true, models: [] };
-        const data = (await r.json()) as { models?: { name?: string }[] };
+        const backend = await resolveEmbedBackend();
+        const probe =
+          backend.provider === "ollama"
+            ? await probeOllama(backend.url)
+            : await probeLlamaServer(backend.url);
         return {
-          reachable: true,
-          models: (data.models ?? [])
-            .map((m) => m.name ?? "")
-            .filter((n) => n.length > 0),
+          provider: backend.provider,
+          url: backend.url,
+          up: probe.up,
+          models: probe.models,
         };
       } catch {
-        return { reachable: false, models: [] };
+        // No backend resolved at all (nothing reachable under `auto`) — doctor
+        // turns this into the actionable fail.
+        return { provider: null, url: "", up: false, models: [] };
       }
     },
     rerankerAvailable: () => deps.manager.ensureRerankAvailable(),
@@ -106,7 +112,6 @@ function doctorPorts(deps: ControlDeps): DoctorPorts {
     settings: {
       home: CONFIG.ROOT_DIR,
       dbDir: CONFIG.DB_DIR,
-      ollamaUrl: CONFIG.OLLAMA_URL,
       embedModel: CONFIG.OLLAMA_MODEL,
       docstrings: CONFIG.DOCSTRINGS,
       vectorIndexThreshold: CONFIG.VECTOR_INDEX_THRESHOLD,

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rmSync } from "node:fs";
 import { Registry } from "../src/core/registry";
-import { cachedEmbed } from "../src/services/ollama";
+import { cachedEmbed } from "../src/services/embed";
 
 function tempDbPath(): string {
   return join(tmpdir(), `mcp-test-${crypto.randomUUID()}.db`);

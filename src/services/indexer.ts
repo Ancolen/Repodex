@@ -5,7 +5,7 @@ import { CONFIG } from "../config";
 import { readProjectConfig, extToLanguage, languageAllowSet } from "../core/project-config";
 import { chunkCode } from "../chunking/chunker";
 import { extractIdTerms } from "../core/idterms";
-import { getEmbeddings } from "./ollama";
+import { getEmbeddings } from "./embed";
 import { insertChunks, deleteFileRecords, ensureVectorIndex, ensureFtsIndex, type CodeRecord } from "./db";
 import { hashContent } from "../utils/hash";
 import { mapWithConcurrency } from "../utils/concurrency";

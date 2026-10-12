@@ -1,6 +1,7 @@
 import { test, expect, describe, spyOn } from "bun:test";
 import { CONFIG } from "../src/config";
 import { scoreFromLogprobs, rerankScores } from "../src/services/rerank";
+import { setEmbedBackend, resetEmbedBackend } from "../src/services/embed";
 
 describe("scoreFromLogprobs", () => {
   test("yes-dominant pair → softmax above 0.5", () => {
@@ -78,6 +79,8 @@ describe("rerankScores", () => {
   });
 
   test("the /api/generate body carries num_ctx alongside num_predict/temperature", async () => {
+    // Pin the Ollama backend explicitly so the body assertions are deterministic
+    // (no live probing of whatever embedding server happens to be running).
     // Ollama allocates its context buffer from num_ctx (4096 when unset), so the
     // rerank request must pin it explicitly. Guarded here because a regression
     // would only show up as VRAM bloat, never as an error.
@@ -90,12 +93,14 @@ describe("rerankScores", () => {
         headers: { "Content-Type": "application/json" },
       });
     }) as typeof fetch;
+    setEmbedBackend({ provider: "ollama", url: CONFIG.OLLAMA_URL, reason: "explicit" });
 
     try {
       const scores = await rerankScores("parse the config", ["const x = readConfig();"]);
       expect(scores).toEqual([1]); // only "yes" in the logprobs → 1.0
     } finally {
       globalThis.fetch = realFetch;
+      resetEmbedBackend();
     }
 
     expect(bodies.length).toBe(1);
@@ -113,6 +118,7 @@ describe("rerankScores", () => {
   test("a per-doc failure degrades to the neutral score instead of throwing", async () => {
     const realFetch = globalThis.fetch;
     globalThis.fetch = (async () => new Response("boom", { status: 500 })) as typeof fetch;
+    setEmbedBackend({ provider: "ollama", url: CONFIG.OLLAMA_URL, reason: "explicit" });
     // The degradation is logged by design; keep it out of the test output.
     const errSpy = spyOn(console, "error").mockImplementation(() => {});
     try {
@@ -121,6 +127,7 @@ describe("rerankScores", () => {
     } finally {
       errSpy.mockRestore();
       globalThis.fetch = realFetch;
+      resetEmbedBackend();
     }
   });
 });

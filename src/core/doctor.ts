@@ -3,6 +3,8 @@ import { readdirSync, statSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { PROJECT_CONFIG_FILE, parseProjectConfig } from "./project-config";
 import type { IndexRecord } from "./registry";
+import type { EmbedProvider } from "../services/embed";
+import { modelTagPresent } from "../utils/model-tag";
 
 /**
  * `cidx doctor` — the check registry behind the `GET /doctor` Control-API route
@@ -14,7 +16,7 @@ import type { IndexRecord } from "./registry";
  * config files and the data directory.
  *
  * LAYERING (kept deliberately strict so the checks are unit-testable without a
- * daemon, without Ollama and without LanceDB):
+ * daemon, without an embedding backend and without LanceDB):
  *   - The check functions below are PURE: they take injected, already-measured
  *     state (plain data) and return a verdict. They never touch a live handle.
  *   - `runDoctor` is the only place that *gathers* live state, and it does so
@@ -154,45 +156,55 @@ export function daemonCheck(s: DaemonCheckState): DoctorCheck {
   return check("daemon", "daemon", "ok", `v${s.cliVersion}${s.pid !== undefined ? ` · pid ${s.pid}` : ""}`);
 }
 
-export interface OllamaCheckState {
+export interface BackendProbeState {
+  /** Which backend answered; `null` = no backend reachable at all. */
+  provider: EmbedProvider | null;
   url: string;
-  model: string;
-  reachable: boolean;
-  /** Installed model tags as reported by Ollama (`/api/tags`); [] when unreachable. */
+  up: boolean;
+  /** Model tags/id served by the backend (`/api/tags` or `/v1/models`); [] when unreachable. */
   models: string[];
 }
 
-/**
- * Is `model` present in an installed-tag list? Ollama resolves a bare name to
- * its `:latest` tag, so `qwen3-embedding` must match `qwen3-embedding:latest`
- * (and a pinned `…:8b-q8_0` matches exactly).
- */
-export function ollamaModelPresent(models: string[], model: string): boolean {
-  if (model.length === 0) return false;
-  return models.some((m) => m === model || m.startsWith(`${model}:`));
-}
-
-/** Check 2a — Ollama reachable + the configured embedding model present. */
-export function ollamaCheck(s: OllamaCheckState): DoctorCheck {
-  if (!s.reachable) {
+/** Check 2a — the embedding backend is reachable and serves the configured model. */
+export function backendCheck(s: BackendProbeState, model: string): DoctorCheck {
+  if (s.provider === null) {
     return check(
-      "ollama",
-      "ollama",
+      "backend",
+      "embedding backend",
       "fail",
-      `no answer from Ollama at ${s.url}`,
-      `start Ollama (ollama serve) or fix ollama.url — mode=text search keeps working without it`,
+      "no embedding backend reachable",
+      `start Ollama (ollama serve) or llama-server (-m <model.gguf> --embedding), or set embedding.provider — mode=text search keeps working without one`,
     );
   }
-  if (!ollamaModelPresent(s.models, s.model)) {
+  const label = s.provider === "ollama" ? "Ollama" : "llama-server";
+  if (!s.up) {
     return check(
-      "ollama",
-      "ollama",
+      "backend",
+      "embedding backend",
       "fail",
-      `model '${s.model}' is not installed (${s.models.length} model(s) present)`,
-      `ollama pull ${s.model} — or point ollama.model at an installed tag`,
+      `no answer from ${label} at ${s.url}`,
+      `start ${label} (ollama serve, or llama-server -m <model.gguf> --embedding) — mode=text search keeps working without it`,
     );
   }
-  return check("ollama", "ollama", "ok", `${s.url} · model '${s.model}' present · ${s.models.length} model(s)`);
+  if (!modelTagPresent(s.models, model)) {
+    const hint =
+      s.provider === "ollama"
+        ? `ollama pull ${model} — or point ollama.model at an installed tag`
+        : `restart llama-server with that model (-m <model.gguf> -a ${model})`;
+    return check(
+      "backend",
+      "embedding backend",
+      "fail",
+      `model '${model}' is not served by ${label} (${s.models.length} model(s) present)`,
+      hint,
+    );
+  }
+  return check(
+    "backend",
+    "embedding backend",
+    "ok",
+    `${label} at ${s.url} · model '${model}' present · ${s.models.length} model(s)`,
+  );
 }
 
 export interface RerankerCheckState {
@@ -224,7 +236,7 @@ export function rerankerCheck(s: RerankerCheckState): DoctorCheck {
     "reranker",
     "warn",
     `model '${s.model}' is not available — reranking is off for this session`,
-    `ollama pull ${s.model} — or set search.rerank.enabled=false (search falls back to RRF order)`,
+    `install it on the embedding backend (ollama pull ${s.model}, or start that llama-server with it) — or set search.rerank.enabled=false (search falls back to RRF order)`,
   );
 }
 
@@ -241,6 +253,8 @@ export interface ProjectDoctorState {
   chunkCount: number;
   /** The model the table's vectors were built with (null = legacy record). */
   embedModel: string | null;
+  /** Is the project's model served by the embedding backend? (null = could not probe) */
+  modelOnBackend: boolean | null;
   tableExists: boolean;
   /** Live row count (null when the table is absent). */
   tableRows: number | null;
@@ -248,8 +262,6 @@ export interface ProjectDoctorState {
   columns: string[];
   /** Live index metadata (empty when the table is absent). */
   indices: TableIndexInfo[];
-  /** Is the project's model installed in Ollama? (null = could not list models) */
-  modelInOllama: boolean | null;
   /** ANN is only built at/above this row count (config `vectorIndexThreshold`). */
   vectorIndexThreshold: number;
   /** Config `indexing.docstrings` — whether missing doc columns is a problem. */
@@ -279,7 +291,7 @@ export function projectFindings(s: ProjectDoctorState): Finding[] {
       finding(
         "fail",
         `last index job failed${s.error ? `: ${s.error}` : ""}`,
-        `${reindex} — and check that Ollama is running and the model is pulled`,
+        `${reindex} — and check that the embedding backend is running and serves the model`,
       ),
     );
   }
@@ -295,12 +307,12 @@ export function projectFindings(s: ProjectDoctorState): Finding[] {
     return f;
   }
 
-  if (s.embedModel && s.modelInOllama === false) {
+  if (s.embedModel && s.modelOnBackend === false) {
     f.push(
       finding(
         "fail",
-        `embedding model '${s.embedModel}' (pinned by this project) is not in Ollama — search in this project fails`,
-        `ollama pull ${s.embedModel} — or change .cidx.json embedModel and reindex`,
+        `embedding model '${s.embedModel}' (pinned by this project) is not served by the embedding backend — search in this project fails`,
+        `serve it (ollama pull ${s.embedModel}, or point llama-server at it) — or change .cidx.json embedModel and reindex`,
       ),
     );
   }
@@ -675,8 +687,8 @@ export interface DoctorPorts {
   rowCount(table: string): Promise<number>;
   /** Index metadata of a table ([] when absent). */
   tableIndices(table: string): Promise<TableIndexInfo[]>;
-  /** Ollama reachability + installed model tags. */
-  ollama(): Promise<{ reachable: boolean; models: string[] }>;
+  /** Embedding-backend probe (provider + reachability + served model tags). */
+  backend(): Promise<BackendProbeState>;
   /** The manager's cached reranker probe (`IndexManager.ensureRerankAvailable`). */
   rerankerAvailable(): Promise<boolean>;
   /** Resolved path of the global YAML config (null = defaults). */
@@ -689,7 +701,6 @@ export interface DoctorPorts {
   settings: {
     home: string;
     dbDir: string;
-    ollamaUrl: string;
     embedModel: string;
     docstrings: boolean;
     vectorIndexThreshold: number;
@@ -706,16 +717,9 @@ export async function runDoctor(ports: DoctorPorts): Promise<DoctorReport> {
   const { settings } = ports;
   const checks: DoctorCheck[] = [];
 
-  // 2a/2b — Ollama + the reranker probe (network; the only awaited probes).
-  const [ollamaState, rerankAvailable] = await Promise.all([ports.ollama(), ports.rerankerAvailable()]);
-  checks.push(
-    ollamaCheck({
-      url: settings.ollamaUrl,
-      model: settings.embedModel,
-      reachable: ollamaState.reachable,
-      models: ollamaState.models,
-    }),
-  );
+  // 2a/2b — the embedding backend + the reranker probe (network; the only awaited probes).
+  const [backendState, rerankAvailable] = await Promise.all([ports.backend(), ports.rerankerAvailable()]);
+  checks.push(backendCheck(backendState, settings.embedModel));
   checks.push(
     rerankerCheck({
       enabled: settings.rerankEnabled,
@@ -726,9 +730,9 @@ export async function runDoctor(ports: DoctorPorts): Promise<DoctorReport> {
 
   const indexes = ports.indexes();
   const tables = await ports.tableNames();
-  // The per-project model verdict needs the installed-tag list; unknown (null)
-  // when Ollama is unreachable — the ollama check already reports that.
-  const modelProbe = ollamaState.reachable ? ollamaState.models : null;
+  // The per-project model verdict needs the served-tags list; unknown (null)
+  // when the backend is unreachable — the backend check already reports that.
+  const modelProbe = backendState.up ? backendState.models : null;
 
   // 3 — one check per registered project.
   for (const rec of indexes) {
@@ -761,7 +765,7 @@ export async function runDoctor(ports: DoctorPorts): Promise<DoctorReport> {
         tableRows: exists ? rows : null,
         columns,
         indices,
-        modelInOllama: modelProbe === null ? null : ollamaModelPresent(modelProbe, model),
+        modelOnBackend: modelProbe === null ? null : modelTagPresent(modelProbe, model),
         vectorIndexThreshold: settings.vectorIndexThreshold,
         docstringsEnabled: settings.docstrings,
       }),

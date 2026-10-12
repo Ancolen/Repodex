@@ -27,7 +27,9 @@ import {
   type SearchResult,
   type SearchFilters,
 } from "../services/db";
-import { cachedEmbed, getEmbedding } from "../services/ollama";
+import { cachedEmbed, getEmbedding, resolveEmbedBackend } from "../services/embed";
+import { probeLlamaServer } from "../services/llamacpp";
+import { modelTagPresent } from "../utils/model-tag";
 import { readProjectConfig } from "./project-config";
 import { rerankScores } from "../services/rerank";
 import { selectMMR } from "../utils/mmr";
@@ -2099,11 +2101,12 @@ export class IndexManager {
   }
 
   /**
-   * Probes once (cached) whether the configured reranker model exists in Ollama.
+   * Probes once (cached) whether the configured reranker model exists on the
+   * resolved embedding backend (Ollama `/api/show`, llama-server `/v1/models`).
    * Default-on reranking must not pay a per-search storm of failed calls when the
    * model isn't installed, so reranking is disabled for the session if it's absent.
    * Public: the `doctor` diagnostic reports the same probe's verdict instead of
-   * asking Ollama a second time (one implementation, one cached answer).
+   * asking the backend a second time (one implementation, one cached answer).
    */
   async ensureRerankAvailable(): Promise<boolean> {
     if (this.rerankAvailable !== null) return this.rerankAvailable;
@@ -2112,15 +2115,22 @@ export class IndexManager {
       return false;
     }
     try {
-      const resp = await fetch(`${CONFIG.OLLAMA_URL}/api/show`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: CONFIG.RERANK_MODEL }),
-      });
-      this.rerankAvailable = resp.ok;
-      if (!resp.ok) {
+      const backend = await resolveEmbedBackend();
+      const rerankUrl = CONFIG.RERANK_URL || backend.url;
+      const found =
+        backend.provider === "llamacpp"
+          ? await probeLlamaServer(rerankUrl).then(
+              (listing) => listing.up && modelTagPresent(listing.models, CONFIG.RERANK_MODEL),
+            )
+          : await fetch(`${rerankUrl}/api/show`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name: CONFIG.RERANK_MODEL }),
+            }).then((resp) => resp.ok);
+      this.rerankAvailable = found;
+      if (!found) {
         console.error(
-          `[manager] reranker model '${CONFIG.RERANK_MODEL}' not found in Ollama; ` +
+          `[manager] reranker model '${CONFIG.RERANK_MODEL}' not found on the ${backend.provider} backend; ` +
             `reranking disabled for this session (install it, or set search.rerank.enabled=false).`,
         );
       }

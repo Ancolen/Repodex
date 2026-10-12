@@ -1,12 +1,18 @@
 import { CONFIG } from "../config";
 import { mapWithConcurrency } from "../utils/concurrency";
+import { resolveEmbedBackend } from "./embed";
+import { llamaRerankTopLogprobs } from "./llamacpp";
 
 /**
- * Second-stage reranker using a Qwen3-Reranker-style causal LM served by Ollama.
+ * Second-stage reranker using a Qwen3-Reranker-style causal LM served by the
+ * embedding backend (Ollama or a llama-server; see services/embed.ts).
  *
- * Ollama has no `/api/rerank` endpoint, so each (query, doc) pair is scored via
- * `/api/generate` + logprobs: the model is prompted to answer "yes" or "no", and
- * the relevance score is the softmax of the "yes" vs "no" token logprobs.
+ * Neither backend has a `/api/rerank` endpoint, so each (query, doc) pair is
+ * scored via completion + logprobs: the model is prompted to answer "yes" or
+ * "no", and the relevance score is the softmax of the "yes" vs "no" token
+ * logprobs. Ollama path: `/api/generate`; llama.cpp path:
+ * `/v1/completions` (`search.rerank.url` may point the reranker at its own
+ * llama-server — one llama-server serves one model).
  *
  * Per-doc calls are wrapped so a single failure degrades to a neutral score
  * rather than failing the whole search — reranking is a refinement, never a hard
@@ -53,27 +59,41 @@ function judgePrompt(query: string, doc: string): string {
 interface OllamaLogprobEntry {
   token?: string;
   logprob?: number;
-  top_logprobs?: Array<{ token: string; logprob: number }> | null;
+  top_logprobs?: Array<{ token?: string; logprob?: number }> | null;
+}
+
+/** Normalizes both backends' logprob tables into the shape `scoreFromLogprobs` reads. */
+function normalizeTopLogprobs(entries: readonly { token?: string; tok_str?: string; logprob?: number }[]) {
+  return entries.map((e) => ({ token: e.token ?? e.tok_str ?? "", logprob: e.logprob ?? -Infinity }));
 }
 
 async function scoreOne(query: string, doc: string): Promise<number> {
-  const resp = await fetch(`${CONFIG.OLLAMA_URL}/api/generate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: CONFIG.RERANK_MODEL,
-      prompt: judgePrompt(query, doc),
-      raw: true,
-      stream: false,
-      options: { num_predict: 1, temperature: 0, num_ctx: CONFIG.RERANK_NUM_CTX },
-      logprobs: true,
-      top_logprobs: 20,
-    }),
-  });
-  if (!resp.ok) throw new Error(`rerank generate HTTP ${resp.status}`);
-  const data = (await resp.json()) as { logprobs?: OllamaLogprobEntry[] | null };
-  // num_predict:1 → the first generated token is the model's yes/no verdict.
-  return scoreFromLogprobs(data.logprobs?.[0]?.top_logprobs ?? []);
+  const backend = await resolveEmbedBackend();
+  // Empty `search.rerank.url` = follow the embedding backend's server.
+  const rerankUrl = CONFIG.RERANK_URL || backend.url;
+  let entries: { token?: string; logprob?: number }[] | undefined;
+  if (backend.provider === "llamacpp") {
+    entries = await llamaRerankTopLogprobs(judgePrompt(query, doc), rerankUrl, CONFIG.RERANK_MODEL);
+  } else {
+    const resp = await fetch(`${rerankUrl}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: CONFIG.RERANK_MODEL,
+        prompt: judgePrompt(query, doc),
+        raw: true,
+        stream: false,
+        options: { num_predict: 1, temperature: 0, num_ctx: CONFIG.RERANK_NUM_CTX },
+        logprobs: true,
+        top_logprobs: 20,
+      }),
+    });
+    if (!resp.ok) throw new Error(`rerank generate HTTP ${resp.status}`);
+    const data = (await resp.json()) as { logprobs?: OllamaLogprobEntry[] | null };
+    // num_predict:1 → the first generated token is the model's yes/no verdict.
+    entries = data.logprobs?.[0]?.top_logprobs ?? [];
+  }
+  return scoreFromLogprobs(normalizeTopLogprobs(entries));
 }
 
 /**
