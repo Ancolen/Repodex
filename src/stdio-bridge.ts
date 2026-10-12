@@ -26,6 +26,12 @@ import { daemonCommand } from "./runtime";
 import { TOOL_DEFINITIONS } from "./server/tool-defs";
 import type { SearchEnvelope } from "./core/index-manager";
 import {
+  registerSessionRequest,
+  heartbeatSessionRequest,
+  deleteSessionRequest,
+  BRIDGE_HEARTBEAT_MS,
+} from "./core/bridgesessions";
+import {
   formatResults,
   formatBatchResults,
   formatContextPack,
@@ -136,9 +142,105 @@ function fail(text: string) {
   return { content: [{ type: "text" as const, text }], isError: true };
 }
 
+// ------------------------------------------------- bridge session (proposal O4)
+/**
+ * Tells the daemon that an MCP session is open here. When the daemon runs with
+ * `daemon.idleTimeoutMinutes > 0`, this is what keeps it alive under us: a
+ * registered session counts as activity, so the idle shutdown never fires
+ * while the bridge is serving a client. Every part of this is HTTP-side only —
+ * nothing is ever written to stdout (the JSON-RPC channel).
+ */
+let sessionId: string | null = null;
+
+async function registerSession(): Promise<void> {
+  const req = registerSessionRequest();
+  const data = await api<{ sessionId?: string }>(req.method, req.path);
+  sessionId = typeof data?.sessionId === "string" ? data.sessionId : null;
+}
+
+/**
+ * Keeps the session alive (heartbeat every BRIDGE_HEARTBEAT_MS — 30 s, aligned
+ * with the daemon's idle-decision tick). A 404 or an unreachable daemon clears
+ * the id — an unknown session typically means the daemon restarted and lost
+ * its in-memory state, and the next beat re-registers. Failures never touch
+ * stdout.
+ */
+async function heartbeatSession(): Promise<void> {
+  if (sessionId === null) {
+    try {
+      await registerSession();
+    } catch {
+      // The daemon may be coming up; retry on the next beat.
+    }
+    return;
+  }
+  const req = heartbeatSessionRequest(sessionId);
+  try {
+    await api(req.method, req.path);
+  } catch {
+    sessionId = null;
+  }
+}
+
+/** Best-effort unregister; the daemon also expires silent sessions (TTL 10 min). */
+async function unregisterSession(): Promise<void> {
+  if (sessionId === null) return;
+  const req = deleteSessionRequest(sessionId);
+  sessionId = null;
+  try {
+    await fetch(`${BASE}${req.path}`, {
+      method: req.method,
+      signal: AbortSignal.timeout(500),
+    });
+  } catch {
+    // The daemon may already be gone — the TTL cleanup covers this end.
+  }
+}
+
+function startSessionHeartbeat(): ReturnType<typeof setInterval> {
+  const timer = setInterval(() => {
+    void heartbeatSession();
+  }, BRIDGE_HEARTBEAT_MS);
+  // An unref'd timer never holds the process by itself: without an MCP client
+  // (stdin closed, client gone) the bridge exits exactly as it did before the
+  // idle feature existed. While the client is connected, the MCP transport
+  // keeps the loop alive and the beats fire.
+  timer.unref();
+  return timer;
+}
+
+/** Stops the beats and unregisters, then exits with code 0 (one line to stderr). */
+async function stopAndExit(): Promise<void> {
+  clearInterval(heartbeatTimer);
+  try {
+    await unregisterSession();
+  } finally {
+    console.error("[bridge] Exiting (MCP session closed or signal received).");
+    process.exit(0);
+  }
+}
+
+let heartbeatTimer: ReturnType<typeof setInterval>;
+
 // --------------------------------------------------------------------- main
 async function main(): Promise<void> {
   await ensureDaemon();
+
+  // Register before serving: with an armed idle timeout the daemon must see
+  // the open session from the very first minute. Best-effort — the heartbeat
+  // loop re-registers on the next beat if this first call fails.
+  try {
+    await registerSession();
+  } catch {
+    sessionId = null;
+  }
+  heartbeatTimer = startSessionHeartbeat();
+
+  process.on("SIGINT", () => void stopAndExit());
+  process.on("SIGTERM", () => void stopAndExit());
+  // Best effort for a loop that drains on its own (the timer is unref'd): the
+  // DELETE cannot complete after the drain, the daemon-side TTL covers it.
+  process.on("beforeExit", () => void unregisterSession());
 
   const server = new Server(
     { name: "cidx (stdio bridge)", version: "2.5.0" },
@@ -383,6 +485,10 @@ async function main(): Promise<void> {
   });
 
   const transport = new StdioServerTransport();
+  // Fires when the MCP client closes stdin (the session is over): stop the
+  // heartbeat, unregister, exit. (The SDK's connect() chains this handler
+  // ahead of its own close bookkeeping.)
+  transport.onclose = () => void stopAndExit();
   await server.connect(transport as unknown as Parameters<typeof server.connect>[0]);
   console.error("[bridge] Stdio MCP bridge ready.");
 }

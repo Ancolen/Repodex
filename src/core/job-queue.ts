@@ -84,6 +84,18 @@ export class JobQueue extends EventEmitter {
     return [...this.jobs.values()].sort((a, b) => b.createdAt - a.createdAt);
   }
 
+  /**
+   * How many jobs are currently queued or running. The idle-shutdown gate
+   * reads this (proposal O4): the daemon must not exit while work is pending.
+   */
+  activeJobCount(): number {
+    let active = 0;
+    for (const job of this.jobs.values()) {
+      if (job.status === "queued" || job.status === "running") active++;
+    }
+    return active;
+  }
+
   /** Cancels a queued job or sends an abort signal to a running job. */
   cancel(id: string): boolean {
     const job = this.jobs.get(id);
