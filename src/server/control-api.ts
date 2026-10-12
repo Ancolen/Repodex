@@ -12,7 +12,7 @@ import { probeLlamaServer } from "../services/llamacpp";
 import type { JobQueue } from "../core/job-queue";
 import { indexNotFoundMessage } from "../core/index-manager";
 import type { IndexManager } from "../core/index-manager";
-import type { IndexRecord } from "../core/registry";
+import type { IndexRecord, QueryLogStatsOpts } from "../core/registry";
 
 export interface ControlDeps {
   manager: IndexManager;
@@ -710,6 +710,38 @@ export function startControlApi(
   app.get("/doctor", async (_req, res) => {
     try {
       res.json(await runDoctor(doctorPorts(deps)));
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ------------------------------------------------- query log (proposal A3)
+
+  /**
+   * Search-analytics stats (proposal A3) over the daemon's local query log —
+   * what `cidx stats` renders. Query params: `project` (optional; an unknown
+   * name is a self-healing 404, an absent one aggregates all projects),
+   * `topQueries` and `zeroHitTop` (section caps). Cross-project searches are
+   * logged with a null project and count toward the global stats only.
+   */
+  app.get("/querylog", (req, res) => {
+    const opts: QueryLogStatsOpts = {};
+    const project = req.query.project;
+    if (typeof project === "string" && project.length > 0) {
+      if (!deps.manager.listIndexes().some((r) => r.name === project)) {
+        res
+          .status(404)
+          .json({ error: indexNotFoundMessage(project, deps.manager.listIndexes().map((r) => r.name)) });
+        return;
+      }
+      opts.project = project;
+    }
+    const top = typeof req.query.topQueries === "string" ? Number(req.query.topQueries) : NaN;
+    if (Number.isFinite(top) && top > 0) opts.topQueries = Math.floor(top);
+    const zero = typeof req.query.zeroHitTop === "string" ? Number(req.query.zeroHitTop) : NaN;
+    if (Number.isFinite(zero) && zero > 0) opts.zeroHitTop = Math.floor(zero);
+    try {
+      res.json(Object.keys(opts).length > 0 ? deps.manager.queryLogStats(opts) : deps.manager.queryLogStats());
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }

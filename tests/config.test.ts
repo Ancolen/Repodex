@@ -192,6 +192,15 @@ describe("config — defaults and environment variable overrides", () => {
     expect(DEFAULT_CONFIG_YAML).toContain('- "lib"');
     expect(DEFAULT_CONFIG_YAML).toContain('- "app"');
   });
+
+  test("queryLogSize defaults to 10000; overridden with QUERY_LOG_SIZE (0 turns it off)", async () => {
+    const def = await runConfig({});
+    expect(def.CONFIG.QUERY_LOG_SIZE).toBe(10000);
+    const ovr = await runConfig({ QUERY_LOG_SIZE: "500" });
+    expect(ovr.CONFIG.QUERY_LOG_SIZE).toBe(500);
+    const off = await runConfig({ QUERY_LOG_SIZE: "0" });
+    expect(off.CONFIG.QUERY_LOG_SIZE).toBe(0);
+  });
 });
 
 describe("config — legacy ~/.mcp-indexer → ~/.cidx migration", () => {

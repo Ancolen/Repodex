@@ -78,6 +78,12 @@ export interface IndexerConfig {
   };
   watcher: { debounceMs: number };
   search: {
+    /**
+     * Max rows kept in the local query log (search analytics, proposal A3):
+     * one row per completed `searchIndex`/`searchAll` call, pruned to the most
+     * recent `queryLogSize` rows at write time. 0 = off (nothing is logged).
+     */
+    queryLogSize: number;
     rerank: {
       /** If true, a second-stage reranker refines results by default (per-call override via the search API). */
       enabled: boolean;
@@ -186,6 +192,7 @@ const DEFAULTS: IndexerConfig = {
   },
   watcher: { debounceMs: 300 },
   search: {
+    queryLogSize: 10000,
     rerank: { enabled: true, model: "qwen3-reranker-q8", topK: 20, concurrency: 4, numCtx: 1024, url: "" },
     mmr: { enabled: true, lambda: 0.5, topK: 20 },
     boost: {
@@ -239,6 +246,7 @@ ${DEFAULTS.indexing.ignoredDirs.map((d) => `    - "${d}"`).join("\n")}
   jobConcurrency: ${DEFAULTS.indexing.jobConcurrency}              # number of indexing jobs running at the same time (worker pool)
 
 search:
+  queryLogSize: ${DEFAULTS.search.queryLogSize}          # max rows kept in the local query log (search analytics via 'cidx stats'); 0 = off
   rerank:
     enabled: ${DEFAULTS.search.rerank.enabled}            # on by default; auto-disables if the reranker model is absent in Ollama
     model: ${DEFAULTS.search.rerank.model}    # causal-LM reranker; scored via yes/no token logprobs
@@ -410,6 +418,8 @@ export const RESOLVED: IndexerConfig = {
   },
   watcher: { debounceMs: y.watcher?.debounceMs ?? DEFAULTS.watcher.debounceMs },
   search: {
+    queryLogSize:
+      num(process.env.QUERY_LOG_SIZE) ?? y.search?.queryLogSize ?? DEFAULTS.search.queryLogSize,
     rerank: {
       enabled:
         typeof y.search?.rerank?.enabled === "boolean"
@@ -510,6 +520,8 @@ export const CONFIG = {
   BOOST_TEST_DEMOTION: RESOLVED.search.boost.testDemotion,
   BOOST_GENERATED_DEMOTION: RESOLVED.search.boost.generatedDemotion,
   BOOST_SOURCE_ROOTS: RESOLVED.search.boost.sourceRoots,
+
+  QUERY_LOG_SIZE: RESOLVED.search.queryLogSize,
 
   DOC_CHECK_MAX_CHARS: RESOLVED.doccheck.maxChars,
   DOC_CHECK_UNDOCUMENTED: RESOLVED.doccheck.undocumentedLimit,

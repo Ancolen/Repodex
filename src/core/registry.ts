@@ -35,11 +35,86 @@ export interface JobRow {
   finishedAt: number | null;
 }
 
+// ------------------------------------------------- query log (proposal A3)
+
+/**
+ * One recorded search (local query log, proposal A3). Written from the exit
+ * path of `IndexManager.searchIndex`/`searchAll` — exactly one row per
+ * (project, query) call. Never leaves `~/.cidx`: privacy is "local-only, no
+ * query embeddings persisted".
+ */
+export interface QueryLogRow {
+  /** When the search started (epoch ms). */
+  ts: number;
+  /** The project searched, or null for a cross-project (`searchAll`) query. */
+  project: string | null;
+  query: string;
+  /** Search mode: "hybrid" | "vector" | "text". */
+  mode: string;
+  resultCount: number;
+  latencyMs: number;
+}
+
+/** Options of `Registry.queryLogStats`. */
+export interface QueryLogStatsOpts {
+  /**
+   * Only aggregate rows recorded for this project. Cross-project searches are
+   * logged with `project = null` and therefore count toward the global stats
+   * only.
+   */
+  project?: string | undefined;
+  /** How many of the most frequent queries to report (default 10). */
+  topQueries?: number | undefined;
+  /** How many zero-hit queries to report (default 20). */
+  zeroHitTop?: number | undefined;
+}
+
+/** One aggregated query-frequency entry. */
+export interface QueryTopEntry {
+  query: string;
+  count: number;
+  /** Mean result count over this query's rows (rounded to 2 decimals). */
+  avgResultCount: number;
+}
+
+/** One aggregated zero-hit query entry — the index-gap signal. */
+export interface QueryZeroHitEntry {
+  query: string;
+  count: number;
+}
+
+/** Aggregated search analytics (proposal A3) — pure sqlite aggregation, no LLM. */
+export interface QueryLogStats {
+  /** Rows currently covered by the aggregation (respecting the project filter). */
+  total: number;
+  topQueries: QueryTopEntry[];
+  /** Queries that returned 0 results — a bad query or an index gap. */
+  zeroHit: QueryZeroHitEntry[];
+  /** Mean search latency in ms over the covered rows (rounded to 1 decimal). */
+  avgLatencyMs: number;
+  maxLatencyMs: number;
+  /**
+   * Fraction of searches that repeated an identical query already in the log:
+   * `1 − distinctQueries/total` (rounded to 3 decimals, 0..1) — the cache-hit
+   * estimate: the shared query-embedding cache already absorbs these.
+   */
+  repeatRate: number;
+}
+
+/**
+/** Rounds a (possibly NULL aggregate) number to `digits` decimals; non-finite → 0. */
+function round(x: number | null | undefined, digits: number): number {
+  if (x === null || x === undefined || !Number.isFinite(x)) return 0;
+  const f = 10 ** digits;
+  return Math.round(x * f) / f;
+}
+
 /**
  * Central meta store (bun:sqlite).
- * - indexes:    indexed projects
- * - file_cache: per-file mtime cache (to skip unchanged files)
- * - jobs:       async job persistence (survives daemon restarts)
+ * - indexes:      indexed projects
+ * - file_cache:   per-file mtime cache (to skip unchanged files)
+ * - jobs:         async job persistence (survives daemon restarts)
+ * - query_log:    local search analytics (proposal A3, `cidx stats`)
  */
 export class Registry {
   private db: Database;
@@ -102,6 +177,21 @@ export class Registry {
         vector     BLOB NOT NULL,
         created_at INTEGER NOT NULL,
         PRIMARY KEY (model, hash)
+      );
+    `);
+
+    // Search analytics (proposal A3): one row per completed search call, pruned
+    // to the most recent `search.queryLogSize` rows at write time. `id` is a
+    // rowid alias, so "oldest" is simply the lowest id (even for equal ts).
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS query_log (
+        id           INTEGER PRIMARY KEY,
+        ts           INTEGER NOT NULL,
+        project      TEXT,
+        query        TEXT NOT NULL,
+        mode         TEXT NOT NULL,
+        result_count INTEGER NOT NULL,
+        latency_ms   INTEGER NOT NULL
       );
     `);
   }
@@ -297,6 +387,130 @@ export class Registry {
       )
       .run({ $n: total - max });
     return Number(res.changes);
+  }
+
+  // -------------------------------------------------------------- query log
+  /**
+   * Records one search into the local query log (proposal A3).
+   *
+   * Contract: NEVER throws — a log-write failure is reported to stderr and the
+   * search that produced the row must carry on. `size` is the configured
+   * `search.queryLogSize`: 0 (or any non-positive value) turns logging OFF
+   * entirely (no write, no prune); when on, the oldest rows beyond `size` are
+   * pruned right after the write (write-time prune, as proposed).
+   */
+  recordQueryLog(row: QueryLogRow, size: number = CONFIG.QUERY_LOG_SIZE): void {
+    if (!(size >= 1)) return; // off (also rejects NaN/negative)
+    try {
+      this.db
+        .query(
+          `INSERT INTO query_log (ts, project, query, mode, result_count, latency_ms)
+           VALUES ($ts, $project, $query, $mode, $resultCount, $latencyMs)`,
+        )
+        .run({
+          $ts: row.ts,
+          $project: row.project,
+          $query: row.query,
+          $mode: row.mode,
+          $resultCount: row.resultCount,
+          $latencyMs: row.latencyMs,
+        });
+      this.pruneQueryLog(size);
+    } catch (err) {
+      console.error("[registry] query log write failed (the search is unaffected):", err);
+    }
+  }
+
+  /** Current row count of the query log (what write-time pruning compares against). */
+  countQueryLog(): number {
+    const row = this.db.query(`SELECT COUNT(*) AS n FROM query_log`).get() as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Deletes the OLDEST query-log rows beyond `keepRows` (lowest ids = earliest
+   * writes). A plain DELETE, as proposed — no cutoff timestamp involved.
+   * Returns the number of deleted rows. `keepRows < 0` (or NaN) is a no-op;
+   * `keepRows = 0` keeps nothing (the table is emptied).
+   */
+  pruneQueryLog(keepRows: number): number {
+    const keep = Math.floor(keepRows);
+    if (!(keep >= 0)) return 0;
+    const total = this.countQueryLog();
+    if (total <= keep) return 0;
+    const res = this.db
+      .query(
+        `DELETE FROM query_log WHERE id IN (
+           SELECT id FROM query_log ORDER BY id ASC LIMIT $n
+         )`,
+      )
+      .run({ $n: total - keep });
+    return Number(res.changes);
+  }
+
+  /**
+   * Aggregates the query log (local sqlite, no LLM). `opts.project` filters the
+   * rows to one project (cross-project searches are logged with a null project
+   * and count toward the global stats only); `opts.topQueries`/`opts.zeroHitTop`
+   * cap how many entries of the frequency / zero-hit lists are reported.
+   */
+  queryLogStats(opts: QueryLogStatsOpts = {}): QueryLogStats {
+    const topLimit = Math.max(0, Math.floor(opts.topQueries ?? 10));
+    const zeroLimit = Math.max(0, Math.floor(opts.zeroHitTop ?? 20));
+    const params: Record<string, string | number> = {};
+    if (typeof opts.project === "string" && opts.project.length > 0) params.$p = opts.project;
+    const projectWhere = "$p" in params ? "WHERE project = $p" : "";
+
+    const summary = this.db
+      .query(
+        `SELECT COUNT(*) AS total,
+                COUNT(DISTINCT query) AS distinctQueries,
+                AVG(latency_ms) AS avgLatencyMs,
+                MAX(latency_ms) AS maxLatencyMs
+           FROM query_log
+           ${projectWhere}`,
+      )
+      .get(params) as
+      | { total: number; distinctQueries: number; avgLatencyMs: number | null; maxLatencyMs: number | null }
+      | undefined;
+    if (!summary || summary.total === 0) {
+      return { total: 0, topQueries: [], zeroHit: [], avgLatencyMs: 0, maxLatencyMs: 0, repeatRate: 0 };
+    }
+
+    const topRows = this.db
+      .query(
+        `SELECT query, COUNT(*) AS count, AVG(result_count) AS avgResults
+           FROM query_log
+           ${projectWhere}
+          GROUP BY query
+          ORDER BY count DESC, query ASC
+          LIMIT $top`,
+      )
+      .all({ ...params, $top: topLimit }) as { query: string; count: number; avgResults: number | null }[];
+
+    const zeroRows = this.db
+      .query(
+        `SELECT query, COUNT(*) AS count
+           FROM query_log
+          WHERE result_count = 0${"$p" in params ? " AND project = $p" : ""}
+          GROUP BY query
+          ORDER BY count DESC, query ASC
+          LIMIT $zero`,
+      )
+      .all({ ...params, $zero: zeroLimit }) as { query: string; count: number }[];
+
+    return {
+      total: summary.total,
+      topQueries: topRows.map((r) => ({
+        query: r.query,
+        count: r.count,
+        avgResultCount: round(r.avgResults, 2),
+      })),
+      zeroHit: zeroRows.map((r) => ({ query: r.query, count: r.count })),
+      avgLatencyMs: round(summary.avgLatencyMs, 1),
+      maxLatencyMs: round(summary.maxLatencyMs, 0),
+      repeatRate: round((summary.total - summary.distinctQueries) / summary.total, 3),
+    };
   }
 
   // -------------------------------------------------------------------- jobs

@@ -6,8 +6,8 @@ import { CONFIG, RESOLVED, CONFIG_SOURCE, resolveConfigPath } from "./config";
 import { daemonCommand, bridgeCommand } from "./runtime";
 import { daemonCheck, type DoctorCheck, type DoctorReport } from "./core/doctor";
 import { resolveEditor, buildEditorArgs } from "./utils/editor";
-import type { SearchEnvelope } from "./core/index-manager";
-import { formatContextPack, formatReferences, formatApiDiff, formatImpact, formatDocCheck, formatBlameNote } from "./server/format";
+import type { QueryLogStats, SearchEnvelope } from "./core/index-manager";
+import { formatContextPack, formatReferences, formatApiDiff, formatImpact, formatDocCheck, formatBlameNote, formatQueryLogStats } from "./server/format";
 
 const BASE = `http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}`;
 
@@ -1258,6 +1258,19 @@ const COMMANDS: Record<string, CmdDoc> = {
     ],
     examples: ["cidx doctor"],
   },
+  stats: {
+    usage: "stats [project]",
+    summary: "Search analytics: top queries, zero-hit queries (index gaps), latency, repeat rate.",
+    aliases: ["analytics"],
+    details: [
+      "Aggregates the daemon's local query log (capped by search.queryLogSize, default 10k rows; 0 = off).",
+      "Every searchIndex/searchAll call writes one row — batch and context-pack queries log per query.",
+      "Zero-hit queries are flagged as possible index gaps: either a bad query or nothing relevant indexed.",
+      "Cross-project (searchAll) queries are logged without a project and count toward the global stats only.",
+      "Local-only data — queries never leave ~/.cidx. Table/disk stats land in a later release.",
+    ],
+    examples: ["cidx stats", "cidx stats api"],
+  },
   config: {
     usage: "config [path]",
     summary: "Shows the active YAML configuration as JSON; 'path' prints only the file path.",
@@ -1291,7 +1304,7 @@ const COMMANDS: Record<string, CmdDoc> = {
 
 const HELP_ORDER = [
   "start", "index", "list", "status", "reindex", "sync", "remove",
-  "search", "open", "batch", "pack", "find", "refs", "overview", "deps", "deadcode", "callgraph", "commits", "apidiff", "impact", "doccheck", "doctor", "config", "mcp", "stop", "version", "help",
+  "search", "open", "batch", "pack", "find", "refs", "overview", "deps", "deadcode", "callgraph", "commits", "apidiff", "impact", "doccheck", "doctor", "stats", "config", "mcp", "stop", "version", "help",
 ];
 
 /** Detailed help for a single command. */
@@ -1308,6 +1321,7 @@ function printCommandHelp(name: string): void {
     : name === "git-log" || name === "gitlog" ? "commits"
     : name === "api-diff" ? "apidiff"
     : name === "check-docs" || name === "checkdocs" ? "doccheck"
+    : name === "analytics" ? "stats"
     : name;
   const doc = COMMANDS[key];
   if (!doc) {
@@ -1377,6 +1391,7 @@ function printHelp(): void {
   lines.push('  cidx commits api "login flow"     # git-history / commit-message search');
   lines.push('  cidx deadcode api --min-confidence 70  # potential dead code');
   lines.push('  cidx apidiff api v1.2.0           # public-API diff between two git refs');
+  lines.push('  cidx stats api                   # search analytics: top/zero-hit queries, latency');
   lines.push('  cidx sync api          # fast incremental update');
   lines.push("");
   lines.push("CONNECTING TO AN AI AGENT (MCP)");
@@ -1402,7 +1417,7 @@ function printHelp(): void {
   lines.push("  EMBED_CACHE_MAX, MAX_CHUNK_TOKENS, VECTOR_INDEX_THRESHOLD, JOB_CONCURRENCY,");
   lines.push("  RERANK_MODEL, RERANK_URL, RERANK_TOP_K, RERANK_CONCURRENCY, RERANK_NUM_CTX,");
   lines.push("  MMR_LAMBDA, MMR_TOP_K, BOOST_SHORT_PATH, BOOST_SOURCE_ROOT, BOOST_TEST_DEMOTION,");
-  lines.push("  BOOST_GENERATED_DEMOTION");
+  lines.push("  BOOST_GENERATED_DEMOTION, QUERY_LOG_SIZE");
   lines.push("");
   lines.push("DATA LOCATION");
   lines.push(`  Root:    ${CONFIG.ROOT_DIR}`);
@@ -1500,6 +1515,25 @@ async function cmdVersion(): Promise<void> {
   }
 }
 
+/**
+ * `cidx stats [project]` — search analytics (proposal A3) rendered from the
+ * daemon's local query log via `GET /querylog`. Composable by design: a later
+ * wave appends table/disk stat sections as further `console.log(format…)`
+ * blocks here, reusing exported section formatters from server/format.ts.
+ */
+async function cmdStats(positionals: string[]): Promise<void> {
+  await requireDaemon();
+  const project = positionals[0];
+  const query = project ? `?project=${encodeURIComponent(project)}` : "";
+  try {
+    const stats = await api<QueryLogStats>("GET", `/querylog${query}`);
+    console.log(formatQueryLogStats(stats, project ? { project } : undefined));
+  } catch (err) {
+    console.error("Error:", err instanceof Error ? err.message : err);
+    process.exit(1);
+  }
+}
+
 // ----------------------------------------------------------------------- main
 async function main(): Promise<void> {
   const [, , command, ...rest] = process.argv;
@@ -1538,6 +1572,7 @@ async function main(): Promise<void> {
     case "commits": case "git-log": case "gitlog": await cmdCommits(positionals, flags); break;
     case "apidiff": case "api-diff": await cmdApiDiff(positionals, flags); break;
     case "doctor": await cmdDoctor(); break;
+    case "stats": case "analytics": await cmdStats(positionals); break;
     case "config": await cmdConfig(positionals); break;
     case "mcp": case "stdio": await cmdMcp(); break;
     case "stop": await cmdStop(); break;
