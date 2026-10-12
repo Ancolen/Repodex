@@ -72,6 +72,28 @@ describe("parseCommitLog", () => {
     expect(hits[1]!.files).toEqual(["README.md"]);
   });
 
+  test("withFiles strips the real git separator: '-z' glues a '\\n' onto each commit's FIRST file token", () => {
+    // Reproduced from live `git log -z --name-only --format=<COMMIT_FORMAT>`
+    // output: the format section does not end with a newline, so git's
+    // diff-section separator ("\n") lands on the front of the first file token
+    // of every commit. Without the strip the first file fails to join its
+    // index row (the churn report / `commits --files` consumer).
+    const stream = [
+      record(H1, "a1", "Alice", "a@x", "2024-01-02", "1", "feat", ""),
+      "\nsrc/a.ts",
+      "src/b.ts",
+      record(H2, "b1", "Bob", "b@x", "2024-01-01", "2", "docs", "has a body\n"),
+      "\ndocs/x.md",
+    ].join("\0");
+    const hits = parseCommitLog(stream, true);
+    expect(hits).toHaveLength(2);
+    expect(hits[0]!.files).toEqual(["src/a.ts", "src/b.ts"]);
+    expect(hits[1]!.files).toEqual(["docs/x.md"]);
+    // A non-empty body keeps its content (the separator inside the header is
+    // already trimmed by the body's trimEnd).
+    expect(hits[1]!.body).toBe("has a body");
+  });
+
   test("withFiles=false ignores file tokens (they are not commits)", () => {
     const stream = [
       record(H1, "a1", "Alice", "a@x", "2024-01-02", "1", "feat", "", ["src/a.ts"]),

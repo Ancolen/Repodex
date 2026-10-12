@@ -93,6 +93,58 @@ export async function searchGitLog(
 }
 
 // ---------------------------------------------------------------------------
+// Churn (proposal C3 — hotspots). Per-file change counts over a `--since`
+// window: the engine for the hotspot report's churn feed. It reuses
+// `searchGitLog` verbatim (same `-z` no-shell execFile, same tested parse
+// recipe) and only reduces its `--name-only` file lists to counts. Paths are
+// REPO-RELATIVE git output — the caller resolves them against the project root
+// before joining with the indexed-file set. Git absence / not-a-repo yields a
+// zero result after the caller's own `isGitRepo` probe (the same shape
+// `searchCommits` reports through `notARepo`).
+// ---------------------------------------------------------------------------
+
+/** Upper bound on the churn commit walk (a busy 90-day history can be long). */
+export const CHURN_DEFAULT_MAX_COMMITS = 5000;
+
+/** The reduction of one churn walk. */
+export interface ChurnCounts {
+  /** Repo-relative path → number of window commits that touched it. */
+  counts: Map<string, number>;
+  /** Commits actually walked (≤ maxCommits). */
+  commits: number;
+  /** The walk hit its cap — older in-window commits may exist (surfaced upstream). */
+  truncated: boolean;
+}
+
+/** Options of `churnCounts`: the churn window (git `--since` date syntax) and the commit cap. */
+export interface ChurnOpts {
+  /** git `--since` date, e.g. `"90 days ago"` or `"2024-01-01"`. */
+  since?: string;
+  /** Maximum commits to walk (default `CHURN_DEFAULT_MAX_COMMITS`). */
+  maxCommits?: number;
+}
+
+/**
+ * Per-file change counts inside the window: `git log --since --name-only`
+ * reduced to counts. Zero counts (no commit touched anything in the window) is
+ * a normal result, not an error — the caller distinguishes not-a-repo with the
+ * `isGitRepo` probe, exactly like `searchCommits`.
+ */
+export async function churnCounts(baseDir: string, opts: ChurnOpts = {}): Promise<ChurnCounts> {
+  const maxCommits = opts.maxCommits ?? CHURN_DEFAULT_MAX_COMMITS;
+  const churnOpts: CommitQueryOpts = { limit: maxCommits, withFiles: true };
+  if (opts.since !== undefined) churnOpts.since = opts.since;
+  const commits: CommitHit[] = await searchGitLog(baseDir, churnOpts);
+  const counts = new Map<string, number>();
+  for (const c of commits) {
+    for (const f of c.files ?? []) {
+      counts.set(f, (counts.get(f) ?? 0) + 1);
+    }
+  }
+  return { counts, commits: commits.length, truncated: commits.length >= maxCommits };
+}
+
+// ---------------------------------------------------------------------------
 // Reading a tree/ref (the API-diff historical surface, proposal C2).
 // Same discipline as `searchGitLog`: `execFile` with no shell (a ref or path can
 // never inject an option or a command), NUL-safe where paths are involved, and

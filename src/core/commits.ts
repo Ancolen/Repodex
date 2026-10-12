@@ -96,8 +96,17 @@ export function parseCommitLog(stdout: string, withFiles: boolean): CommitHit[] 
       current = hit;
       hits.push(hit);
     } else if (withFiles && current) {
+      // git separates the `--format` output from the `--name-only` list with a
+      // newline; with `-z` that separator glues onto the FIRST file token of a
+      // commit (`"\n" + path`) instead of ending the header. Strip exactly that
+      // one separator — a real repo-relative path never carries it (and a
+      // pathological path that did was already ambiguous here before the strip;
+      // `-z` cannot distinguish them, so we keep the sane semantic). Caught by
+      // the churn tests against a real scripted repo (tests/hotspots.test.ts):
+      // without this, the first file of every commit fails to join its index row.
+      const file = token.startsWith("\n") ? token.slice(1) : token;
       if (!current.files) current.files = [];
-      current.files.push(token);
+      current.files.push(file);
     }
   }
   return hits;

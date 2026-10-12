@@ -47,7 +47,7 @@ import { selectMMR } from "../utils/mmr";
 import { applyPathBoost, type PathBoostConfig } from "../utils/boost";
 import { applyCharBudget, applyPackBudget } from "../utils/budget";
 import { fileOutline, type OutlineEntry } from "../chunking/chunker";
-import { gitHeadPath, isGitRepo, searchGitLog, blameRange } from "../services/git";
+import { gitHeadPath, isGitRepo, searchGitLog, blameRange, churnCounts } from "../services/git";
 // C4 — blame/ownership: the pure porcelain parser (git lives in services/git).
 import { parseGitBlamePorcelain, summarizeBlameRange, type BlameLineRecord } from "./blame";
 import { rrfMerge } from "../utils/rrf";
@@ -81,6 +81,17 @@ export type { CommitHit, CommitQueryOpts } from "./commits";
 import { computeCoupling } from "./coupling";
 import type { CouplingReport } from "./coupling";
 export type { CouplingReport, CouplingBand, FileCoupling } from "./coupling";
+// Proposal C3 — hotspot / technical-debt report: the pure aggregator over the
+// three feeds (churn · size · debt) plus the window/scoring policy constants.
+import {
+  computeHotspots,
+  HOTSPOTS_DEFAULT_SINCE,
+  DEAD_DENSITY_CONFIDENCE,
+  type HotspotReport,
+  type HotspotSizeFeed,
+  type HotspotDeadFeed,
+} from "./hotspots";
+export type { HotspotReport, HotspotFile, HotspotBand } from "./hotspots";
 // ---- public API diff (proposal C2) ----
 export type {
   ApiSymbol,
@@ -592,6 +603,18 @@ interface DocChunkCacheEntry {
   truncated: boolean;
 }
 
+/** A cached hotspot feed for one project (sizes + dead-code density), keyed on lastIndexedAt. */
+interface HotspotFeedCacheEntry {
+  /** `IndexRecord.lastIndexedAt`; a change invalidates the cache (LanceDB data, not disk). */
+  lastIndexedAt: number | null;
+  /** Per indexed file: chunk count + DISTINCT symbol count (the size feed). */
+  sizes: HotspotSizeFeed[];
+  /** Per indexed file: candidate symbols + the "uncertain-or-better" dead count. */
+  dead: Map<string, HotspotDeadFeed>;
+  /** True when the snapshot hit its row cap — the feeds are partial. */
+  truncated: boolean;
+}
+
 /** Converts a ResolvedDep into the edge shape we return. */
 function toEdge(dep: ResolvedDep, projectRoot: string): DependencyEdge {
   const edge: DependencyEdge = {
@@ -730,6 +753,8 @@ export class IndexManager {
   private callGraphCache = new Map<string, CallGraphCacheEntry>();
   /** On-demand doc-check snapshot (chunks + symbols), keyed on lastIndexedAt. */
   private docChunkCache = new Map<string, DocChunkCacheEntry>();
+  /** On-demand hotspot feeds (sizes + dead density), keyed on lastIndexedAt. */
+  private hotspotFeedCache = new Map<string, HotspotFeedCacheEntry>();
 
   constructor(
     private registry: Registry,
@@ -883,6 +908,7 @@ export class IndexManager {
     this.depGraphCache.delete(name);
     this.callGraphCache.delete(name);
     this.docChunkCache.delete(name);
+    this.hotspotFeedCache.delete(name);
     return true;
   }
 
@@ -1678,6 +1704,221 @@ export class IndexManager {
       externalImports: graph.external,
       limit,
     });
+  }
+
+  /**
+   * C3 — hotspot / technical-debt report: the churn × size intersection, with
+   * debt signals (dead-code density, coupling) promoting and test/entry-point
+   * files demoting into `review`. Nothing here is cyclomatic complexity — the
+   * size leg is chunk+symbol volume, and the report says so (a PROXY).
+   *
+   * Feed freshness, on purpose different per feed:
+   *   - sizes + dead density: the cached table snapshot (`buildHotspotFeed`,
+   *     keyed on `lastIndexedAt` — the call-graph precedent),
+   *   - churn: `git log` LIVE on every call (a repo-local walk, cheap, and the
+   *     one feed staleness would quietly corrupt),
+   *   - coupling: fans from the mtime-keyed dependency-graph cache (`get_coupling`
+   *     reads the same data; no second parse pass).
+   * The tool description documents the difference.
+   *
+   * `notARepo` is REPORTED (never thrown): a non-repo degrades to the size/debt
+   * feeds with empty churn. Resolution through `resolveProjectScope` like
+   * `getCoupling` (explicit project → path anchor → the single indexed project).
+   */
+  async getHotspots(
+    project?: string,
+    filePath?: string,
+    opts?: { since?: string; limit?: number },
+  ): Promise<HotspotReport> {
+    const name = this.resolveProjectScope(project, filePath, false)!;
+    const rec = this.registry.getIndex(name);
+    if (!rec) throw this.indexNotFound(name); // unreachable (scope just validated); keeps the type honest
+    const since = opts?.since?.trim() || HOTSPOTS_DEFAULT_SINCE;
+
+    const feed = await this.buildHotspotFeed(rec);
+
+    let notARepo = false;
+    let churn: Map<string, number> | undefined;
+    let commitsScanned = 0;
+    let commitsTruncated = false;
+    if (!(await isGitRepo(rec.path))) {
+      notARepo = true;
+    } else {
+      const c = await churnCounts(rec.path, { since });
+      // churnCounts counts REPO-RELATIVE paths (git's own output); the feeds
+      // join on the ABSOLUTE paths the index stores. Resolve before joining —
+      // and keep paths git reported that the index lacks (unindexed churn).
+      const abs = new Map<string, number>();
+      for (const [rel, n] of c.counts) {
+        abs.set(path.resolve(rec.path, rel), n);
+      }
+      churn = abs;
+      commitsScanned = c.commits;
+      commitsTruncated = c.truncated;
+    }
+
+    // Coupling fans from the dependency-graph cache: reverse holds only files
+    // that ARE imported and forward only files that import something indexed.
+    const graph = await this.buildImportGraph(rec);
+    const coupling = new Map<string, { fanIn: number; fanOut: number }>();
+    for (const size of feed.sizes) {
+      const fanIn = graph.reverse.get(size.file)?.length ?? 0;
+      const fanOut = graph.forward.get(size.file)?.length ?? 0;
+      if (fanIn > 0 || fanOut > 0) coupling.set(size.file, { fanIn, fanOut });
+    }
+
+    return computeHotspots({
+      project: rec.name,
+      projectRoot: rec.path,
+      since,
+      limit: opts?.limit,
+      sizes: feed.sizes,
+      dead: feed.dead,
+      churn,
+      coupling,
+      notARepo,
+      commitsScanned,
+      commitsTruncated,
+      snapshotTruncated: feed.truncated,
+    });
+  }
+
+  /**
+   * The table-derived hotspot feeds from ONE `tableSymbolsWithContent` pass,
+   * cached on `lastIndexedAt` (the `buildCallGraph` precedent: the data lives in
+   * LanceDB, so file mtimes are not a correct freshness signal).
+   *
+   * The dead-code leg mirrors `findDeadCode`'s recipe (candidate inventory → one
+   * whole-identifier reference pass → conservative `scoreDeadCode` scoring) but
+   * keeps only the per-file counts the density signal needs. Deliberate
+   * divergence: `findDeadCode` reports SYMBOLS, hotspots reports FILES — and a
+   * file's candidate total is its density denominator, so candidates are counted
+   * per file even when nothing is dead there.
+   */
+  private async buildHotspotFeed(rec: IndexRecord): Promise<HotspotFeedCacheEntry> {
+    const cached = this.hotspotFeedCache.get(rec.name);
+    if (cached && cached.lastIndexedAt === rec.lastIndexedAt) return cached;
+
+    const allRows = await tableSymbolsWithContent(rec.tableName);
+
+    // Sizes: chunk rows + DISTINCT symbol names per file (a symbol split across
+    // chunks must not count twice).
+    const chunksByFile = new Map<string, number>();
+    const symbolsByFile = new Map<string, Set<string>>();
+    for (const r of allRows) {
+      if (typeof r.filePath !== "string" || r.filePath.length === 0) continue;
+      chunksByFile.set(r.filePath, (chunksByFile.get(r.filePath) ?? 0) + 1);
+      const name = r.symbolName;
+      if (name && name.length > 0) {
+        let set = symbolsByFile.get(r.filePath);
+        if (!set) {
+          set = new Set();
+          symbolsByFile.set(r.filePath, set);
+        }
+        set.add(name);
+      }
+    }
+
+    // Dead-code candidate inventory — same dedup rule as `findDeadCode`
+    // ((symbolName, filePath), min declaration line, longest content wins).
+    const byKey = new Map<
+      string,
+      { symbolName: string; symbolType: string; filePath: string; language: string; declLine: number; content: string }
+    >();
+    for (const r of allRows) {
+      const name = r.symbolName;
+      const st = r.symbolType;
+      if (!name || !st || !DEAD_CANDIDATE_TYPES.has(st)) continue;
+      if (typeof r.startLine !== "number") continue;
+      const content = typeof r.content === "string" ? r.content : "";
+      const key = `${name}\0${r.filePath}`;
+      const ex = byKey.get(key);
+      if (!ex) {
+        byKey.set(key, {
+          symbolName: name,
+          symbolType: st,
+          filePath: r.filePath,
+          language: r.language ?? "",
+          declLine: r.startLine,
+          content,
+        });
+      } else if (content.length > ex.content.length) {
+        ex.content = content;
+      }
+    }
+    const candidates = [...byKey.values()].filter(
+      (c) => !isTestFile(c.filePath) && !isEntryPointFile(c.filePath),
+    );
+
+    const countSymbols: CountSymbol[] = candidates.map((c) => ({
+      key: `${c.symbolName}\0${c.filePath}\0${c.declLine}`,
+      matchNames: matchNamesFor(c.symbolName),
+      filePath: c.filePath,
+      declarationLine: c.declLine,
+    }));
+    const countChunks: CountChunk[] = allRows
+      .filter((r) => typeof r.content === "string" && r.content.length > 0)
+      .map((r) => ({
+        filePath: r.filePath,
+        startLine: typeof r.startLine === "number" ? r.startLine : 1,
+        content: r.content ?? "",
+      }));
+    const refCounts = countReferences(countSymbols, countChunks);
+
+    // Per (file, symbol) reference totals — the owner-class lookup input, as in
+    // `findDeadCode`.
+    const refsByNameFile = new Map<string, number>();
+    for (let i = 0; i < candidates.length; i++) {
+      const c = candidates[i]!;
+      const cnt = refCounts.get(countSymbols[i]!.key) ?? 0;
+      const k = `${c.filePath}\0${c.symbolName}`;
+      refsByNameFile.set(k, (refsByNameFile.get(k) ?? 0) + cnt);
+    }
+    // Common-name detection per `findDeadCode`: the bare name shared by > 3 symbols.
+    const nameCount = new Map<string, number>();
+    for (const c of candidates) {
+      const bare = c.symbolName.split(".").pop() ?? c.symbolName;
+      nameCount.set(bare, (nameCount.get(bare) ?? 0) + 1);
+    }
+
+    const dead = new Map<string, HotspotDeadFeed>();
+    for (let i = 0; i < candidates.length; i++) {
+      const c = candidates[i]!;
+      const feed = dead.get(c.filePath) ?? { dead: 0, candidates: 0 };
+      feed.candidates++;
+      const cnt = refCounts.get(countSymbols[i]!.key) ?? 0;
+      if (cnt === 0) {
+        const bare = c.symbolName.split(".").pop() ?? c.symbolName;
+        const ownerRef = c.symbolName.includes(".")
+          ? (refsByNameFile.get(`${c.filePath}\0${c.symbolName.split(".")[0]}`) ?? 0) > 0
+          : false;
+        const scored = scoreDeadCode({
+          symbolName: c.symbolName,
+          symbolType: c.symbolType,
+          language: c.language,
+          content: c.content,
+          referenceCount: 0,
+          ownerClassReferenced: ownerRef,
+          isCommonName: (nameCount.get(bare) ?? 0) > 3,
+        });
+        if (scored.confidence >= DEAD_DENSITY_CONFIDENCE) feed.dead++;
+      }
+      dead.set(c.filePath, feed);
+    }
+
+    const sizes: HotspotSizeFeed[] = [];
+    for (const [file, chunks] of chunksByFile) {
+      sizes.push({ file, chunks, symbols: symbolsByFile.get(file)?.size ?? 0 });
+    }
+
+    const entry: HotspotFeedCacheEntry = {
+      lastIndexedAt: rec.lastIndexedAt,
+      sizes,
+      dead,
+      truncated: allRows.length >= 200000,
+    };
+    this.hotspotFeedCache.set(rec.name, entry);
+    return entry;
   }
 
   /**
