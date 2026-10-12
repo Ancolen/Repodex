@@ -223,6 +223,38 @@ describe("config — defaults and environment variable overrides", () => {
     expect(DEFAULT_CONFIG_YAML).toContain("daemon:");
     expect(DEFAULT_CONFIG_YAML).toContain("idleTimeoutMinutes: 0");
   });
+
+  test("doccheck.judgeModel defaults to empty (off — the judge never runs)", async () => {
+    const { CONFIG } = await runConfig({});
+    expect(CONFIG.DOC_CHECK_JUDGE_MODEL).toBe("");
+    expect(CONFIG.DOC_CHECK_JUDGE_URL).toBe("");
+  });
+
+  test("DOC_CHECK_JUDGE_MODEL env overrides the default; judgeUrl passes through", async () => {
+    const { CONFIG } = await runConfig({
+      DOC_CHECK_JUDGE_MODEL: "gemma4:e4b",
+      DOC_CHECK_JUDGE_URL: "http://127.0.0.1:8081",
+    });
+    expect(CONFIG.DOC_CHECK_JUDGE_MODEL).toBe("gemma4:e4b");
+    expect(CONFIG.DOC_CHECK_JUDGE_URL).toBe("http://127.0.0.1:8081");
+  });
+
+  test("doccheck.judgeModel can be set from YAML; judgeUrl falls back to empty", async () => {
+    const yamlPath = join(tmpdir(), `cidx-judge-${crypto.randomUUID()}.yml`);
+    writeFileSync(yamlPath, "doccheck:\n  judgeModel: qwen3:8b\n");
+    try {
+      const { CONFIG } = await runConfig({ CIDX_CONFIG: yamlPath });
+      expect(CONFIG.DOC_CHECK_JUDGE_MODEL).toBe("qwen3:8b");
+      expect(CONFIG.DOC_CHECK_JUDGE_URL).toBe("");
+    } finally {
+      rmSync(yamlPath, { force: true });
+    }
+  });
+
+  test("the generated config template carries the judge keys, defaulted off", () => {
+    expect(DEFAULT_CONFIG_YAML).toContain("judgeModel: \"\"");
+    expect(DEFAULT_CONFIG_YAML).toContain("judgeUrl: \"\"");
+  });
 });
 
 describe("config — legacy ~/.mcp-indexer → ~/.cidx migration", () => {

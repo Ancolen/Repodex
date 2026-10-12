@@ -15,12 +15,22 @@
  * Intent classification is the FP shield validated on this repo's own docs:
  * historical files (changelog), planned regions (proposals/roadmap headings)
  * and fenced examples never produce findings, only counters.
+ *
+ * Semantic judge (D1b): an optional judge is INJECTED as an async function
+ * (`opts.judge`) — the engine itself still performs no I/O and never talks to a
+ * model. With the judge undefined the report is byte-for-byte identical to the
+ * deterministic run; with a fixed judge the run is deterministic too (verdicts
+ * are applied per claim, keyed by input order). The judge only ever RESOLVES
+ * uncertain claims: a high-confidence "consistent" verdict drops a claim out of
+ * `needsReview` into `checked.judge.resolved`. It can never create a `drift`
+ * finding, never fabricates evidence, and never touches the ≥ 90 drift rule.
  */
 import { escapeRegExp } from "../utils/text";
 import { detectExported } from "./exported";
 import { DYNAMIC_HOOK_NAMES, NAME_REGEX_CAP } from "./deadcode";
 import { DEAD_CANDIDATE_TYPES, isTestFile, isEntryPointFile } from "./filekinds";
 import { applyBudgetBySize } from "../utils/budget";
+import { mapWithConcurrency } from "../utils/concurrency";
 
 // ------------------------------------------------------------------ types
 
@@ -133,7 +143,67 @@ export interface DocCheckOpts {
   undocumentedLimit?: number | undefined;
   /** Disable reverse coverage entirely. */
   noUndocumented?: boolean | undefined;
+  /**
+   * The injected semantic judge (D1b). Undefined → the deterministic run, no
+   * `checked.judge` block, byte-identical output. Deterministic per claim with
+   * a fixed judge; a throwing judge leaves its claim in `needsReview`.
+   */
+  judge?: DocJudge | undefined;
+  /**
+   * Model label surfaced in `checked.judge.model` (informational — the engine
+   * never resolves a model itself). A non-empty value with NO injected judge
+   * emits the block with `available: false` and zero counters, so a
+   * configured-but-unavailable session stays honest in the report.
+   */
+  judgeModel?: string | undefined;
 }
+
+/**
+ * The engine's verdict on one claim handed to the semantic judge: the claim,
+ * what the deterministic pass concluded, and where it sits (all plain data).
+ */
+export interface DocJudgeClaim {
+  /** The backticked token, trimmed. */
+  token: string;
+  spanClass: SpanClass;
+  /** Class-specific decomposition when meaningful (endpoint [verb, route], kv [key, value], composite [path, symbol]). */
+  parts?: string[];
+  /** The deterministic verdict that left the claim unresolved. */
+  status: "review" | "missing";
+  /** The deterministic verdict's confidence (0–100). */
+  confidence: number;
+  /** Why the deterministic pass could not resolve it. */
+  message?: string;
+  /** A fuzzy rename suggestion, when one was found. */
+  suggestion?: string;
+  /** The partial evidence the deterministic pass did find (never fabricated by the judge). */
+  evidence?: DocEvidence[];
+  doc: { path: string; line: number; excerpt: string };
+}
+
+/** The judge's framing context: the project and the claim's own prose (±2 lines, each capped). */
+export interface DocJudgeContext {
+  project: string;
+  surrounding: string[];
+}
+
+/** The judge's verdict on one claim. `null` = no opinion — the claim stays in `needsReview`. */
+export interface JudgeVerdict {
+  consistent: boolean;
+  /** 0–1. `consistent` with ≥ `JUDGE_CONFIRM_MIN` resolves the claim. */
+  confidence: number;
+}
+
+/**
+ * The injected semantic judge (D1b). Must be side-effect-light, tolerate any
+ * claim, and resolve honestly: the engine treats every outcome except
+ * `{ consistent: true, confidence ≥ JUDGE_CONFIRM_MIN }` as "stays in
+ * `needsReview` exactly as today".
+ */
+export type DocJudge = (
+  claim: DocJudgeClaim,
+  context: DocJudgeContext,
+) => Promise<JudgeVerdict | null>;
 
 /** One resolved span verdict (internal, before findings are materialized). */
 export interface SpanVerdict {
@@ -204,6 +274,23 @@ export interface DocCheckReport {
     /** Present when a drift window was applied (set by the caller post-filter). */
     window?: { since: string; docsChanged: number; codeChanged: number };
     skipped: Record<SkipKind, number>;
+    /**
+     * The semantic judge (D1b) — present whenever the judge RAN or was
+     * configured (`judgeModel` non-empty). Absent on the pure deterministic
+     * path, so old reports stay byte-identical.
+     */
+    judge?: {
+      /** The model label the caller configured ("" when the caller passed none). */
+      model: string;
+      /** False = configured but not available/injected this run — nothing was judged. */
+      available: boolean;
+      /** Claims the judge was asked about. */
+      judged: number;
+      /** Claims resolved as consistent with high confidence — dropped from `needsReview`. */
+      resolved: number;
+      /** Judge calls that threw — those claims stay in `needsReview` (also noted). */
+      failed: number;
+    };
   };
   verdict: {
     /** True iff there are zero drift findings. */
@@ -250,6 +337,26 @@ const SHORT_ACRONYM_MAX = 3;
 
 /** All-caps tokens up to this length that resolve nowhere are review, not drift. */
 const PROSE_ACRONYM_MAX = 6;
+
+// --------------------------------------------------- semantic judge (D1b)
+
+/**
+ * A judge verdict of `{ consistent: true }` needs at least this confidence to
+ * RESOLVE a claim (drop it from `needsReview`). Anything lower — including a
+ * high-confidence "inconsistent" — leaves the claim exactly as the
+ * deterministic pass reported it: the judge refines advice, never accusations.
+ * The ≥ 90 drift rule is untouched by construction.
+ */
+export const JUDGE_CONFIRM_MIN = 0.8;
+
+/** Bounded parallelism for judge calls (local instruct model; rerank uses the same magnitude). */
+const JUDGE_CONCURRENCY = 4;
+
+/** How many doc lines the judge sees around a claim (±N, each capped). */
+const JUDGE_CONTEXT_LINES = 2;
+
+/** Per-line cap for the judge's surrounding context (a prose fragment, not the doc). */
+const JUDGE_CONTEXT_LINE_MAX = 240;
 
 const HTTP_VERBS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 
@@ -1427,12 +1534,97 @@ function findingSize(f: DocFinding): number {
   return f.doc.excerpt.length + f.message.length + (f.suggestion?.length ?? 0) + 100;
 }
 
+// --------------------------------------------- semantic judge pass (D1b)
+
+/** A `needsReview` candidate kept with its span + verdict so the judge can be handed the claim as-is. */
+interface ReviewPending {
+  span: DocSpan;
+  verdict: SpanVerdict;
+  finding: DocFinding;
+}
+
+/** Flattens one pending entry into the plain-data claim the injected judge receives. */
+function judgeClaimOf(entry: ReviewPending): DocJudgeClaim {
+  const { span, verdict } = entry;
+  const claim: DocJudgeClaim = {
+    token: span.token,
+    spanClass: span.spanClass,
+    // Pending entries are only ever created for non-ok, non-skipped verdicts
+    // with sub-90 confidence — i.e. exactly "review" | "missing" (<90).
+    status: verdict.status === "missing" ? "missing" : "review",
+    confidence: verdict.confidence,
+    doc: { path: span.docRelPath, line: span.line, excerpt: span.excerpt },
+  };
+  if (span.parts !== undefined) claim.parts = span.parts;
+  if (verdict.message !== undefined) claim.message = verdict.message;
+  if (verdict.suggestion !== undefined) claim.suggestion = verdict.suggestion;
+  if (verdict.evidence !== undefined && verdict.evidence.length > 0) claim.evidence = verdict.evidence;
+  return claim;
+}
+
+/** The claim's own prose (±`JUDGE_CONTEXT_LINES` lines, each capped) — the engine never touches fs for this. */
+function judgeContextOf(span: DocSpan, state: DocCheckState): DocJudgeContext {
+  const surrounding: string[] = [];
+  const file = state.docs.find((d) => d.relPath === span.docRelPath);
+  if (file) {
+    const lo = Math.max(0, span.line - 1 - JUDGE_CONTEXT_LINES);
+    const hi = Math.min(file.lines.length, span.line - 1 + JUDGE_CONTEXT_LINES + 1);
+    for (let i = lo; i < hi; i++) {
+      const line = file.lines[i] ?? "";
+      surrounding.push(line.length > JUDGE_CONTEXT_LINE_MAX ? `${line.slice(0, JUDGE_CONTEXT_LINE_MAX)}…` : line);
+    }
+  }
+  return { project: state.project, surrounding };
+}
+
+type JudgeOutcome = "resolved" | "stayed" | "failed";
+
 /**
- * Run the deterministic check over an assembled state. Sync and pure: same
- * state → same report (except nothing time-based — `indexFreshness` is copied,
- * not measured).
+ * Runs the injected judge over the claims the deterministic checks could not
+ * reach (`review` / sub-90 `missing` verdicts — the same set that lands in
+ * `needsReview`). Bounded concurrency, input-ordered results, so a fixed judge
+ * keeps the whole run deterministic. Per-claim failures degrade to "stayed" —
+ * one bad model response never fails the report.
  */
-export function runDocCheck(state: DocCheckState, opts: DocCheckOpts = {}): DocCheckReport {
+async function adjudicateByJudge(
+  candidates: readonly ReviewPending[],
+  judge: DocJudge,
+  state: DocCheckState,
+): Promise<{ resolvedIds: Set<string>; judged: number; resolved: number; failed: number }> {
+  if (candidates.length === 0) return { resolvedIds: new Set(), judged: 0, resolved: 0, failed: 0 };
+  const outcomes = await mapWithConcurrency(
+    candidates,
+    JUDGE_CONCURRENCY,
+    async (entry): Promise<JudgeOutcome> => {
+      try {
+        const v = await judge(judgeClaimOf(entry), judgeContextOf(entry.span, state));
+        // Only a high-confidence "consistent" resolves a claim; `null` (no
+        // opinion), low confidence and "inconsistent" all keep it in review —
+        // the judge never accuses, so it can never create a drift finding.
+        if (v && v.consistent && v.confidence >= JUDGE_CONFIRM_MIN) return "resolved";
+        return "stayed";
+      } catch {
+        return "failed";
+      }
+    },
+  );
+  const resolvedIds = new Set<string>();
+  let failed = 0;
+  for (let i = 0; i < candidates.length; i++) {
+    const outcome = outcomes[i];
+    if (outcome === "resolved") resolvedIds.add(candidates[i]!.finding.id);
+    else if (outcome === "failed") failed++;
+  }
+  return { resolvedIds, judged: candidates.length, resolved: resolvedIds.size, failed };
+}
+
+/**
+ * Run the deterministic check over an assembled state, then — only when a
+ * semantic judge is injected (D1b) — adjudicate the uncertain claims. Pure:
+ * same state (and same fixed judge) → same report (except nothing time-based —
+ * `indexFreshness` is copied, not measured).
+ */
+export async function runDocCheck(state: DocCheckState, opts: DocCheckOpts = {}): Promise<DocCheckReport> {
   const limit = Math.max(1, opts.limit ?? 100);
   const maxChars = opts.maxChars;
   const undocLimit = Math.max(0, opts.undocumentedLimit ?? 25);
@@ -1477,6 +1669,8 @@ export function runDocCheck(state: DocCheckState, opts: DocCheckOpts = {}): DocC
   let seq = 0;
   const findings: DocFinding[] = [];
   const needsReview: DocFinding[] = [];
+  /** `needsReview` candidates, kept pending until the optional judge (D1b) has had its say. */
+  const pending: ReviewPending[] = [];
 
   for (const span of allSpans) {
     const mates = lineSpans.get(`${span.docRelPath}:${span.line}`) ?? [];
@@ -1494,14 +1688,39 @@ export function runDocCheck(state: DocCheckState, opts: DocCheckOpts = {}): DocC
       findings.push(f);
     } else {
       f.category = verdict.status === "review" ? "review" : "suspected";
-      needsReview.push(f);
+      pending.push({ span, verdict, finding: f });
     }
+  }
+
+  // Semantic judge (D1b): resolves only what the deterministic pass could not.
+  // Prose-example-shielded claims are never judged — the engine already decided
+  // they are examples, not claims about this repo (the intent shield stays on).
+  let judged = 0;
+  let judgeResolved = 0;
+  let judgeFailed = 0;
+  const judgeResolvedIds = new Set<string>();
+  if (opts.judge !== undefined) {
+    const judgeable = pending.filter((e) => e.verdict.proseExample !== true);
+    const pass = await adjudicateByJudge(judgeable, opts.judge, state);
+    judged = pass.judged;
+    judgeResolved = pass.resolved;
+    judgeFailed = pass.failed;
+    for (const id of pass.resolvedIds) judgeResolvedIds.add(id);
+  }
+  for (const e of pending) {
+    // Resolved claims drop out of `needsReview` entirely (counted in
+    // `checked.judge.resolved`); everything else stays exactly as today.
+    if (judgeResolvedIds.has(e.finding.id)) continue;
+    needsReview.push(e.finding);
   }
 
   findings.sort((a, b) => (b.confidence === a.confidence ? a.id.localeCompare(b.id) : b.confidence - a.confidence));
   needsReview.sort((a, b) => (b.confidence === a.confidence ? a.id.localeCompare(b.id) : b.confidence - a.confidence));
 
   const notes: string[] = [];
+  if (judgeFailed > 0) {
+    notes.push(`${judgeFailed} semantic judge call(s) failed; those claim(s) stay in needsReview`);
+  }
   const findingsKept = applyBudgetBySize(findings.slice(0, limit), maxChars, findingSize);
   const reviewKept = applyBudgetBySize(needsReview.slice(0, limit), maxChars, findingSize);
   if (findings.length > limit) notes.push(`findings truncated at limit ${limit} (${findings.length} found)`);
@@ -1514,17 +1733,29 @@ export function runDocCheck(state: DocCheckState, opts: DocCheckOpts = {}): DocC
     ? []
     : collectUndocumented(state, idx, mentioned, undocLimit);
 
+  const judgeModel = opts.judgeModel ?? "";
+  const checked: DocCheckReport["checked"] = {
+    docs: state.docs.length,
+    docsUnreadable: 0,
+    spans: allSpans.length,
+    claims,
+    indexFreshness: state.lastIndexedAt,
+    truncated: false,
+    skipped,
+  };
+  if (opts.judge !== undefined || judgeModel.length > 0) {
+    checked.judge = {
+      model: judgeModel,
+      available: opts.judge !== undefined,
+      judged,
+      resolved: judgeResolved,
+      failed: judgeFailed,
+    };
+  }
+
   return {
     project: state.project,
-    checked: {
-      docs: state.docs.length,
-      docsUnreadable: 0,
-      spans: allSpans.length,
-      claims,
-      indexFreshness: state.lastIndexedAt,
-      truncated: false,
-      skipped,
-    },
+    checked,
     verdict: {
       consistent: findingsKept.kept.length === 0 && findings.length === 0,
       findings: findingsKept.kept.length,

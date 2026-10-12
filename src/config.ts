@@ -141,6 +141,14 @@ export interface IndexerConfig {
     maxChars: number;
     /** Max `undocumented` symbol entries reported per call. */
     undocumentedLimit: number;
+    /**
+     * Semantic judge model tag (D1b, default off): when set, a local instruct
+     * model re-adjudicates the uncertain claims (yes/no completion logprobs,
+     * reranker-style). Empty = the judge never runs, reports stay byte-identical.
+     */
+    judgeModel: string;
+    /** The judge's base URL; empty = the resolved embedding backend (like `search.rerank.url`). */
+    judgeUrl: string;
   };
   daemon: {
     /**
@@ -213,7 +221,7 @@ const DEFAULTS: IndexerConfig = {
       sourceRoots: ["src", "lib", "app"],
     },
   },
-  doccheck: { maxChars: 12000, undocumentedLimit: 25 },
+  doccheck: { maxChars: 12000, undocumentedLimit: 25, judgeModel: "", judgeUrl: "" },
   daemon: { idleTimeoutMinutes: 0 },
 };
 
@@ -280,6 +288,8 @@ ${DEFAULTS.search.boost.sourceRoots.map((d) => `      - "${d}"`).join("\n")}
 doccheck:
   maxChars: ${DEFAULTS.doccheck.maxChars}          # per-call char budget over the rendered findings (kept whole)
   undocumentedLimit: ${DEFAULTS.doccheck.undocumentedLimit}   # max undocumented-symbol entries per report
+  judgeModel: "${DEFAULTS.doccheck.judgeModel}"                # local instruct model that re-judges uncertain claims via yes/no logprobs; empty = off
+  judgeUrl: "${DEFAULTS.doccheck.judgeUrl}"                    # judge base URL; empty = same server as the embedding backend
 
 watcher:
   debounceMs: ${DEFAULTS.watcher.debounceMs}        # reindexing delay after a file change
@@ -482,6 +492,8 @@ export const RESOLVED: IndexerConfig = {
       num(process.env.DOC_CHECK_UNDOCUMENTED) ??
       y.doccheck?.undocumentedLimit ??
       DEFAULTS.doccheck.undocumentedLimit,
+    judgeModel: process.env.DOC_CHECK_JUDGE_MODEL ?? y.doccheck?.judgeModel ?? DEFAULTS.doccheck.judgeModel,
+    judgeUrl: process.env.DOC_CHECK_JUDGE_URL ?? y.doccheck?.judgeUrl ?? DEFAULTS.doccheck.judgeUrl,
   },
   daemon: {
     // A negative value is deliberately passed through: shouldIdleShutdown
@@ -546,6 +558,8 @@ export const CONFIG = {
 
   DOC_CHECK_MAX_CHARS: RESOLVED.doccheck.maxChars,
   DOC_CHECK_UNDOCUMENTED: RESOLVED.doccheck.undocumentedLimit,
+  DOC_CHECK_JUDGE_MODEL: RESOLVED.doccheck.judgeModel,
+  DOC_CHECK_JUDGE_URL: RESOLVED.doccheck.judgeUrl,
 
   HOST: RESOLVED.server.host,
   MCP_PORT: RESOLVED.server.mcpPort,

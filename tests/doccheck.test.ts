@@ -17,9 +17,13 @@ import {
   globToRegex,
   isDocPath,
   HISTORICAL_FILE_RE,
+  JUDGE_CONFIRM_MIN,
   type DocCheckState,
   type DocCheckChunk,
   type DocFile,
+  type DocJudge,
+  type DocJudgeClaim,
+  type DocJudgeContext,
   type DocSpan,
 } from "../src/core/doccheck";
 import { collectDocFiles, listRootFiles, readProjectManifest, DOC_MAX_FILES } from "../src/services/docfiles";
@@ -436,7 +440,7 @@ describe("runDocCheck", () => {
     }),
   ];
 
-  test("historical and planned regions never produce findings, only counters", () => {
+  test("historical and planned regions never produce findings, only counters", async () => {
     const state = baseState({
       chunks: codeChunks,
       docs: [
@@ -444,19 +448,19 @@ describe("runDocCheck", () => {
         docFile("IDEAS.md", "## 💡 Proposed\nsoon `madeUpThing`\n## Other\nnow `realEngine`"),
       ],
     });
-    const report = runDocCheck(state, { noUndocumented: true });
+    const report = await runDocCheck(state, { noUndocumented: true });
     expect(report.findings).toHaveLength(0);
     expect(report.checked.skipped.historical).toBe(2);
     expect(report.checked.skipped.planned).toBe(1);
     expect(report.checked.claims).toBe(1);
   });
 
-  test("a missing identifier becomes a drift finding with doc-order ids", () => {
+  test("a missing identifier becomes a drift finding with doc-order ids", async () => {
     const state = baseState({
       chunks: codeChunks,
       docs: [docFile("docs/a.md", "uses `realEngine`\nalso `madeUpThing`")],
     });
-    const report = runDocCheck(state, { noUndocumented: true });
+    const report = await runDocCheck(state, { noUndocumented: true });
     expect(report.verdict.consistent).toBe(false);
     expect(report.findings).toHaveLength(1);
     const f = report.findings[0]!;
@@ -467,50 +471,50 @@ describe("runDocCheck", () => {
     expect(f.doc.line).toBe(2);
   });
 
-  test("prose examples land in needsReview, never in findings", () => {
+  test("prose examples land in needsReview, never in findings", async () => {
     const state = baseState({
       chunks: codeChunks,
       docs: [docFile("docs/a.md", "For example, write paths like `a/b.py` in your config.")],
     });
-    const report = runDocCheck(state, { noUndocumented: true });
+    const report = await runDocCheck(state, { noUndocumented: true });
     expect(report.findings).toHaveLength(0);
     expect(report.needsReview.length).toBe(1);
     expect(report.needsReview[0]!.category).toBe("review");
   });
 
-  test("the char budget keeps the first finding whole and reports the omission", () => {
+  test("the char budget keeps the first finding whole and reports the omission", async () => {
     const state = baseState({
       chunks: codeChunks,
       docs: [docFile("docs/a.md", "`madeUpThing` then `anotherGhost` then `thirdGhost`")],
     });
-    const report = runDocCheck(state, { noUndocumented: true, maxChars: 10 });
+    const report = await runDocCheck(state, { noUndocumented: true, maxChars: 10 });
     expect(report.findings.length).toBe(1); // top-1 always kept
     expect(report.omitted).toBe(2);
     expect(report.notes.some((n) => n.includes("omitted"))).toBe(true);
     expect(report.verdict.consistent).toBe(false);
   });
 
-  test("limit truncates findings with a note; consistent stays true only with zero findings", () => {
+  test("limit truncates findings with a note; consistent stays true only with zero findings", async () => {
     const state = baseState({
       chunks: codeChunks,
       docs: [docFile("docs/a.md", "`madeUpThing` then `anotherGhost`")],
     });
-    const report = runDocCheck(state, { noUndocumented: true, limit: 1 });
+    const report = await runDocCheck(state, { noUndocumented: true, limit: 1 });
     expect(report.findings).toHaveLength(1);
     expect(report.notes.some((n) => n.includes("limit 1"))).toBe(true);
-    const clean = runDocCheck(baseState({ chunks: codeChunks, docs: [docFile("docs/a.md", "`realEngine`")] }), {
+    const clean = await runDocCheck(baseState({ chunks: codeChunks, docs: [docFile("docs/a.md", "`realEngine`")] }), {
       noUndocumented: true,
     });
     expect(clean.verdict.consistent).toBe(true);
     expect(clean.findings).toHaveLength(0);
   });
 
-  test("checked counters are honest: spans vs claims vs skipped", () => {
+  test("checked counters are honest: spans vs claims vs skipped", async () => {
     const state = baseState({
       chunks: codeChunks,
       docs: [docFile("docs/a.md", "`realEngine` and `madeUpThing` plus `https://x.example` and `2.4.0`")],
     });
-    const report = runDocCheck(state, { noUndocumented: true });
+    const report = await runDocCheck(state, { noUndocumented: true });
     expect(report.checked.spans).toBe(4);
     expect(report.checked.claims).toBe(2);
     expect(report.checked.skipped.external).toBe(1);
@@ -554,9 +558,9 @@ describe("collectUndocumented", () => {
     expect(out).toHaveLength(0);
   });
 
-  test("noUndocumented disables reverse coverage entirely", () => {
+  test("noUndocumented disables reverse coverage entirely", async () => {
     const state = baseState({ exportedSymbols: [exported("alphaOne")] });
-    const report = runDocCheck(state, { noUndocumented: true });
+    const report = await runDocCheck(state, { noUndocumented: true });
     expect(report.undocumented).toHaveLength(0);
   });
 });
@@ -809,6 +813,15 @@ describe("IndexManager.checkDocs — engine over a real fixture", () => {
     expect(report.checked.window).toBeUndefined();
     expect(report.findings.length).toBe(1); // nothing was filtered away
   });
+
+  test("judge unconfigured → no probe, no judge block, report byte-identical (D1b default)", async () => {
+    // The test process runs with doccheck.judgeModel unset, so availability is
+    // false-by-config and checkDocs must not touch the backend at all.
+    expect(await manager2.ensureJudgeAvailable()).toBe(false);
+    const report = await manager2.checkDocs({ path: PROJECT, noUndocumented: true });
+    expect(Object.prototype.hasOwnProperty.call(report.checked, "judge")).toBe(false);
+    expect(report.notes.every((n) => !n.includes("judge"))).toBe(true);
+  });
 });
 
 // --------------------------------------------- live-run adjudication lessons
@@ -869,7 +882,7 @@ describe("adjudication lessons — dep ranges, env assignments, proposal files",
     expect(v.skipReason).toBe("external");
   });
 
-  test("proposal/roadmap files are aspirational — never accused", () => {
+  test("proposal/roadmap files are aspirational — never accused", async () => {
     // The daemon assigns fileClass via HISTORICAL_FILE_RE; mirror that here.
     const rel = "docs/proposals.md";
     expect(HISTORICAL_FILE_RE.test(rel)).toBe(true);
@@ -877,8 +890,180 @@ describe("adjudication lessons — dep ranges, env assignments, proposal files",
     const spans = extractDocSpans(file);
     expect(spans.every((s) => s.region === "historical")).toBe(true);
     const state = baseState({ docs: [file], chunks: [chunk("src/x.ts", "const q = 1;")] });
-    const report = runDocCheck(state, { noUndocumented: true });
+    const report = await runDocCheck(state, { noUndocumented: true });
     expect(report.findings).toHaveLength(0);
     expect(report.checked.skipped.historical).toBe(2);
+  });
+});
+
+// ------------------------------------------------- semantic judge (D1b)
+
+describe("runDocCheck — semantic judge (D1b)", () => {
+  const codeChunks = [
+    chunk("src/core/engine.ts", "export function realEngine() {}", {
+      symbolName: "realEngine",
+      symbolType: "function",
+    }),
+  ];
+
+  /**
+   * A state whose deterministic run leaves exactly one needsReview claim:
+   * `tools/list` is an extension-less unresolved relative path → missing, 70
+   * (suspected). `madeUpThing` on the same line is a 95-confidence drift
+   * finding — the judge must never touch findings.
+   */
+  const state = baseState({
+    chunks: codeChunks,
+    docs: [docFile("docs/a.md", "Run `tools/list` from the root and see `madeUpThing` too.")],
+  });
+
+  /** A judge that records what it is asked and always answers with the given verdict. */
+  function recordingJudge(
+    verdict: { consistent: boolean; confidence: number } | null,
+  ): { judge: DocJudge; claims: DocJudgeClaim[]; contexts: DocJudgeContext[] } {
+    const claims: DocJudgeClaim[] = [];
+    const contexts: DocJudgeContext[] = [];
+    const judge: DocJudge = async (claim, context) => {
+      claims.push(claim);
+      contexts.push(context);
+      return verdict;
+    };
+    return { judge, claims, contexts };
+  }
+
+  test("no judge → no checked.judge block, byte-identical output (config default off)", async () => {
+    const report = await runDocCheck(state, { noUndocumented: true });
+    expect(Object.prototype.hasOwnProperty.call(report.checked, "judge")).toBe(false);
+    expect(JSON.stringify(report)).not.toContain('"judge"');
+    // Unchanged behavior: the drift finding stays, the suspected claim stays.
+    expect(report.findings).toHaveLength(1);
+    expect(report.needsReview).toHaveLength(1);
+    // Pure: two identical runs are byte-for-byte identical.
+    const again = await runDocCheck(state, { noUndocumented: true });
+    expect(JSON.stringify(again)).toBe(JSON.stringify(report));
+  });
+
+  test("high-confidence consistent → the claim drops out of needsReview and is counted", async () => {
+    const { judge, claims, contexts } = recordingJudge({ consistent: true, confidence: 0.9 });
+    const report = await runDocCheck(state, {
+      noUndocumented: true,
+      judge,
+      judgeModel: "test-judge",
+    });
+    expect(report.needsReview).toHaveLength(0);
+    const j = report.checked.judge!;
+    expect(j).toEqual({ model: "test-judge", available: true, judged: 1, resolved: 1, failed: 0 });
+    // The drift finding is untouched — the judge never accuses.
+    expect(report.findings).toHaveLength(1);
+    expect(report.verdict.consistent).toBe(false);
+    // The judge saw the real claim as plain data (span + deterministic verdict).
+    expect(claims).toHaveLength(1);
+    const c = claims[0]!;
+    expect(c.token).toBe("tools/list");
+    expect(c.spanClass).toBe("path");
+    expect(c.status).toBe("missing");
+    expect(c.confidence).toBe(70);
+    expect(c.doc).toEqual({ path: "docs/a.md", line: 1, excerpt: "Run `tools/list` from the root and see `madeUpThing` too." });
+    expect(contexts[0]!.project).toBe("t");
+    expect(contexts[0]!.surrounding).toContain("Run `tools/list` from the root and see `madeUpThing` too.");
+  });
+
+  test("low-confidence consistent stays in needsReview", async () => {
+    const { judge } = recordingJudge({ consistent: true, confidence: 0.55 });
+    const report = await runDocCheck(state, { noUndocumented: true, judge, judgeModel: "m" });
+    expect(report.needsReview).toHaveLength(1);
+    expect(report.checked.judge).toEqual({ model: "m", available: true, judged: 1, resolved: 0, failed: 0 });
+  });
+
+  test("a verdict at exactly JUDGE_CONFIRM_MIN resolves; below it does not", async () => {
+    const at = recordingJudge({ consistent: true, confidence: JUDGE_CONFIRM_MIN });
+    const ok = await runDocCheck(state, { noUndocumented: true, judge: at.judge });
+    expect(ok.checked.judge!.resolved).toBe(1);
+    const below = recordingJudge({ consistent: true, confidence: JUDGE_CONFIRM_MIN - 0.01 });
+    const kept = await runDocCheck(state, { noUndocumented: true, judge: below.judge });
+    expect(kept.checked.judge!.resolved).toBe(0);
+    expect(kept.needsReview).toHaveLength(1);
+  });
+
+  test("high-confidence inconsistent stays in needsReview — never escalated to drift", async () => {
+    const { judge } = recordingJudge({ consistent: false, confidence: 0.99 });
+    const report = await runDocCheck(state, { noUndocumented: true, judge });
+    expect(report.needsReview).toHaveLength(1);
+    expect(report.findings).toHaveLength(1); // only the deterministic drift
+    expect(report.checked.judge!.resolved).toBe(0);
+    expect(report.checked.judge!.failed).toBe(0);
+  });
+
+  test("judge returns null (no opinion) → the claim stays", async () => {
+    const { judge } = recordingJudge(null);
+    const report = await runDocCheck(state, { noUndocumented: true, judge });
+    expect(report.needsReview).toHaveLength(1);
+    expect(report.checked.judge).toEqual({ model: "", available: true, judged: 1, resolved: 0, failed: 0 });
+  });
+
+  test("a throwing judge fails honestly: note + unchanged report", async () => {
+    const judgeThrows: DocJudge = async () => {
+      throw new Error("judge offline");
+    };
+    const report = await runDocCheck(state, { noUndocumented: true, judge: judgeThrows, judgeModel: "m" });
+    expect(report.needsReview).toHaveLength(1);
+    expect(report.findings).toHaveLength(1); // findings unchanged by the failure
+    expect(report.checked.judge!.failed).toBe(1);
+    expect(report.notes).toContain("1 semantic judge call(s) failed; those claim(s) stay in needsReview");
+  });
+
+  test("prose-example claims are never judged (the intent shield stands)", async () => {
+    const { judge, claims } = recordingJudge({ consistent: true, confidence: 0.95 });
+    const exampleState = baseState({
+      chunks: codeChunks,
+      docs: [docFile("docs/a.md", "For example, write paths like `a/b.py` in your config.")],
+    });
+    const report = await runDocCheck(exampleState, { noUndocumented: true, judge, judgeModel: "m" });
+    expect(claims).toHaveLength(0);
+    expect(report.checked.judge!.judged).toBe(0);
+    expect(report.needsReview).toHaveLength(1); // the example stays advice, unchanged
+  });
+
+  test("configured but unavailable → honest block with zero counters", async () => {
+    const report = await runDocCheck(state, { noUndocumented: true, judgeModel: "absent-model" });
+    expect(report.checked.judge).toEqual({
+      model: "absent-model",
+      available: false,
+      judged: 0,
+      resolved: 0,
+      failed: 0,
+    });
+    expect(report.needsReview).toHaveLength(1);
+  });
+
+  test("deterministic with a fixed judge (bounded concurrency, input-ordered)", async () => {
+    // Two uncertain claims → two judge calls; a verdict-per-token policy keeps
+    // the whole run reproducible.
+    const judge: DocJudge = async (claim) =>
+      claim.token === "tools/list" ? { consistent: true, confidence: 0.9 } : { consistent: true, confidence: 0.2 };
+    const state2 = baseState({
+      chunks: codeChunks,
+      docs: [docFile("docs/a.md", "uses `tools/list` or `FOOBA`")],
+    });
+    const one = await runDocCheck(state2, { noUndocumented: true, judge, judgeModel: "m" });
+    const two = await runDocCheck(state2, { noUndocumented: true, judge, judgeModel: "m" });
+    expect(JSON.stringify(one)).toBe(JSON.stringify(two));
+    expect(one.checked.judge!.judged).toBe(2);
+    expect(one.checked.judge!.resolved).toBe(1); // only tools/list crossed the threshold
+    expect(one.needsReview.map((f) => f.id)).toEqual(["D-2"]); // FOOBA (review 50) stayed
+  });
+
+  test("the judge sees the surrounding doc lines, capped per line", async () => {
+    const long = "x".repeat(400);
+    const doc = docFile("docs/a.md", ["before one", "before two", `claims \`tools/list\` after ${long}`, "after two", "after three"].join("\n"));
+    const { judge, contexts } = recordingJudge({ consistent: false, confidence: 0.9 });
+    await runDocCheck(baseState({ chunks: codeChunks, docs: [doc] }), { noUndocumented: true, judge });
+    expect(contexts).toHaveLength(1);
+    const surrounding = contexts[0]!.surrounding;
+    expect(surrounding).toHaveLength(5); // ±2 around line 3, claim line included
+    expect(surrounding[2]!.startsWith(`claims \`tools/list\` after ${"x".repeat(206)}`)).toBe(true);
+    expect(surrounding[2]!.endsWith("…")).toBe(true);
+    expect(surrounding[0]).toBe("before one");
+    expect(surrounding[4]).toBe("after three");
   });
 });
