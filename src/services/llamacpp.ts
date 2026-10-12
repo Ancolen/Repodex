@@ -1,3 +1,5 @@
+import { sanitizeLoneSurrogates } from "../utils/text";
+
 /**
  * Raw wire client for a `llama-server` process (llama.cpp's OpenAI-compatible
  * HTTP server). One server serves ONE model (started with `-m … --embedding`),
@@ -57,7 +59,7 @@ export async function llamaEmbeddings(texts: string[], url: string, model: strin
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model, input: texts }),
+    body: JSON.stringify({ model, input: texts.map(sanitizeLoneSurrogates) }),
   });
   if (!resp.ok) {
     const body = await resp.text().catch(() => "");
@@ -139,7 +141,7 @@ export async function llamaRerankTopLogprobs(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       model,
-      prompt: judgePrompt,
+      prompt: sanitizeLoneSurrogates(judgePrompt),
       max_tokens: 1,
       temperature: 0,
       logprobs: RERANK_TOP_LOGPROBS,

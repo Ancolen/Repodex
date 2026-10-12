@@ -1,5 +1,6 @@
 import { CONFIG } from "../config";
 import { mapWithConcurrency } from "../utils/concurrency";
+import { sanitizeLoneSurrogates } from "../utils/text";
 import { resolveEmbedBackend } from "./embed";
 import { llamaRerankTopLogprobs } from "./llamacpp";
 
@@ -80,7 +81,7 @@ async function scoreOne(query: string, doc: string): Promise<number> {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: CONFIG.RERANK_MODEL,
-        prompt: judgePrompt(query, doc),
+        prompt: sanitizeLoneSurrogates(judgePrompt(query, doc)),
         raw: true,
         stream: false,
         options: { num_predict: 1, temperature: 0, num_ctx: CONFIG.RERANK_NUM_CTX },

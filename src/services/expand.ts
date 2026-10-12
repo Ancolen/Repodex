@@ -1,5 +1,6 @@
 import { CONFIG } from "../config";
 import { rrfMerge } from "../utils/rrf";
+import { sanitizeLoneSurrogates } from "../utils/text";
 import { resolveEmbedBackend } from "./embed";
 
 /**
@@ -192,7 +193,7 @@ export async function expandVariantsVia(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: cfg.model,
-          prompt,
+          prompt: sanitizeLoneSurrogates(prompt),
           max_tokens: EXPAND_NUM_PREDICT,
           temperature: 0,
         }),
@@ -210,7 +211,7 @@ export async function expandVariantsVia(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: cfg.model,
-          prompt,
+          prompt: sanitizeLoneSurrogates(prompt),
           stream: false,
           options: {
             temperature: 0,

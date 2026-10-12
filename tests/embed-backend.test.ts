@@ -1,6 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { pickProvider, resolveEmbedBackend, setEmbedBackend, resetEmbedBackend, getEmbedding } from "../src/services/embed";
-import { llamaRerankTopLogprobs } from "../src/services/llamacpp";
+import { llamaEmbeddings, llamaRerankTopLogprobs } from "../src/services/llamacpp";
 import { modelTagPresent } from "../src/utils/model-tag";
 
 describe("pickProvider — auto backend selection", () => {
@@ -88,6 +88,37 @@ describe("getEmbedding — llama.cpp path via /v1/embeddings", () => {
     } finally {
       globalThis.fetch = realFetch;
       resetEmbedBackend();
+    }
+  });
+});
+
+describe("llamaEmbeddings — wire hygiene", () => {
+  test("lone surrogates never reach the request body (strict parsers reject them)", async () => {
+    // The production failure: a chunk cut mid-emoji ended on a lone high
+    // surrogate, JSON.stringify escaped it to \ud83d, and llama.cpp's
+    // nlohmann rejected the whole request with HTTP 400 — the file then
+    // failed to index on every sync. The wire client sanitizes instead.
+    const realFetch = globalThis.fetch;
+    const bodies: string[] = [];
+    globalThis.fetch = (async (_input: any, init?: any) => {
+      bodies.push(String(init?.body));
+      return new Response(
+        JSON.stringify({
+          data: [
+            { index: 0, embedding: [1] },
+            { index: 1, embedding: [2] },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as typeof fetch;
+    try {
+      await llamaEmbeddings(["before \uD83D after", "clean"], "http://mock:3", "m");
+      expect(bodies[0]).not.toMatch(/\\ud[0-9a-f]{3}/i);
+      const parsed = JSON.parse(bodies[0]!) as { input: string[] };
+      expect(parsed.input).toEqual(["before � after", "clean"]);
+    } finally {
+      globalThis.fetch = realFetch;
     }
   });
 });

@@ -1,5 +1,6 @@
 import { Ollama } from "ollama";
 import { CONFIG } from "../config";
+import { sanitizeLoneSurrogates } from "../utils/text";
 
 // The Ollama library binds a fetch implementation at Ollama-construction time
 // (`config.fetch ?? <module-scoped fetch>`); route it through the LIVE global
@@ -26,7 +27,7 @@ const EMBED_OPTIONS = { num_ctx: CONFIG.OLLAMA_NUM_CTX };
 export async function ollamaEmbedding(text: string, model: string): Promise<number[]> {
   const res = await ollama.embeddings({
     model,
-    prompt: text,
+    prompt: sanitizeLoneSurrogates(text),
     options: EMBED_OPTIONS,
   });
   return res.embedding;
@@ -41,7 +42,7 @@ export async function ollamaEmbeddings(texts: string[], model: string): Promise<
   if (texts.length === 0) return [];
   const res = await ollama.embed({
     model,
-    input: texts,
+    input: texts.map(sanitizeLoneSurrogates),
     options: EMBED_OPTIONS,
   });
   return res.embeddings;
