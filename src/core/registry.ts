@@ -4,6 +4,34 @@ import { CONFIG } from "../config";
 
 export type IndexStatus = "indexing" | "ready" | "error";
 
+/**
+ * The LanceDB table name derived from a project name (`idx_<sanitized-name>`) —
+ * the exact recipe `createIndex` pins into `IndexRecord.tableName`. Kept as ONE
+ * shared derivation so the stored name, a legacy backfill and the doctor all
+ * agree on what a project's table is called.
+ */
+export function deriveTableName(name: string): string {
+  const s = name
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return `idx_${s.length > 0 ? s : "idx"}`;
+}
+
+/**
+ * The LanceDB table a project record is served from: the name STORED on the
+ * record when it carries one, else the derived default. This is the single
+ * helper every table-name consumer goes through. It matters because the O2
+ * model migration legitimately flips the STORED name to the shadow table
+ * (`idx_<x>_mig`), so "the name on the record" and "the name derived from the
+ * project name" can differ — deriving from scratch at a call site would point
+ * at a stale table after a migration.
+ */
+export function tableNameFor(record: { name: string; tableName?: string | null }): string {
+  const stored = record.tableName;
+  return stored != null && stored.length > 0 ? stored : deriveTableName(record.name);
+}
+
 /** Represents an indexed project in the registry. */
 export interface IndexRecord {
   name: string;
@@ -104,6 +132,37 @@ export class Registry {
         PRIMARY KEY (model, hash)
       );
     `);
+
+    // Stored table names (O2): ensure the column on a registry that predates it,
+    // then backfill any row stored without one. Both are idempotent.
+    this.ensureTableNameColumn();
+    this.backfillTableNames();
+  }
+
+  /**
+   * Lazy schema migration: a foreign/partly-rebuilt meta.db whose `indexes`
+   * table predates the stored table name gets the column added lazily rather
+   * than failing every boot. The shipped schema always created it (NOT NULL);
+   * the ALTER-added column is nullable and is immediately backfilled.
+   */
+  private ensureTableNameColumn(): void {
+    const cols = this.db.query(`PRAGMA table_info(indexes)`).all() as { name: string | null }[];
+    if (!cols.some((c) => c.name === "table_name")) {
+      this.db.run(`ALTER TABLE indexes ADD COLUMN table_name TEXT`);
+    }
+  }
+
+  /** One-time, idempotent: rows stored without a table name get the derived one. */
+  private backfillTableNames(): void {
+    const rows = this.db
+      .query(`SELECT name FROM indexes WHERE table_name IS NULL OR table_name = ''`)
+      .all() as { name: string | null }[];
+    if (rows.length === 0) return;
+    const stmt = this.db.query(`UPDATE indexes SET table_name = $t WHERE name = $n`);
+    for (const r of rows) {
+      if (r.name) stmt.run({ $t: deriveTableName(r.name), $n: r.name });
+    }
+    console.error(`[registry] backfilled ${rows.length} index record(s) with a derived table name.`);
   }
 
   // ---------------------------------------------------------------- indexes
@@ -172,6 +231,51 @@ export class Registry {
       .run({ $name: name, $m: model, $d: dim });
   }
 
+  /**
+   * THE COMMIT POINT of a zero-downtime model migration (O2): one sqlite
+   * transaction atomically flips the project's stored table name to the
+   * COMPLETED shadow table, pins the new embedding model/dimension and marks
+   * the index ready. Before this transaction: a crash leaves the original
+   * table + record untouched (the half-built shadow is garbage the doctor
+   * flags); after it: the registry points at a complete, self-consistent table
+   * — the migration is done no matter what happens next.
+   */
+  commitTableSwap(
+    name: string,
+    swap: {
+      tableName: string;
+      embedModel: string;
+      embedDim: number | null;
+      chunkCount: number;
+      lastIndexedAt: number;
+    },
+  ): void {
+    const tx = this.db.transaction((s: {
+      tableName: string;
+      embedModel: string;
+      embedDim: number | null;
+      chunkCount: number;
+      lastIndexedAt: number;
+    }) => {
+      this.db
+        .query(
+          `UPDATE indexes SET
+             table_name=$t, embed_model=$m, embed_dim=$d, chunk_count=$c,
+             last_indexed_at=$ts, status='ready', error=NULL
+           WHERE name=$name`,
+        )
+        .run({
+          $t: s.tableName,
+          $m: s.embedModel,
+          $d: s.embedDim,
+          $c: s.chunkCount,
+          $ts: s.lastIndexedAt,
+          $name: name,
+        });
+    });
+    tx(swap);
+  }
+
   removeIndex(name: string): void {
     this.db.query(`DELETE FROM indexes WHERE name = $name`).run({ $name: name });
     this.db.query(`DELETE FROM file_cache WHERE index_name = $name`).run({ $name: name });
@@ -186,20 +290,24 @@ export class Registry {
     this.db.query(`DELETE FROM indexes WHERE name = $name`).run({ $name: name });
     this.db.query(`DELETE FROM file_cache WHERE index_name = $name`).run({ $name: name });
     // Stale job records are matched by a LIKE on the indexName field inside the
-    // JSON payload.
+    // JSON payload (index jobs) and on the project field (migrate jobs, O2).
+    const esc = name.replace(/'/g, "''").replace(/[\\%_]/g, "\\$&");
     this.db
       .query(
         `DELETE FROM jobs
-         WHERE payload LIKE $pattern ESCAPE '\\'`,
+         WHERE payload LIKE $byIndexName ESCAPE '\\'
+            OR payload LIKE $byProject ESCAPE '\\'`,
       )
-      .run({ $pattern: `%"indexName":"${name.replace(/'/g, "''").replace(/[\\%_]/g, "\\$&")}"%` });
+      .run({ $byIndexName: `%"indexName":"${esc}"%`, $byProject: `%"project":"${esc}"%` });
   }
 
   private rowToIndex(r: Record<string, unknown>): IndexRecord {
     return {
       name: r.name as string,
       path: r.path as string,
-      tableName: r.table_name as string,
+      // Defensive: a row whose table name is missing/empty (an un-backfilled
+      // foreign DB) resolves to the derived name, never to an empty string.
+      tableName: tableNameFor({ name: r.name as string, tableName: (r.table_name as string | null) ?? null }),
       status: r.status as IndexStatus,
       fileCount: r.file_count as number,
       chunkCount: r.chunk_count as number,
