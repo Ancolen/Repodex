@@ -311,7 +311,7 @@ async function main(): Promise<void> {
   process.on("beforeExit", () => void unregisterSession());
 
   const server = new Server(
-    { name: "cidx (stdio bridge)", version: "2.5.0" },
+    { name: "cidx (stdio bridge)", version: "2.6.0" },
     // The bridge pushes (poll → notifications), so it declares `logging` and
     // `resources.listChanged`; the tools capability stays as before.
     { capabilities: { tools: {}, resources: { listChanged: true }, logging: {} } },
