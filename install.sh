@@ -8,7 +8,7 @@
 #   1. Checks for Bun, installs it with the OFFICIAL installer if missing (does NOT use snap).
 #   2. Installs dependencies (bun install).
 #   3. Adds the `cidx` and `repodex` commands to PATH (wrapper).
-#   4. Checks Ollama and the embedding model.
+#   4. Checks the embedding backend (Ollama or llama-server).
 #   5. Installs a systemd user service -> automatic daemon on every startup.
 #   6. Starts the daemon and performs a health check.
 #
@@ -150,9 +150,14 @@ case ":$PATH:" in
      printf "      %sexport PATH=\"%s:\$PATH\"%s\n" "$BOLD" "$BIN_DIR" "$NC" ;;
 esac
 
-# ------------------------------------------------------ 4) Ollama / model
-info "Checking Ollama..."
+# ------------------------------------------------ 4) embedding backend
+# cidx auto-detects the embedding backend at runtime (embedding.provider; the
+# daemon probes Ollama and llama-server and prefers whichever serves the
+# configured model). This check is advisory only: Ollama+model, else a live
+# llama-server, else both hints.
+info "Checking the embedding backend (Ollama / llama-server)..."
 MODEL="${OLLAMA_MODEL:-qwen3-embedding:0.6b}"
+LLAMACPP_URL="${LLAMACPP_URL:-http://127.0.0.1:8080}"
 if command -v ollama >/dev/null 2>&1; then
   ok "Ollama found: $(command -v ollama)"
   # `ollama list` reports the fully tagged name (`qwen3-embedding:latest`); a
@@ -162,6 +167,10 @@ if command -v ollama >/dev/null 2>&1; then
   # metacharacters in the name as patterns.
   if ollama list 2>/dev/null | awk 'NR > 1 {print $1}' | sed 's/:latest$//' | grep -qx -- "$MODEL"; then
     ok "Embedding model present: $MODEL"
+  elif curl -sf "${LLAMACPP_URL}/health" >/dev/null 2>&1; then
+    # Ollama lacks the model, but cidx auto-select prefers a llama-server that
+    # actually serves something over an Ollama that doesn't have the model.
+    ok "Ollama lacks the model, but llama-server found: $LLAMACPP_URL (cidx will use it)"
   else
     warn "Embedding model '$MODEL' not found."
     if ask "Should I download it now? (ollama pull $MODEL — may be large)"; then
@@ -171,7 +180,8 @@ if command -v ollama >/dev/null 2>&1; then
     fi
   fi
 else
-  warn "Ollama not found. Install: https://ollama.com  then: ollama pull $MODEL"
+  warn "No embedding backend found. Either install Ollama (https://ollama.com) and: ollama pull $MODEL"
+  warn "or run a llama-server: llama-server -m <model.gguf> -a $MODEL --ctx-size 2048 --ubatch-size 2048 --embedding"
 fi
 
 # ---------------------------------------------- 5) systemd user service
