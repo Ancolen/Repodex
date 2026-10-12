@@ -7,7 +7,7 @@ import { daemonCommand, bridgeCommand } from "./runtime";
 import { daemonCheck, type DoctorCheck, type DoctorReport } from "./core/doctor";
 import { resolveEditor, buildEditorArgs } from "./utils/editor";
 import type { QueryLogStats, SearchEnvelope } from "./core/index-manager";
-import { formatContextPack, formatReferences, formatApiDiff, formatImpact, formatDocCheck, formatBlameNote, formatQueryLogStats } from "./server/format";
+import { formatContextPack, formatReferences, formatApiDiff, formatImpact, formatDocCheck, formatBlameNote, formatQueryLogStats, formatCoupling } from "./server/format";
 
 const BASE = `http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}`;
 
@@ -825,6 +825,32 @@ async function cmdImpact(positionals: string[], flags: Record<string, string | b
   console.log(formatImpact(r));
 }
 
+// ------------------------------------------------- coupling metrics (C5)
+
+/**
+ * `cidx coupling [project|dir] [--path x] [--limit n]` — project-level fan-in /
+ * fan-out over the dependency graph, sectioned into three bands. The positional
+ * is a project NAME or an existing dir (which anchors by path, like deadcode
+ * does); absent → the daemon resolves the single indexed project.
+ */
+async function cmdCoupling(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
+  await requireDaemon();
+  const arg = positionals[0];
+  const body: {
+    project?: string | undefined;
+    path?: string | undefined;
+    limit?: number;
+  } =
+    typeof flags.path === "string"
+      ? { path: path.resolve(flags.path) }
+      : arg && existsSync(arg) && statSync(arg).isDirectory()
+        ? { path: path.resolve(arg) }
+        : { project: arg };
+  if (typeof flags.limit === "string") body.limit = Number(flags.limit);
+  const r = await api<any>("POST", "/coupling", body);
+  console.log(formatCoupling(r));
+}
+
 // -------------------------------------------------- doc conformance (D1)
 
 /**
@@ -1169,6 +1195,23 @@ const COMMANDS: Record<string, CmdDoc> = {
       "cidx impact src/core/impact.ts --depth 2",
     ],
   },
+  coupling: {
+    usage: "coupling [project|dir] [flags]",
+    summary: "Coupling metrics: fan-in/fan-out and instability per file, in three ranked bands.",
+    flags: [
+      ["--path <dir>", "Alternative to the positional: a dir/file inside the project."],
+      ["--limit <n>", "Cap per band (default: 50); exceeding it prints a truncation warning."],
+    ],
+    details: [
+      "topFanIn — most imported; changeMagnets — fan-in >= 2 AND fan-out >= 2 (one change ripples);",
+      "unstableLeaves — imported by nothing, importing others. Every band is capped with honest totals;",
+      "files with no internal edges are counted ('no band'), not listed.",
+      "External/unresolved imports are excluded from the metrics and counted separately per file.",
+      "Reuses the dependency graph's mtime cache — the first call per project scans; later calls are free.",
+      "CAVEAT: flat (package-indexed) projects give trivially shallow metrics — needs real module structure.",
+    ],
+    examples: ["cidx coupling repodex", "cidx coupling ~/projects/api --limit 20"],
+  },
   doccheck: {
     usage: "doccheck [project|path] [flags]",
     summary: "Doc–code conformance: resolves markdown claims against the index (deterministic, no LLM).",
@@ -1312,7 +1355,7 @@ const COMMANDS: Record<string, CmdDoc> = {
 
 const HELP_ORDER = [
   "start", "index", "list", "status", "reindex", "sync", "remove",
-  "search", "open", "batch", "pack", "find", "refs", "overview", "deps", "deadcode", "callgraph", "commits", "apidiff", "impact", "doccheck", "doctor", "stats", "config", "mcp", "stop", "version", "help",
+  "search", "open", "batch", "pack", "find", "refs", "overview", "deps", "deadcode", "callgraph", "commits", "apidiff", "impact", "coupling", "doccheck", "doctor", "stats", "config", "mcp", "stop", "version", "help",
 ];
 
 /** Detailed help for a single command. */
@@ -1398,6 +1441,7 @@ function printHelp(): void {
   lines.push('  cidx impact handleRequest        # if I change it, what breaks?');
   lines.push('  cidx commits api "login flow"     # git-history / commit-message search');
   lines.push('  cidx deadcode api --min-confidence 70  # potential dead code');
+  lines.push('  cidx coupling api                 # fan-in/fan-out bands per file');
   lines.push('  cidx apidiff api v1.2.0           # public-API diff between two git refs');
   lines.push('  cidx stats api                   # search analytics: top/zero-hit queries, latency');
   lines.push('  cidx sync api          # fast incremental update');
@@ -1409,7 +1453,7 @@ function printHelp(): void {
   lines.push("  Stdio-expecting clients (Claude Desktop): cidx mcp");
   lines.push("  Tools: search_codebase, search_codebase_batch, find_symbol, find_references,");
   lines.push("            get_file_outline, get_dependencies, get_call_graph, find_dead_code, search_commits,");
-  lines.push("            get_api_diff, get_change_impact, get_context_pack, get_repo_overview,");
+  lines.push("            get_api_diff, get_change_impact, get_coupling, get_context_pack, get_repo_overview,");
   lines.push("            list_indexes, get_index_status, index_project");
   lines.push("");
   lines.push("CONFIGURATION");
@@ -1576,6 +1620,7 @@ async function main(): Promise<void> {
     case "deadcode": case "dead-code": await cmdDeadcode(positionals, flags); break;
     case "callgraph": case "call-graph": await cmdCallGraph(positionals, flags); break;
     case "impact": case "change-impact": await cmdImpact(positionals, flags); break;
+    case "coupling": await cmdCoupling(positionals, flags); break;
     case "doccheck": case "check-docs": case "checkdocs": await cmdDoccheck(positionals, flags); break;
     case "commits": case "git-log": case "gitlog": await cmdCommits(positionals, flags); break;
     case "apidiff": case "api-diff": await cmdApiDiff(positionals, flags); break;

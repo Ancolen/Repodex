@@ -39,6 +39,7 @@ import {
   formatApiDiff,
   formatImpact,
   formatDocCheck,
+  formatCoupling,
 } from "./server/format";
 
 const BASE = `http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}`;
@@ -358,6 +359,19 @@ async function main(): Promise<void> {
             window: args.window,
           });
           return ok(formatDocCheck(report));
+        }
+        // ---- coupling metrics (proposal C5) ----
+        case "get_coupling": {
+          const report = await api<Parameters<typeof formatCoupling>[0]>("POST", "/coupling", {
+            project: args.project,
+            path: args.path,
+            limit: args.limit,
+          });
+          // Readable text for the model + the structured object for JSON consumers.
+          return {
+            content: [{ type: "text" as const, text: formatCoupling(report) }],
+            structuredContent: { coupling: report },
+          };
         }
         default:
           return fail(`Unknown tool: ${name}`);

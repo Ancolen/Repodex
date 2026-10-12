@@ -74,6 +74,10 @@ import type { ChangeImpactReport, ImpactAnchor, ImpactChunk } from "./impact";
 export type { ChangeImpactReport, ImpactAnchor } from "./impact";
 import type { CommitHit, CommitQueryOpts } from "./commits";
 export type { CommitHit, CommitQueryOpts } from "./commits";
+// Proposal C5 — project-level coupling metrics.
+import { computeCoupling } from "./coupling";
+import type { CouplingReport } from "./coupling";
+export type { CouplingReport, CouplingBand, FileCoupling } from "./coupling";
 // ---- public API diff (proposal C2) ----
 export type {
   ApiSymbol,
@@ -556,6 +560,8 @@ const EMPTY_ADJ: Map<string, Set<string>> = new Map();
 interface DepGraph {
   forward: Map<string, string[]>; // importer abs path → resolved imported abs paths
   reverse: Map<string, string[]>; // imported abs path → importer abs paths
+  /** Importer abs path → external/unresolved import-specifier count (NOT in `forward`). */
+  external: Map<string, number>;
   fileMtimes: Map<string, number>;
   scannedFiles: number;
 }
@@ -1634,6 +1640,42 @@ export class IndexManager {
   }
 
   /**
+   * C5 — project-level coupling metrics: per-file fan-in/fan-out and instability
+   * over the dependency graph, sectioned into three bands (most imported, change
+   * magnets, unstable leaves). Pure arithmetic over the mtime-keyed import graph
+   * `getDependencies` already caches, so the first call per project pays the
+   * parse-everything cost once and later calls are free until a file's mtime
+   * changes. External/unresolved imports never enter the fan math — they are
+   * counted separately (`externalImports`) so package noise can't skew the
+   * picture. No schema change, no reindex.
+   *
+   * CAVEAT: a package-indexed (flat) project has only trivially shallow metrics —
+   * they mean something for real module structures.
+   *
+   * Resolution: explicit `project` wins, then a `path` inside the project (most
+   * specific prefix), then the single indexed project; every failure names the
+   * available projects (`resolveProjectScope`).
+   */
+  async getCoupling(
+    project?: string,
+    filePath?: string,
+    limit?: number,
+  ): Promise<CouplingReport> {
+    const name = this.resolveProjectScope(project, filePath, false)!;
+    const rec = this.registry.getIndex(name);
+    if (!rec) throw this.indexNotFound(name); // unreachable (scope just validated); keeps the type honest
+    const graph = await this.buildImportGraph(rec);
+    return computeCoupling({
+      project: rec.name,
+      projectRoot: rec.path,
+      files: this.registry.listCachedFiles(rec.name),
+      forward: graph.forward,
+      externalImports: graph.external,
+      limit,
+    });
+  }
+
+  /**
    * Call graph for a symbol and/or file: who calls it (callers) and what it calls
    * (callees), as bounded, cycle-safe trees. Adjacency comes from whole-identifier
    * matching over chunk content (same discipline as `find_references` /
@@ -2207,6 +2249,10 @@ export class IndexManager {
     }
 
     const forward = new Map<string, string[]>();
+    // C5 — external/unresolved specifiers are counted per file (coupling metrics
+    // exclude them from the fan math but report them separately), so one pass
+    // feeds both `get_dependencies` and `getCoupling` for free.
+    const external = new Map<string, number>();
     await mapWithConcurrency(indexedFiles, 8, async (f) => {
       let content: string;
       try {
@@ -2218,10 +2264,13 @@ export class IndexManager {
       if (specs.length === 0) return;
       const resolved = resolveImports(specs, rec.path, index, f);
       const edges: string[] = [];
+      let extCount = 0;
       for (const r of resolved) {
         if (r.status === "resolved" && r.resolvedPath) edges.push(r.resolvedPath);
+        else extCount++;
       }
       if (edges.length > 0) forward.set(f, edges);
+      if (extCount > 0) external.set(f, extCount);
     });
 
     const reverse = new Map<string, string[]>();
@@ -2236,7 +2285,7 @@ export class IndexManager {
       }
     }
 
-    const graph: DepGraph = { forward, reverse, fileMtimes, scannedFiles: indexedFiles.length };
+    const graph: DepGraph = { forward, reverse, external, fileMtimes, scannedFiles: indexedFiles.length };
     this.depGraphCache.set(rec.name, { setKey, graph });
     return graph;
   }

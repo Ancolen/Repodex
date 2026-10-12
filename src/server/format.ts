@@ -17,6 +17,9 @@ import type {
   ApiChangeKind,
   ChangeImpactReport,
   QueryLogStats,
+  CouplingReport,
+  CouplingBand,
+  FileCoupling,
 } from "../core/index-manager";
 import type { DocCheckReport, DocFinding, UndocumentedEntry } from "../core/doccheck";
 import type { OutlineEntry } from "../chunking/chunker";
@@ -688,4 +691,47 @@ export function formatQueryLogStats(s: QueryLogStats, opts?: { project?: string 
     return `${head}\n${note}`;
   }
   return [head, "", ...formatQueryLogSections(s)].join("\n");
+}
+
+// ---------------------------------------------------- coupling metrics (C5)
+
+/**
+ * Converts a coupling report to text, sectioned in the three band views:
+ * Most imported → Change magnets → Unstable leaves, with the files that fall in
+ * no band counted (not listed) and the external-import total alongside — those
+ * edges are excluded from the fan metrics by design.
+ */
+export function formatCoupling(r: CouplingReport): string {
+  const lines: string[] = [];
+  lines.push(`Coupling — project: ${r.project}`);
+  if (r.scannedFiles === 0) {
+    lines.push("(the project has no indexed files — nothing to measure)");
+    return lines.join("\n");
+  }
+  lines.push(
+    `${r.scannedFiles} file(s) scanned · ${r.externalImports} external import(s) excluded from the metrics` +
+      (r.unclassified > 0 ? ` · ${r.unclassified} file(s) in no band (no internal edges)` : ""),
+  );
+  const instability = (v: number | null): string => (v === null ? "—" : v.toFixed(2));
+  const bandLine = (f: FileCoupling): string =>
+    `  ${String(f.fanIn).padStart(3)} in · ${String(f.fanOut).padStart(3)} out · inst ${instability(f.instability)}` +
+    ` · ${f.relativeFile}` +
+    (f.externalImports > 0 ? `  (+${f.externalImports} external)` : "");
+  const band = (title: string, hint: string, b: CouplingBand): void => {
+    lines.push(`\n${title} (${b.total}) — ${hint}`);
+    if (b.items.length === 0) {
+      lines.push("  (none)");
+      return;
+    }
+    for (const f of b.items) lines.push(bandLine(f));
+  };
+
+  band("▲ Most imported", "files other modules import the most", r.topFanIn);
+  band("⟳ Change magnets", "heavily imported AND heavily importing — one change ripples", r.changeMagnets);
+  band("↗ Unstable leaves", "imported by nothing, importing others — pure dependents", r.unstableLeaves);
+
+  if (r.truncated) {
+    lines.push("⚠ a band hit its cap — pass a higher --limit for more.");
+  }
+  return lines.join("\n");
 }

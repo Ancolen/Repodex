@@ -635,4 +635,37 @@ export const TOOL_DEFINITIONS: Tool[] = [
       required: [],
     },
   },
+  {
+    name: "get_coupling",
+    description:
+      "COUPLING METRICS for one project, reduced from the dependency graph (the get_dependencies " +
+      "machinery, no reindex): per indexed file fanIn (internal importers), fanOut (internal " +
+      "imports), instability = fanOut / (fanIn + fanOut) (0 = stable/attracting, 1 = unstable/" +
+      "depending, null when a file has no internal edges), and externalImports (external/unresolved " +
+      "specifiers — deliberately EXCLUDED from the fan metrics and counted separately so package " +
+      "noise can't skew the internal picture). Sectioned into three bands: topFanIn (most imported, " +
+      "fanIn desc), changeMagnets (fanIn >= 2 AND fanOut >= 2, ranked by fanIn + fanOut desc — the " +
+      "entangled files where one change ripples), and unstableLeaves (imported by nothing, importing " +
+      "others). Files falling in no band are counted ('unclassified'), not listed. Every band is " +
+      "capped by 'limit' (default 50) with totals + truncated flags. Built over the mtime-keyed " +
+      "dependency-graph cache: the first call per project parses every indexed file's imports, " +
+      "later calls are instant until a file changes. CAVEAT: package-indexed projects (one flat " +
+      "table with no real module structure) give trivially shallow metrics.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: {
+          type: "string",
+          description: "The project to analyze (optional when 'path' is given, or when exactly one project is indexed).",
+        },
+        path: {
+          type: "string",
+          description:
+            "Alternative to 'project': a file/dir inside the project (the owning project is inferred). Ignored when 'project' is also given.",
+        },
+        limit: { type: "number", description: "Cap per band (default: 50); exceeding it sets 'truncated'." },
+      },
+      required: [],
+    },
+  },
 ];
