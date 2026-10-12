@@ -28,6 +28,7 @@ import {
   formatApiDiff,
   formatImpact,
   formatDocCheck,
+  formatCoupling,
 } from "./format";
 import type { JobQueue } from "../core/job-queue";
 import type { IndexManager } from "../core/index-manager";
@@ -586,6 +587,25 @@ function buildServer(deps: McpDeps): Server {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text", text: `Doc-check error: ${msg}` }], isError: true };
+      }
+    }
+
+    // ---- coupling metrics (proposal C5) ----
+    if (name === "get_coupling") {
+      const args = rawArgs as {
+        project?: string;
+        path?: string;
+        limit?: number;
+      };
+      const limit = typeof args.limit === "number" ? args.limit : undefined;
+      try {
+        // Resolution happens in the engine (explicit project → path anchor → the
+        // single indexed project, or an error naming the available ones).
+        const report = await deps.manager.getCoupling(args.project, args.path, limit);
+        return { content: [{ type: "text", text: formatCoupling(report) }], structuredContent: { coupling: report } };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text", text: `Coupling error: ${msg}` }], isError: true };
       }
     }
 

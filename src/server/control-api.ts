@@ -687,6 +687,25 @@ export function startControlApi(
     }
   });
 
+  /** Project-level coupling metrics over the dependency graph (`cidx coupling`). */
+  app.post("/coupling", async (req, res) => {
+    const { project, path: projectPath, limit } = (req.body ?? {}) as {
+      project?: string;
+      path?: string;
+      limit?: number;
+    };
+    try {
+      // Resolution happens in the engine: explicit project → path anchor → the
+      // single indexed project, or an error naming the available ones.
+      const limitArg = typeof limit === "number" ? limit : undefined;
+      res.json(await deps.manager.getCoupling(project, projectPath, limitArg));
+    } catch (err) {
+      // An unknown project / ambiguous anchor is a 404 (like /deadcode); anything else is a bad request.
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(msg.startsWith("Index not found") || msg.startsWith("No indexed project") ? 404 : 400).json({ error: msg });
+    }
+  });
+
   app.post("/shutdown", (_req, res) => {
     res.json({ stopping: true });
     setTimeout(() => void deps.onShutdown(), 50);
