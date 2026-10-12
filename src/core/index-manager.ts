@@ -115,6 +115,10 @@ import {
 } from "./doccheck";
 export type { DocCheckReport, DocFinding, UndocumentedEntry } from "./doccheck";
 import { collectDocFiles, listRootFiles, readProjectManifest } from "../services/docfiles";
+// A2 — event stream: the events the daemon subscribes to (job completion,
+// index add/remove) and forwards into its in-memory ring for GET /events.
+import type { DaemonEventInput } from "./events";
+export type { DaemonEventInput as IndexManagerEvent };
 // Shared file-kind heuristics (dead code + reverse doc coverage use the same recipe).
 import {
   DEAD_CANDIDATE_TYPES,
@@ -137,6 +141,22 @@ export interface IndexJobPayload {
   target: IndexTarget;
   /** If true, the existing table+cache are cleared and indexed from scratch. */
   fresh?: boolean;
+}
+
+/**
+ * The project a registered job is about, derived from its payload (A2). Kept
+ * payload-based — NOT via jobByIndex — so the job-completed event publisher
+ * works regardless of listener order (the mapping is cleaned up in the same
+ * "finished" tick) and unknown future job types publish nothing.
+ */
+function jobProjectOf(job: Job): string | undefined {
+  if (job.type === INDEX_JOB_TYPE) {
+    return (job.payload as IndexJobPayload | undefined)?.target?.indexName;
+  }
+  if (job.type === MIGRATE_JOB_TYPE) {
+    return (job.payload as MigrateJobPayload | undefined)?.project;
+  }
+  return undefined;
 }
 
 /** A result that also carries which project it came from in cross-project search. */
@@ -730,6 +750,8 @@ export class IndexManager {
   private callGraphCache = new Map<string, CallGraphCacheEntry>();
   /** On-demand doc-check snapshot (chunks + symbols), keyed on lastIndexedAt. */
   private docChunkCache = new Map<string, DocChunkCacheEntry>();
+  /** A2 — subscribers of lifecycle events (the daemon forwards them to its event ring). */
+  private indexEventListeners = new Set<(ev: DaemonEventInput) => void>();
 
   constructor(
     private registry: Registry,
@@ -745,12 +767,53 @@ export class IndexManager {
         this.runMigrateJob(ctx.payload, ctx),
       );
     }
-    // Clean up the index↔job mapping when finished.
-    this.jobQueue.on("finished", (job: { id: string }) => {
+    // A2: publish job completion BEFORE cleaning up the index↔job mapping —
+    // the project comes straight from the job payload, so publishing does not
+    // depend on that mapping (or on listener registration order).
+    this.jobQueue.on("finished", (job: Job) => {
+      const project = jobProjectOf(job);
+      if (project) {
+        this.emitIndexEvent({
+          type: "job-completed",
+          project,
+          jobType: job.type,
+          status: job.status,
+        });
+      }
+      // Clean up the index↔job mapping when finished.
       for (const [name, id] of this.jobByIndex) {
         if (id === job.id) this.jobByIndex.delete(name);
       }
     });
+  }
+
+  // ------------------------------------------------------- A2: event stream
+  //
+  // A small subscribable hook instead of an EventEmitter: there is exactly one
+  // consumer (the daemon forwarding into its GET /events ring) and a throwing
+  // listener must never take indexing down.
+
+  /**
+   * Subscribes to lifecycle events: `job-completed` (a finished index/migrate
+   * job with its final status), `index-added` (a NEW project registered) and
+   * `index-removed` (a project fully removed). Returns the unsubscribe fn.
+   * A failing listener is reported to stderr and skipped — never fatal.
+   */
+  onIndexEvent(listener: (ev: DaemonEventInput) => void): () => void {
+    this.indexEventListeners.add(listener);
+    return () => {
+      this.indexEventListeners.delete(listener);
+    };
+  }
+
+  private emitIndexEvent(ev: DaemonEventInput): void {
+    for (const listener of this.indexEventListeners) {
+      try {
+        listener(ev);
+      } catch (err) {
+        console.error("[manager] index-event listener failed:", err);
+      }
+    }
   }
 
   // --------------------------------------------------------------- lifecycle
@@ -792,6 +855,10 @@ export class IndexManager {
     });
 
     const target: IndexTarget = { indexName: name, tableName, baseDir };
+    // A2: a NEW project just registered — notify subscribers (the resource list
+    // changed). The refresh/unique-name conflict paths above either re-route to
+    // reindex (no new record) or land here with their unique name.
+    this.emitIndexEvent({ type: "index-added", project: name });
     this.enqueueIndex(target, false);
     this.ensureWatcher(target);
     return this.registry.getIndex(name)!;
@@ -883,6 +950,8 @@ export class IndexManager {
     this.depGraphCache.delete(name);
     this.callGraphCache.delete(name);
     this.docChunkCache.delete(name);
+    // A2: the project is fully gone — notify subscribers (the resource list changed).
+    this.emitIndexEvent({ type: "index-removed", project: name });
     return true;
   }
 

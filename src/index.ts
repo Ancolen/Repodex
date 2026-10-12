@@ -4,6 +4,7 @@ import { Registry } from "./core/registry";
 import { JobQueue } from "./core/job-queue";
 import { IndexManager } from "./core/index-manager";
 import { BridgeSessionRegistry } from "./core/bridgesessions";
+import { DaemonEventRing } from "./core/events";
 import { shouldIdleShutdown, IDLE_TICK_MS } from "./core/idle";
 import { startMcpServer } from "./server/mcp";
 import { startControlApi } from "./server/control-api";
@@ -16,6 +17,12 @@ async function main(): Promise<void> {
   const manager = new IndexManager(registry, jobQueue);
   // Live stdio-bridge MCP sessions (the idle-shutdown guardrail, proposal O4).
   const bridgeSessions = new BridgeSessionRegistry();
+  // A2 — in-memory daemon event ring: job completions + index add/remove land
+  // here through the manager's hook, `GET /events` serves it, and the stdio
+  // bridge turns it into MCP notifications. Subscribed BEFORE restore() so the
+  // boot-time syncs are already covered.
+  const daemonEvents = new DaemonEventRing();
+  manager.onIndexEvent((ev) => daemonEvents.append(ev));
 
   // Idle shutdown (proposal O4): armed below only when daemon.idleTimeoutMinutes
   // > 0. With the default 0 nothing here runs — behavior is unchanged.
@@ -57,7 +64,14 @@ async function main(): Promise<void> {
 
   // 1) Servers open IMMEDIATELY (do not wait for indexing).
   const mcp = await startMcpServer({ jobQueue, manager, onActivity });
-  await startControlApi({ manager, jobQueue, onShutdown: shutdown, onActivity, bridgeSessions });
+  await startControlApi({
+    manager,
+    jobQueue,
+    onShutdown: shutdown,
+    onActivity,
+    bridgeSessions,
+    events: daemonEvents,
+  });
 
   // 2) If a directory was given on the command line, index/refresh that project (in the background).
   const dirArg = process.argv[2];
