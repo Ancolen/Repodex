@@ -34,6 +34,14 @@ interface OpenAIEmbeddingsResponse {
 }
 
 /**
+ * Hard ceiling for one wire request (embeds and rerank alike). A wedged
+ * llama-server (observed once on llama.cpp master in Oct 2026: a task launched
+ * and never released its slot, stalling every concurrent job) must surface as
+ * an error — and a skipped file / neutral score — instead of a hung daemon.
+ */
+const REQUEST_TIMEOUT_MS = 120_000;
+
+/**
  * Embeds a batch of texts through `POST /v1/embeddings` (an array `input` is
  * part of the OpenAI embeddings API). Results are re-sorted by the `index`
  * field, which the API contract leaves unordered.
@@ -41,6 +49,7 @@ interface OpenAIEmbeddingsResponse {
 export async function llamaEmbeddings(texts: string[], url: string, model: string): Promise<number[][]> {
   if (texts.length === 0) return [];
   const resp = await fetch(`${url}/v1/embeddings`, {
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model, input: texts }),
@@ -116,6 +125,7 @@ export async function llamaRerankTopLogprobs(
   model: string,
 ): Promise<LlamaLogprobEntry[]> {
   const resp = await fetch(`${url}/v1/completions`, {
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
