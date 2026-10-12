@@ -7,13 +7,23 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   CallToolRequestSchema,
+  ListResourcesRequestSchema,
+  ListResourceTemplatesRequestSchema,
   ListToolsRequestSchema,
+  ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { CONFIG } from "../config";
 import { hostGuard } from "./host-guard";
 import { fileOutline } from "../chunking/chunker";
 import { indexNotFoundMessage } from "../core/index-manager";
 import { TOOL_DEFINITIONS } from "./tool-defs";
+import {
+  buildResourceCatalog,
+  readCidxResource,
+  viewIndex,
+  type IndexView,
+  type ResourceReadTargets,
+} from "./resource-defs";
 import {
   formatResults,
   formatBatchResults,
@@ -55,16 +65,62 @@ export interface McpServerHandle {
   openSseSessions: () => number;
 }
 
-/** Builds a configured MCP Server instance for each connection. */
-function buildServer(deps: McpDeps): Server {
+/**
+ * The resource-read adapters for the in-process daemon (proposal A2): the same
+ * serializers the Control API serves — `viewIndex` over `listIndexes`/`getIndex`
+ * and `repoOverview` — wrapped into the shape `readCidxResource` consumes. An
+ * unknown project name rejects with the same self-healing message the tools use.
+ */
+function managerResourceTargets(manager: IndexManager): ResourceReadTargets {
+  return {
+    indexes: async (): Promise<IndexView[]> =>
+      manager.listIndexes().map((rec) => viewIndex(manager, rec)),
+    index: async (name: string): Promise<IndexView> => {
+      const rec = manager.getIndex(name);
+      if (!rec) {
+        throw new Error(indexNotFoundMessage(name, manager.listIndexes().map((r) => r.name)));
+      }
+      return viewIndex(manager, rec);
+    },
+    overview: (name: string) => manager.repoOverview(name),
+  };
+}
+
+/**
+ * Builds a configured MCP Server instance for each connection. Exported so the
+ * tests can drive the same handlers over the SDK's in-memory transport.
+ */
+export function buildServer(deps: McpDeps): Server {
   const server = new Server(
     { name: "cidx", version: "2.5.0" },
-    { capabilities: { tools: {} } },
+    // A2: read-only resources + the listChanged capability. HTTP stays stateless —
+    // the capability announcement is metadata; push lives on the stdio bridge.
+    { capabilities: { tools: {}, resources: { listChanged: true } } },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: TOOL_DEFINITIONS,
   }));
+
+  // --- resources (proposal A2): cidx://indexes + per-project overview/status ---
+  server.setRequestHandler(ListResourcesRequestSchema, async () => {
+    const targets = managerResourceTargets(deps.manager);
+    const { resources } = buildResourceCatalog(await targets.indexes());
+    return { resources };
+  });
+
+  server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => {
+    const catalog = buildResourceCatalog([]);
+    return { resourceTemplates: catalog.resourceTemplates };
+  });
+
+  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    const content = await readCidxResource(managerResourceTargets(deps.manager), request.params.uri);
+    if (content === null) {
+      throw new Error(`Unknown resource: ${request.params.uri}`);
+    }
+    return { contents: [content] };
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: rawArgs } = request.params;
