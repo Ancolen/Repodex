@@ -24,6 +24,7 @@ import {
 import { CONFIG } from "./config";
 import { daemonCommand } from "./runtime";
 import { TOOL_DEFINITIONS } from "./server/tool-defs";
+import type { SearchEnvelope } from "./core/index-manager";
 import {
   formatResults,
   formatBatchResults,
@@ -151,7 +152,7 @@ async function main(): Promise<void> {
     try {
       switch (name) {
         case "search_codebase": {
-          const results = await api<Parameters<typeof formatResults>[0]>("POST", "/search", {
+          const env = await api<SearchEnvelope>("POST", "/search", {
             query: args.query,
             project: args.project,
             path: args.path,
@@ -165,8 +166,14 @@ async function main(): Promise<void> {
             mmr: args.mmr,
             maxChars: args.maxChars,
             doc: args.doc,
+            blame: args.blame,
           });
-          return ok(formatResults(results));
+          // Readable text for the model + the structured envelope (results + blame
+          // notes) for JSON consumers — mirrors the in-process MCP server.
+          return {
+            content: [{ type: "text" as const, text: formatResults(env.results, env) }],
+            structuredContent: { ...env },
+          };
         }
         case "search_codebase_batch": {
           const groups = await api<Parameters<typeof formatBatchResults>[0]>("POST", "/search/batch", {
@@ -183,8 +190,13 @@ async function main(): Promise<void> {
             mmr: args.mmr,
             maxChars: args.maxChars,
             doc: args.doc,
+            blame: args.blame,
           });
-          return ok(formatBatchResults(groups));
+          // Note lines ride on the groups (per-query blame envelope).
+          return {
+            content: [{ type: "text" as const, text: formatBatchResults(groups) }],
+            structuredContent: { groups },
+          };
         }
         case "get_context_pack": {
           const pack = await api<Parameters<typeof formatContextPack>[0]>("POST", "/pack", {

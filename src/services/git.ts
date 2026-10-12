@@ -199,3 +199,48 @@ export async function gitCommitTimeAt(baseDir: string, ref: string): Promise<num
     return null;
   }
 }
+
+// -----------------------------------------------------------------------------
+// Blame / ownership (proposal C4). `git blame` gives, per line of a `-L` range,
+// the LAST commit that touched it — so ONE invocation per file (covering the
+// min..max of the hit line ranges) answers "who last changed this code, when"
+// for every chunk of that file. The raw porcelain output is parsed by the pure
+// `core/blame.ts` (the churn summary costs nothing beyond the parse).
+// Same discipline as `searchGitLog`: `execFile` with no shell (the path is a
+// literal argv element after `--`, so it can never inject an option), integer
+// range bounds, the repo checked first, and every failure REPORTED (`null`)
+// rather than thrown — the caller omits that file's blame fields and the
+// search itself never fails.
+// -----------------------------------------------------------------------------
+
+/**
+ * Raw `git blame --porcelain -L <start>,<end> -- <absPath>` output for one line
+ * range of one file. `cwd` anchors the repo (`git -C`); the absolute file path
+ * after `--` keeps working whatever `-C` resolves to. Returns null when the
+ * directory is not a git working tree, when the range is not well-formed, or
+ * when git fails/absent — never throws.
+ */
+export async function blameRange(
+  absPath: string,
+  startLine: number,
+  endLine: number,
+  cwd: string,
+): Promise<string | null> {
+  if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || startLine < 1 || endLine < 1) {
+    return null;
+  }
+  if (!(await isGitRepo(cwd))) return null;
+  // A reversed / zero-width range is normalized, never fatal.
+  const start = Math.min(startLine, endLine);
+  const end = Math.max(startLine, endLine);
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["-C", cwd, "blame", "--porcelain", "-L", `${start},${end}`, "--", absPath],
+      { timeout: 10000, maxBuffer: 16 * 1024 * 1024, encoding: "utf8" },
+    );
+    return stdout;
+  } catch {
+    return null;
+  }
+}

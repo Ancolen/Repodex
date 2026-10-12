@@ -67,6 +67,7 @@ function buildServer(deps: McpDeps): Server {
         mmr?: boolean;
         maxChars?: number;
         doc?: boolean;
+        blame?: boolean;
       };
       const limit = args.limit ?? 5;
       const opts = {
@@ -79,14 +80,20 @@ function buildServer(deps: McpDeps): Server {
         mmr: args.mmr,
         maxChars: args.maxChars,
         doc: args.doc,
+        blame: args.blame,
       };
       try {
         // 'path' anchors the search to the project containing it; neither → all projects.
         const project = deps.manager.resolveProjectScope(args.project, args.path);
-        const results = project
+        const env = project
           ? await deps.manager.searchIndex(project, args.query, limit, opts)
           : await deps.manager.searchAll(args.query, limit, opts);
-        return { content: [{ type: "text", text: formatResults(results) }] };
+        // Readable text for the model + the structured envelope (results + blame
+        // notes) for JSON consumers.
+        return {
+          content: [{ type: "text", text: formatResults(env.results, env) }],
+          structuredContent: { ...env },
+        };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text", text: `Search error: ${msg}` }], isError: true };
@@ -108,6 +115,7 @@ function buildServer(deps: McpDeps): Server {
         mmr?: boolean;
         maxChars?: number;
         doc?: boolean;
+        blame?: boolean;
       };
       if (!Array.isArray(args.queries) || args.queries.length === 0) {
         return {
@@ -126,6 +134,7 @@ function buildServer(deps: McpDeps): Server {
         mmr: args.mmr,
         maxChars: args.maxChars,
         doc: args.doc,
+        blame: args.blame,
       };
       try {
         // 'path' anchors the search to the project containing it; neither → all projects.
@@ -136,7 +145,11 @@ function buildServer(deps: McpDeps): Server {
           limit,
           opts,
         );
-        return { content: [{ type: "text", text: formatBatchResults(groups) }] };
+        // Note lines ride on the groups (per-query blame envelope).
+        return {
+          content: [{ type: "text", text: formatBatchResults(groups) }],
+          structuredContent: { groups },
+        };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text", text: `Search error: ${msg}` }], isError: true };

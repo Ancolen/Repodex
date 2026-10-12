@@ -104,7 +104,11 @@ describe("IndexManager public search results — no embedding columns (real fixt
   });
 
   test("text-mode search results carry content but no vector/doc_vector", async () => {
-    const rows = await manager.searchIndex("payfix", "payloadProbe", 5, { mode: "text", rerank: false, mmr: false });
+    const { results: rows } = await manager.searchIndex("payfix", "payloadProbe", 5, {
+      mode: "text",
+      rerank: false,
+      mmr: false,
+    });
     expect(rows.length).toBeGreaterThan(0);
     for (const r of rows) {
       expect("vector" in r).toBe(false);
