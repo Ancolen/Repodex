@@ -215,12 +215,18 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=$BUN_BIN run $REPO_DIR/src/index.ts
+# With daemon.idleTimeoutMinutes > 0 the daemon exits with code 0 (logging
+# "idle shutdown after N minutes") when idle. Restart=on-failure does NOT
+# restart a clean exit, so this policy stays compatible with that idle exit —
+# only real crashes (non-zero exit / signal) are resurrected, and the next
+# cidx command / MCP session auto-starts the daemon again.
 Restart=on-failure
 RestartSec=3
 $home_env
 # Settings can also be overridden via environment variables:
 # Environment=OLLAMA_URL=http://127.0.0.1:11434
 # Environment=OLLAMA_MODEL=$MODEL
+# Environment=DAEMON_IDLE_TIMEOUT_MINUTES=30
 
 [Install]
 WantedBy=default.target
