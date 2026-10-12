@@ -325,7 +325,12 @@ describe("churnCounts — scripted repo", () => {
   });
 
   test("NUL-safe: a path containing a space survives intact", async () => {
-    const c = await churnCounts(REPO, { since: WIN_DATE_A.split("T")[0] });
+    // The window must NOT sit on c1's own calendar day: older git (2.43, the
+    // ubuntu-24.04 CI runner) stops its --since traversal at the boundary and
+    // drops the boundary-day commit, while newer git (2.56) keeps it — pinned
+    // to WIN_DATE_A's day, this assertion would depend on the git version.
+    // One day earlier keeps the claim about the spaced PATH, not the boundary.
+    const c = await churnCounts(REPO, { since: "2026-03-01" });
     expect(c.counts.get("src/with space.ts")).toBe(1);
   });
 
