@@ -15,6 +15,7 @@ import type {
   ApiDiffSide,
   ApiChangeKind,
   ChangeImpactReport,
+  QueryLogStats,
 } from "../core/index-manager";
 import type { DocCheckReport, DocFinding, UndocumentedEntry } from "../core/doccheck";
 import type { OutlineEntry } from "../chunking/chunker";
@@ -586,4 +587,59 @@ export function formatDocCheck(r: DocCheckReport): string {
     lines.push("⚠ the doc set or the table hit its cap — coverage is partial.");
   }
   return lines.join("\n");
+}
+
+// ---------------------------------------------------------- query log (A3)
+
+/**
+ * The query-log analytics sections in display order: Top queries → Zero-hit
+ * queries (the index-gap signal) → Latency → Repeat rate. Exported separately
+ * so `cidx stats` stays composable — a later wave appends table/disk sections
+ * under the same command instead of reimplementing these.
+ */
+export function formatQueryLogSections(s: QueryLogStats): string[] {
+  const sections: string[] = [];
+
+  if (s.topQueries.length > 0) {
+    const lines: string[] = ["Top queries (count · avg results · query):"];
+    for (const t of s.topQueries) {
+      lines.push(`  ${String(t.count).padStart(4)}×  avg ${t.avgResultCount.toFixed(1)} hits  ${t.query}`);
+    }
+    sections.push(lines.join("\n"));
+  }
+
+  if (s.total > 0) {
+    const lines: string[] = ["Zero-hit queries — possible index gaps (bad query or nothing indexed):"];
+    if (s.zeroHit.length === 0) {
+      lines.push("  (none — every recorded query found something)");
+    } else {
+      for (const z of s.zeroHit) {
+        lines.push(`  ${String(z.count).padStart(4)}×  ${z.query}`);
+      }
+    }
+    sections.push(lines.join("\n"));
+    sections.push(`Search latency: avg ${s.avgLatencyMs.toFixed(1)} ms · max ${Math.round(s.maxLatencyMs)} ms`);
+    sections.push(
+      `Repeat rate: ${(s.repeatRate * 100).toFixed(1)}% of searches repeated an identical earlier query (the shared query-embedding cache already absorbs these)`,
+    );
+  }
+
+  return sections;
+}
+
+/**
+ * The full query-log analytics block for `cidx stats`: a scope header (project
+ * or global, honest about the cross-project-search exclusion) followed by the
+ * section formatters above.
+ */
+export function formatQueryLogStats(s: QueryLogStats, opts?: { project?: string | undefined }): string {
+  const scope = opts?.project ? `project '${opts.project}'` : "all projects";
+  const head = `Query log — ${scope} · ${s.total} recorded search(s)`;
+  if (s.total === 0) {
+    const note = opts?.project
+      ? "No searches recorded for this project yet. Cross-project (searchAll) queries are logged without a project and count toward the global stats only."
+      : "No searches recorded yet.";
+    return `${head}\n${note}`;
+  }
+  return [head, "", ...formatQueryLogSections(s)].join("\n");
 }

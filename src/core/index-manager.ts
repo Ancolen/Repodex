@@ -4,6 +4,13 @@ import { readFile } from "node:fs/promises";
 import chokidar, { type FSWatcher } from "chokidar";
 import { CONFIG } from "../config";
 import { type IndexRecord, type Registry } from "./registry";
+import type {
+  QueryLogStats,
+  QueryLogStatsOpts,
+} from "./registry";
+// A3 — search analytics: the query-log surface passes through IndexManager like
+// every other report tool.
+export type { QueryLogStats, QueryLogStatsOpts } from "./registry";
 import type { JobQueue } from "./job-queue";
 import type { Job } from "./types";
 import {
@@ -815,6 +822,7 @@ export class IndexManager {
     limit = 5,
     opts?: SearchOptions,
   ): Promise<ScopedSearchResult[]> {
+    const startedAt = Date.now();
     const rec = this.registry.getIndex(name);
     if (!rec) throw this.indexNotFound(name);
     const mode = opts?.mode ?? "hybrid";
@@ -832,14 +840,21 @@ export class IndexManager {
     const refined = await this.refineAndSlice(rows, query, limit, mode, rerankOn, mmrOn);
     const scoped = refined.map((r) => this.scope(r, name, rec.lastIndexedAt));
     const enriched = await this.enrich(scoped, opts?.contextLines ?? 0);
-    return this.stripEmbeddings(applyCharBudget(enriched, opts?.maxChars));
+    const results = this.stripEmbeddings(applyCharBudget(enriched, opts?.maxChars));
+    this.logQuery(startedAt, name, query, mode, results.length);
+    return results;
   }
 
   /** Search across all projects; results are merged and ranked. */
   async searchAll(query: string, limit = 5, opts?: SearchOptions): Promise<ScopedSearchResult[]> {
+    const startedAt = Date.now();
     const mode = opts?.mode ?? "hybrid";
     const indexes = this.registry.listIndexes();
-    if (indexes.length === 0) return [];
+    if (indexes.length === 0) {
+      // Nothing indexed — still a completed search (a 0-hit one), still one row.
+      this.logQuery(startedAt, null, query, mode, 0);
+      return [];
+    }
     const rerankOn = this.wantRerank(opts);
     const mmrOn = this.wantMMR(opts);
     const fetchLimit = rerankOn || mmrOn ? Math.max(limit, CONFIG.RERANK_TOP_K, CONFIG.MMR_TOP_K) : limit;
@@ -864,7 +879,9 @@ export class IndexManager {
     const ranked = this.rankCombined(perTable.flat(), mode);
     const refined = await this.refineAndSlice(ranked, query, limit, mode, rerankOn, mmrOn);
     const enriched = await this.enrich(refined, opts?.contextLines ?? 0);
-    return this.stripEmbeddings(applyCharBudget(enriched, opts?.maxChars));
+    const results = this.stripEmbeddings(applyCharBudget(enriched, opts?.maxChars));
+    this.logQuery(startedAt, null, query, mode, results.length);
+    return results;
   }
 
   /**
@@ -889,6 +906,39 @@ export class IndexManager {
         return { query, results };
       }),
     );
+  }
+
+  /**
+   * Query log (proposal A3): exactly ONE row per completed search call, written
+   * on the exit path of `searchIndex`/`searchAll`. `searchBatch`/`getContextPack`
+   * funnel through those two, so batch and pack queries log per query without a
+   * second write (no double-logging).
+   *
+   * Fire-and-forget by contract: `Registry.recordQueryLog` never throws (a log
+   * failure is reported to stderr and can never fail the search). The query is
+   * logged trimmed — whitespace-only variants would otherwise split one logical
+   * query into several rows in the stats (`searchBatch` already dedupes on
+   * trim). Cross-project searches log a null project and count toward the
+   * global stats only.
+   */
+  private logQuery(startedAt: number, project: string | null, query: string, mode: string, resultCount: number): void {
+    this.registry.recordQueryLog({
+      ts: startedAt,
+      project,
+      query: query.trim(),
+      mode,
+      resultCount,
+      latencyMs: Date.now() - startedAt,
+    });
+  }
+
+  /**
+   * Aggregated search analytics (`cidx stats`, proposal A3) — a pass-through to
+   * `Registry.queryLogStats` over the local query log (nothing leaves
+   * `~/.cidx`).
+   */
+  queryLogStats(opts?: QueryLogStatsOpts): QueryLogStats {
+    return this.registry.queryLogStats(opts);
   }
 
   // ------------------------------------------------------------- context pack
