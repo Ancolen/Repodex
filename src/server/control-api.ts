@@ -6,7 +6,8 @@ import { CONFIG, CONFIG_SOURCE } from "../config";
 import { hostGuard } from "./host-guard";
 import { fileOutline } from "../chunking/chunker";
 import { measureDiskUsage, runDoctor, type DoctorPorts } from "../core/doctor";
-import { countTableRows, listTables, tableColumns } from "../services/db";
+import { collectStats, compactBusyMessage, jobIsActive, type StatsPorts } from "../core/stats";
+import { countTableRows, listTables, tableColumns, tableStats } from "../services/db";
 import { probeOllama, resolveEmbedBackend } from "../services/embed";
 import { probeLlamaServer } from "../services/llamacpp";
 import type { JobQueue } from "../core/job-queue";
@@ -127,6 +128,23 @@ function doctorPorts(deps: ControlDeps): DoctorPorts {
       rerankEnabled: CONFIG.RERANK_ENABLED,
       rerankModel: CONFIG.RERANK_MODEL,
     },
+  };
+}
+
+/**
+ * Gathers the live state `collectStats` reads (proposal O3, the doctor's ports
+ * pattern): registry rows + job state through the manager, the file/embedding
+ * cache counts through its read-only pass-throughs, the data-root disk walk
+ * reused 1:1 from the doctor, and the native per-table statistics.
+ */
+function statsPorts(deps: ControlDeps): StatsPorts {
+  return {
+    indexes: () => deps.manager.listIndexes(),
+    activeJob: (name) => deps.manager.activeJob(name),
+    fileCacheCount: (indexName) => deps.manager.fileCacheCount(indexName),
+    embeddingCacheStats: () => deps.manager.embeddingCacheStats(),
+    diskUsage: () => measureDiskUsage(CONFIG.ROOT_DIR),
+    tableStats: (table) => tableStats(table),
   };
 }
 
@@ -807,6 +825,67 @@ export function startControlApi(
     if (Number.isFinite(zero) && zero > 0) opts.zeroHitTop = Math.floor(zero);
     try {
       res.json(Object.keys(opts).length > 0 ? deps.manager.queryLogStats(opts) : deps.manager.queryLogStats());
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ----------------------------------------- table stats / compact (O3)
+
+  /**
+   * Table/disk stats for `cidx stats` (proposal O3): per-project registry row
+   * count, file-cache count, measured table size, ANN/FTS index presence +
+   * native coverage, lastIndexedAt and the pending job — plus the global data
+   * root (total, per-table sizes, meta.db, embedding cache). Pure read; every
+   * unknown stays null with a note, never an invented zero. Query param
+   * `project` (optional; an unknown name is a self-healing 404) narrows the
+   * per-project list — the global picture is always included.
+   */
+  app.get("/stats", async (req, res) => {
+    const opts: { project?: string } = {};
+    const project = req.query.project;
+    if (typeof project === "string" && project.length > 0) {
+      if (!deps.manager.listIndexes().some((r) => r.name === project)) {
+        res
+          .status(404)
+          .json({ error: indexNotFoundMessage(project, deps.manager.listIndexes().map((r) => r.name)) });
+        return;
+      }
+      opts.project = project;
+    }
+    try {
+      res.json(await collectStats(statsPorts(deps), opts));
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /**
+   * Table maintenance (O3): compact + optimize a project's table with the
+   * NATIVE LanceDB `optimize` inside the per-table write lock. Refused with a
+   * 409 while a queued/running index/sync/migrate job holds the table (the
+   * rule `IndexManager.compactIndex` re-checks — the status code is the
+   * handler's job); refused with a 404 for unknown projects.
+   */
+  app.post("/compact", async (req, res) => {
+    const { name } = (req.body ?? {}) as { name?: string };
+    if (!name) {
+      res.status(400).json({ error: "'name' is required" });
+      return;
+    }
+    if (!deps.manager.getIndex(name)) {
+      res
+        .status(404)
+        .json({ error: indexNotFoundMessage(name, deps.manager.listIndexes().map((r) => r.name)) });
+      return;
+    }
+    const job = deps.manager.activeJob(name);
+    if (jobIsActive(job)) {
+      res.status(409).json({ error: compactBusyMessage(name, { type: job.type, status: job.status }) });
+      return;
+    }
+    try {
+      res.json(await deps.manager.compactIndex(name));
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }

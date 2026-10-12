@@ -10,7 +10,8 @@ import type {
 } from "./registry";
 // A3 — search analytics: the query-log surface passes through IndexManager like
 // every other report tool.
-export type { QueryLogStats, QueryLogStatsOpts } from "./registry";
+import type { EmbedCacheStats } from "./registry";
+export type { QueryLogStats, QueryLogStatsOpts, EmbedCacheStats } from "./registry";
 import type { JobQueue } from "./job-queue";
 import type { Job } from "./types";
 import { INDEX_JOB_TYPE, MIGRATE_JOB_TYPE, type MigrateJobPayload } from "./types";
@@ -24,6 +25,7 @@ import {
 import { startWatcher } from "../services/watcher";
 import {
   countTableRows,
+  compactTable,
   dropTable,
   searchTable,
   searchTableText,
@@ -35,6 +37,7 @@ import {
   tableColumns,
   ensureFtsIndex,
   buildWhere,
+  type CompactResult,
   type SearchResult,
   type SearchFilters,
 } from "../services/db";
@@ -81,6 +84,8 @@ export type { CommitHit, CommitQueryOpts } from "./commits";
 import { computeCoupling } from "./coupling";
 import type { CouplingReport } from "./coupling";
 export type { CouplingReport, CouplingBand, FileCoupling } from "./coupling";
+// Proposal O3 — table maintenance: the shared busy-table refusal wording.
+import { compactBusyMessage } from "./stats";
 // ---- public API diff (proposal C2) ----
 export type {
   ApiSymbol,
@@ -890,6 +895,24 @@ export class IndexManager {
     return this.registry.listIndexes();
   }
 
+  /**
+   * Table maintenance (O3): compact + optimize the project's table with the
+   * NATIVE LanceDB `optimize` (fragment merge + old-version prune + index
+   * refresh) — a native no-op on an already-compact table. Runs inside the
+   * per-table write lock (`compactTable`); refuses while a queued/running
+   * index/sync/migrate job holds the table, the same busy rule the watcher's
+   * per-file deferral enforces — compaction must not interleave with writes.
+   */
+  async compactIndex(name: string): Promise<CompactResult> {
+    const rec = this.registry.getIndex(name);
+    if (!rec) throw this.indexNotFound(name);
+    if (this.isIndexing(name)) {
+      const job = this.activeJob(name);
+      throw new Error(compactBusyMessage(name, { type: job?.type ?? "index", status: job?.status ?? "running" }));
+    }
+    return await compactTable(tableNameFor(rec));
+  }
+
   getIndex(name: string): IndexRecord | null {
     return this.registry.getIndex(name);
   }
@@ -1098,6 +1121,18 @@ export class IndexManager {
    */
   queryLogStats(opts?: QueryLogStatsOpts): QueryLogStats {
     return this.registry.queryLogStats(opts);
+  }
+
+  // ------------------------------------------------------- table stats (O3)
+
+  /** Rows of a project's file cache (or every project's) — read-only pass-through. */
+  fileCacheCount(indexName?: string): number {
+    return this.registry.countFileCache(indexName);
+  }
+
+  /** Embedding-cache rows + estimated size — read-only pass-through. */
+  embeddingCacheStats(): EmbedCacheStats {
+    return this.registry.embeddingCacheStats();
   }
 
   // ------------------------------------------------------------- context pack

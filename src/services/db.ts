@@ -673,6 +673,147 @@ export async function countTableRows(table: string): Promise<number> {
   return await t.countRows();
 }
 
+// ------------------------------------------------ table stats / compact (O3)
+
+/** One index on a table — a structural subset of LanceDB's `IndexConfig` plus
+ * the cheap native per-index coverage stats (rows indexed / not yet indexed).
+ * LanceDB tracks no "built at" for indices, so stats report presence and
+ * coverage only — nothing invented. */
+export interface TableIndexStat {
+  /** The column(s) the index covers (currently always one: `vector`, `content`, ...). */
+  columns: string[];
+  /** The native index-type string (e.g. `IVF_PQ`, `FTS`). */
+  indexType: string;
+  /** Rows the index covers — absent when the native per-index stats are unavailable. */
+  indexedRows?: number | undefined;
+  /** Rows not yet covered (an `optimize`/reindex would add them) — absent when unknown. */
+  unindexedRows?: number | undefined;
+}
+
+/** Native table statistics with honest unknowns: every field that could not be
+ * read stays `null` and gets one human line in `unknowns`. */
+export interface TableStatsReport {
+  numRows: number | null;
+  /** Total fragments (data files) of the table. */
+  numFragments: number | null;
+  /** Uncompacted fragments — the signal that `compact` would merge something. */
+  numSmallFragments: number | null;
+  indices: TableIndexStat[];
+  /** What could not be read, one line each (never thrown away silently). */
+  unknowns: string[];
+}
+
+/** Formats an unknown read failure as one short honest line. */
+function readUnknown(what: string, err: unknown): string {
+  return `${what} unavailable: ${err instanceof Error ? err.message : String(err)}`;
+}
+
+/**
+ * Native read-only statistics of one table (proposal O3): row count, fragment
+ * counts (the compaction signal), and ANN/FTS index presence + coverage. All
+ * reads go through the daemon's own LanceDB connection; nothing is written.
+ *
+ * @returns null when the table does not exist (an honest "absent", not zeros).
+ */
+export async function tableStats(table: string): Promise<TableStatsReport | null> {
+  const conn = getDB();
+  const names = await conn.tableNames();
+  if (!names.includes(table)) return null;
+  const t = await conn.openTable(table);
+
+  const report: TableStatsReport = {
+    numRows: null,
+    numFragments: null,
+    numSmallFragments: null,
+    indices: [],
+    unknowns: [],
+  };
+
+  try {
+    const s = await t.stats();
+    report.numRows = s.numRows;
+    report.numFragments = s.fragmentStats.numFragments;
+    report.numSmallFragments = s.fragmentStats.numSmallFragments;
+  } catch (err) {
+    report.unknowns.push(readUnknown("table stats", err));
+  }
+
+  try {
+    const indices = await t.listIndices();
+    for (const ix of indices) {
+      const stat: TableIndexStat = { columns: [...ix.columns], indexType: ix.indexType };
+      try {
+        const is = await t.indexStats(ix.name);
+        if (is) {
+          if (typeof is.numIndexedRows === "number") stat.indexedRows = is.numIndexedRows;
+          if (typeof is.numUnindexedRows === "number") stat.unindexedRows = is.numUnindexedRows;
+        }
+      } catch (err) {
+        report.unknowns.push(readUnknown(`index stats for '${ix.name}'`, err));
+      }
+      report.indices.push(stat);
+    }
+  } catch (err) {
+    report.unknowns.push(readUnknown("index list", err));
+  }
+
+  return report;
+}
+
+/** Native `optimize` result (structural copy of LanceDB's `OptimizeStats` —
+ * the public API must not leak vendor types). */
+export interface CompactResult {
+  /** The table that was optimized. */
+  table: string;
+  compaction: {
+    /** Fragments removed / added by the merge. */
+    fragmentsRemoved: number;
+    fragmentsAdded: number;
+    filesRemoved: number;
+    filesAdded: number;
+  };
+  /** Old-version cleanup (`VACUUM` semantics). */
+  prune: {
+    bytesRemoved: number;
+    oldVersionsRemoved: number;
+  };
+}
+
+/**
+ * Compacts a table with LanceDB's NATIVE `optimize` (proposal O3): merges
+ * small fragments, prunes old dataset versions (>7 days by default) and adds
+ * new data to existing indices — `VACUUM` semantics, never a hand-rolled
+ * rewriter. Runs inside the per-table write lock, exactly like every other
+ * table write, so a compaction cannot interleave with an index job's writes.
+ *
+ * On an already-compact table it is a native no-op (zero stats), which the
+ * callers report as "nothing to do" rather than an error.
+ */
+export async function compactTable(table: string): Promise<CompactResult> {
+  return await lockTable(table, async () => {
+    const conn = getDB();
+    const names = await conn.tableNames();
+    if (!names.includes(table)) {
+      throw new Error(`Table '${table}' does not exist on disk — index the project first.`);
+    }
+    const t = await conn.openTable(table);
+    const s = await t.optimize();
+    return {
+      table,
+      compaction: {
+        fragmentsRemoved: s.compaction.fragmentsRemoved,
+        fragmentsAdded: s.compaction.fragmentsAdded,
+        filesRemoved: s.compaction.filesRemoved,
+        filesAdded: s.compaction.filesAdded,
+      },
+      prune: {
+        bytesRemoved: s.prune.bytesRemoved,
+        oldVersionsRemoved: s.prune.oldVersionsRemoved,
+      },
+    };
+  });
+}
+
 /**
  * If the table exceeds `minRows` rows and does not yet have a vector index,
  * builds an ANN index on the given vector column (default `vector`; pass
