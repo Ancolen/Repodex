@@ -3,7 +3,7 @@
  * Sets up a temporary directory tree; verifies that collectFiles collects allowed extensions
  * and respects ignoredDirs + .gitignore + .cidxignore rules.
  */
-import { test, expect, describe, beforeAll, afterAll } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, spyOn } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -99,6 +99,59 @@ describe("collectFiles", () => {
     // Non-existent root -> empty list (does not throw).
     const files = await collectFiles(join(root, "no-such-directory"), ig);
     expect(files).toEqual([]);
+  });
+});
+
+describe("collectFiles — maxFileSizeBytes guard (oversized-file filter)", () => {
+  let sroot: string;
+  const BIG = "x".repeat(240); // 240 bytes
+  const EXACT = `// ${"y".repeat(102)}\n`; // exactly 120 bytes
+  const SMALL = "export const a = 1;"; // 19 bytes
+
+  beforeAll(() => {
+    sroot = mkdtempSync(join(tmpdir(), "mcp-idx-size-"));
+    writeFileSync(join(sroot, "small.ts"), SMALL);
+    writeFileSync(join(sroot, "exact.ts"), EXACT);
+    writeFileSync(join(sroot, "big.ts"), BIG);
+  });
+  afterAll(() => rmSync(sroot, { recursive: true, force: true }));
+
+  test("no limit (undefined / 0) collects everything", async () => {
+    const ig = await buildIgnore(sroot);
+    for (const limit of [undefined, 0]) {
+      const rel = (await collectFiles(sroot, ig, null, null, limit)).map((f) => f.slice(sroot.length + 1)).sort();
+      expect(rel).toEqual(["big.ts", "exact.ts", "small.ts"]);
+    }
+  });
+
+  test("files strictly larger than the limit are absent", async () => {
+    const ig = await buildIgnore(sroot);
+    const rel = (await collectFiles(sroot, ig, null, null, 120)).map((f) => f.slice(sroot.length + 1)).sort();
+    // 240 > 120 excluded; 120 == limit kept (the rule is strictly-larger).
+    expect(rel).toEqual(["exact.ts", "small.ts"]);
+  });
+
+  test("a tight limit keeps only the small file", async () => {
+    const ig = await buildIgnore(sroot);
+    const rel = (await collectFiles(sroot, ig, null, null, 20)).map((f) => f.slice(sroot.length + 1));
+    expect(rel).toEqual(["small.ts"]);
+  });
+});
+
+describe("indexFile — maxFileSizeBytes guard", () => {
+  test("oversized file is skipped before chunking, flagged and logged", async () => {
+    const target = { indexName: "size-guard-test", tableName: "idx_size_guard_test", baseDir: root };
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const r = await indexFile(target, join(root, "src/app.ts"), undefined, undefined, undefined, null, 10);
+      expect(r).toEqual({ chunks: 0, dim: null, skippedOversized: true });
+      expect(errSpy).toHaveBeenCalled();
+      const log = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(log).toContain("exceeds maxFileSizeBytes");
+      expect(log).toContain("src/app.ts");
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 });
 

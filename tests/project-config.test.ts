@@ -3,7 +3,7 @@
  * Pure logic: parse/validate/read + the language allowlist + the extra ignore
  * patterns and the collectFiles language filter (fs fixture, no Ollama/LanceDB).
  */
-import { test, expect, describe, beforeAll, afterAll } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, spyOn } from "bun:test";
 import { join } from "node:path";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -45,6 +45,36 @@ describe("parseProjectConfig — validation", () => {
 
   test("an object with no valid fields is undefined", () => {
     expect(parseProjectConfig({ embedModel: 3 }, ".cidx.json")).toBeUndefined();
+  });
+});
+
+describe("parseProjectConfig — maxFileSizeBytes validation", () => {
+  test("a positive integer is kept", () => {
+    expect(parseProjectConfig({ maxFileSizeBytes: 1048576 }, ".cidx.json")).toEqual({
+      maxFileSizeBytes: 1048576,
+    });
+  });
+
+  test("invalid values are dropped with a warning", () => {
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // 0 turns the guard off — but the per-project override must be positive,
+      // so 0 is rejected (the global default 0 is the way to disable).
+      for (const bad of [0, -5, 1.5, "1024", Number.NaN, Number.POSITIVE_INFINITY, true, null]) {
+        expect(parseProjectConfig({ maxFileSizeBytes: bad }, ".cidx.json")).toBeUndefined();
+      }
+      expect(errSpy).toHaveBeenCalled();
+      const warned = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(warned).toContain("'maxFileSizeBytes' must be a positive integer");
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  test("a valid maxFileSizeBytes is kept alongside other valid fields", () => {
+    expect(
+      parseProjectConfig({ maxFileSizeBytes: 2048, languages: ["python"] }, ".cidx.json"),
+    ).toEqual({ maxFileSizeBytes: 2048, languages: ["python"] });
   });
 });
 

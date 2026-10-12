@@ -2,7 +2,7 @@ import { stat, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import ignore, { type Ignore } from "ignore";
 import { CONFIG } from "../config";
-import { readProjectConfig, extToLanguage, languageAllowSet } from "../core/project-config";
+import { readProjectConfig, extToLanguage, languageAllowSet, type ProjectConfig } from "../core/project-config";
 import { resolveFraming, frameDoc } from "../core/framing";
 import { chunkCode } from "../chunking/chunker";
 import { extractIdTerms } from "../core/idterms";
@@ -47,12 +47,20 @@ export interface IndexResult {
   dim: number | null;
   /** Number of files cleaned up because they were deleted from disk during indexing. */
   deleted: number;
+  /**
+   * Number of files skipped because they exceed the effective
+   * `maxFileSizeBytes` limit (never silent — surfaced on the job result and
+   * the ready log line).
+   */
+  skippedOversized: number;
 }
 
 /** Single-file indexing result (chunk count + observed embedding dimension). */
 export interface FileIndexResult {
   chunks: number;
   dim: number | null;
+  /** True only when the file was skipped by the `maxFileSizeBytes` guard. */
+  skippedOversized?: boolean | undefined;
 }
 
 function isAllowed(filePath: string): boolean {
@@ -64,6 +72,16 @@ export function isPathIgnored(ig: Ignore, baseDir: string, fullPath: string): bo
   const rel = path.relative(baseDir, fullPath);
   if (!rel || rel.startsWith("..")) return false;
   return ig.ignores(rel);
+}
+
+/**
+ * The effective `maxFileSizeBytes` limit for a project (the oversized-file
+ * guard): the `.cidx.json` value overrides the global `indexing.maxFileSizeBytes`
+ * default. Anything <= 0 means the guard is OFF. (The `.cidx.json` value is
+ * validated to a positive integer at parse time; the global default is 0.)
+ */
+export function effectiveMaxFileSizeBytes(pcfg?: ProjectConfig | undefined): number {
+  return pcfg?.maxFileSizeBytes ?? CONFIG.MAX_FILE_SIZE_BYTES;
 }
 
 /** Builds an ignore matcher from .gitignore + .cidxignore + global ignores (+ optional extra patterns from `.cidx.json`). */
@@ -94,14 +112,20 @@ export async function buildIgnore(baseDir: string, extra?: string[] | undefined)
  * Recursively scans a directory and returns the list of files to index.
  * `langSet` (from a `.cidx.json` `languages` allowlist) keeps only files whose
  * extension produces a language label inside the set — unlabeled extensions are
- * dropped while a filter is active. Filtered-out files are absent from the
- * returned list, so the deleted-file cleanup prunes them on the next sync.
+ * dropped while a filter is active. `maxFileSizeBytes` (the oversized-file
+ * guard, `effectiveMaxFileSizeBytes`) skips files strictly larger than that
+ * many bytes when > 0. Filtered-out files are absent from the returned list,
+ * so the deleted-file cleanup prunes them on the next sync — including a file
+ * that GREW past the limit after being indexed once. A file whose stat fails
+ * is kept (never treated as oversized): the per-file index step reports the
+ * real failure instead of silently deleting its records.
  */
 export async function collectFiles(
   baseDir: string,
   ig: Ignore,
   allowSet?: Set<string> | null,
   langSet?: Set<string> | null,
+  maxFileSizeBytes?: number | undefined,
 ): Promise<string[]> {
   const out: string[] = [];
   async function walk(dir: string): Promise<void> {
@@ -123,6 +147,16 @@ export async function collectFiles(
         if (langSet) {
           const lang = extToLanguage(path.extname(full));
           if (!lang || !langSet.has(lang)) continue;
+        }
+        // Oversized-file guard (active only when a positive limit is set).
+        if (maxFileSizeBytes !== undefined && maxFileSizeBytes > 0) {
+          try {
+            const fst = await stat(full);
+            if (fst.size > maxFileSizeBytes) continue;
+          } catch {
+            // Unreadable/unstat-able file: keep it — indexFile reports the
+            // failure, and no record is silently pruned on a bad stat.
+          }
         }
         out.push(full);
       }
@@ -192,6 +226,13 @@ async function embedTexts(
  * Embeddings are read from the content-hash cache; missing ones are fetched from
  * Ollama in batches and written to the cache.
  *
+ * `maxFileSizeBytes` (the effective project limit, see
+ * `effectiveMaxFileSizeBytes`): when > 0 and the file exceeds it, the file is
+ * skipped BEFORE chunking/embedding — the old records (if any) stay until the
+ * next sync, whose deleted-file cleanup prunes the now-oversized file (it is
+ * absent from `collectFiles` output). This is the watcher-side half of the
+ * guard: the full index path already filters in `collectFiles`.
+ *
  * Each chunk's docstring (`chunk.doc`, see `chunking/docstring.ts`) is embedded
  * into a separate `doc_vector` (same model, same dimension), so symbol docs form
  * their own retrieval leg. Compound identifiers are split into subparts into
@@ -211,12 +252,21 @@ export async function indexFile(
   signal?: AbortSignal,
   embedModel?: string | undefined,
   framing?: string | null | undefined,
+  maxFileSizeBytes?: number | undefined,
 ): Promise<FileIndexResult> {
   if (!isAllowed(filePath)) return { chunks: 0, dim: null };
   if (signal?.aborted) return { chunks: 0, dim: null };
 
   const st = await stat(filePath);
   if (!st.isFile()) return { chunks: 0, dim: null };
+
+  // Oversized-file guard (the same rule collectFiles applies on full indexes).
+  if (maxFileSizeBytes !== undefined && maxFileSizeBytes > 0 && st.size > maxFileSizeBytes) {
+    console.error(
+      `[indexer] '${target.indexName}' skipping '${filePath}': ${st.size} bytes exceeds maxFileSizeBytes (${maxFileSizeBytes}).`,
+    );
+    return { chunks: 0, dim: null, skippedOversized: true };
+  }
 
   const mtime = st.mtimeMs;
   if (registry && registry.getFileMtime(target.indexName, filePath) === mtime) {
@@ -340,9 +390,9 @@ export async function indexDirectory(
   }
 
   // Per-project configuration (.cidx.json): extra ignore patterns, language
-  // allowlist, embedding model + task framing. Read fresh on every job, so a
-  // reindex picks up edits; filtered-out files are pruned by the deleted-file
-  // cleanup.
+  // allowlist, embedding model + task framing, oversized-file limit. Read fresh
+  // on every job, so a reindex picks up edits; filtered-out files are pruned by
+  // the deleted-file cleanup.
   const pcfg = readProjectConfig(target.baseDir);
   if (pcfg?.embedModel && pcfg.embedModel !== CONFIG.OLLAMA_MODEL) {
     console.error(`[indexer] '${target.indexName}' using per-project embedding model: ${pcfg.embedModel}`);
@@ -360,12 +410,17 @@ export async function indexDirectory(
     console.error(`[indexer] '${target.indexName}' embedding framing: ${framing}`);
   }
 
+  const maxFileBytes = effectiveMaxFileSizeBytes(pcfg);
+  if (maxFileBytes > 0) {
+    console.error(`[indexer] '${target.indexName}' max file size filter: ${maxFileBytes} bytes.`);
+  }
+
   const ig = await buildIgnore(target.baseDir, pcfg?.ignore);
   const allowSet = CONFIG.GIT_TRACKED_ONLY ? await gitTrackedFiles(target.baseDir) : null;
   if (CONFIG.GIT_TRACKED_ONLY && allowSet) {
     console.error(`[indexer] '${target.indexName}' git-tracked mode: ${allowSet.size} tracked files.`);
   }
-  const files = await collectFiles(target.baseDir, ig, allowSet, langSet);
+  const files = await collectFiles(target.baseDir, ig, allowSet, langSet, maxFileBytes);
   const total = files.length;
 
   // --- Clean up deleted/ignored files (incremental sync) ---
@@ -391,12 +446,14 @@ export async function indexDirectory(
   let processed = 0;
   let chunks = 0;
   let dim: number | null = null;
+  let skippedOversized = 0;
   for (const file of files) {
     if (opts.signal?.aborted) break;
     try {
-      const r = await indexFile(target, file, opts.registry, opts.signal, pcfg?.embedModel, framing);
+      const r = await indexFile(target, file, opts.registry, opts.signal, pcfg?.embedModel, framing, maxFileBytes);
       chunks += r.chunks;
       if (dim === null && r.dim !== null) dim = r.dim;
+      if (r.skippedOversized) skippedOversized++;
     } catch (err) {
       console.error(`[indexer] failed to index '${file}':`, err);
     }
@@ -430,7 +487,7 @@ export async function indexDirectory(
     }
   }
 
-  return { files: processed, chunks, dim, deleted };
+  return { files: processed, chunks, dim, deleted, skippedOversized };
 }
 
 // ------------------------------------------------- O2: zero-downtime migration

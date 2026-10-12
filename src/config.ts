@@ -69,6 +69,17 @@ export interface IndexerConfig {
     maxChunkTokens: number;
     allowedExtensions: string[];
     ignoredDirs: string[];
+    /**
+     * Files strictly larger than this many bytes are skipped (proposal:
+     * `maxFileSizeBytes` guard) — a persistent guard so oversized data files
+     * don't depend solely on `.cidxignore`. 0 (the default) disables the
+     * filter; any value <= 0 reads as off. A per-project `.cidx.json`
+     * `maxFileSizeBytes` (positive integer) overrides this globally. Filtered
+     * files are absent from `collectFiles` output, so the deleted-file cleanup
+     * prunes them on the next sync/reindex (the `.cidx.json` `languages`
+     * semantics).
+     */
+    maxFileSizeBytes: number;
     /** An ANN vector index is built when a table reaches this row count. */
     vectorIndexThreshold: number;
     /** If true, .gitignore rules are also added to the ignore matcher. */
@@ -221,6 +232,7 @@ const DEFAULTS: IndexerConfig = {
       "out", ".cache", "target", ".claude", ".cidx",
       ".godot",
     ],
+    maxFileSizeBytes: 0,
     vectorIndexThreshold: 50000,
     respectGitignore: true,
     gitTrackedOnly: false,
@@ -279,6 +291,7 @@ indexing:
 ${DEFAULTS.indexing.allowedExtensions.map((e) => `    - "${e}"`).join("\n")}
   ignoredDirs:
 ${DEFAULTS.indexing.ignoredDirs.map((d) => `    - "${d}"`).join("\n")}
+  maxFileSizeBytes: ${DEFAULTS.indexing.maxFileSizeBytes}             # skip files larger than this many bytes (an oversized-data-file guard); 0 = off; a per-project .cidx.json maxFileSizeBytes overrides it
   vectorIndexThreshold: ${DEFAULTS.indexing.vectorIndexThreshold}   # an ANN vector index is built when a table exceeds this chunk count
   respectGitignore: ${DEFAULTS.indexing.respectGitignore}           # also obey .gitignore rules
   gitTrackedOnly: ${DEFAULTS.indexing.gitTrackedOnly}            # index only git-tracked files (in git repos)
@@ -449,6 +462,11 @@ export const RESOLVED: IndexerConfig = {
       num(process.env.MAX_CHUNK_TOKENS) ?? y.indexing?.maxChunkTokens ?? DEFAULTS.indexing.maxChunkTokens,
     allowedExtensions: strArray(y.indexing?.allowedExtensions) ?? DEFAULTS.indexing.allowedExtensions,
     ignoredDirs: strArray(y.indexing?.ignoredDirs) ?? DEFAULTS.indexing.ignoredDirs,
+    // Passed through as given (like daemon.idleTimeoutMinutes): the consumers
+    // (collectFiles / indexFile) treat anything <= 0 as "off", so `-1` reads as
+    // the same opt-out as 0 and a fractional value simply acts as its byte cap.
+    maxFileSizeBytes:
+      num(process.env.MAX_FILE_SIZE_BYTES) ?? y.indexing?.maxFileSizeBytes ?? DEFAULTS.indexing.maxFileSizeBytes,
     vectorIndexThreshold:
       num(process.env.VECTOR_INDEX_THRESHOLD) ??
       y.indexing?.vectorIndexThreshold ??
@@ -567,6 +585,7 @@ export const CONFIG = {
 
   ALLOWED_EXTENSIONS: RESOLVED.indexing.allowedExtensions,
   GLOBAL_IGNORED_DIRS: RESOLVED.indexing.ignoredDirs,
+  MAX_FILE_SIZE_BYTES: RESOLVED.indexing.maxFileSizeBytes,
   MAX_CHUNK_SIZE: RESOLVED.indexing.maxChunkSize,
   OVERLAP_SIZE: RESOLVED.indexing.overlapSize,
   MAX_CHUNK_TOKENS: RESOLVED.indexing.maxChunkTokens,
