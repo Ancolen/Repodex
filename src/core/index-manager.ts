@@ -3,13 +3,16 @@ import { statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import chokidar, { type FSWatcher } from "chokidar";
 import { CONFIG } from "../config";
-import { type IndexRecord, type Registry } from "./registry";
+import { deriveTableName, tableNameFor, type IndexRecord, type Registry } from "./registry";
 import type { JobQueue } from "./job-queue";
 import type { Job } from "./types";
+import { INDEX_JOB_TYPE, MIGRATE_JOB_TYPE, type MigrateJobPayload } from "./types";
 import {
   indexDirectory,
+  migrateTable,
   type IndexResult,
   type IndexTarget,
+  type MigrateResult,
 } from "../services/indexer";
 import { startWatcher } from "../services/watcher";
 import {
@@ -105,7 +108,8 @@ import {
   isEntryPointFile,
 } from "./filekinds";
 
-const INDEX_JOB = "index";
+const INDEX_JOB = INDEX_JOB_TYPE;
+const MIGRATE_JOB = MIGRATE_JOB_TYPE;
 
 export interface IndexJobPayload {
   target: IndexTarget;
@@ -374,15 +378,6 @@ export interface ApiDiffResult {
   invalidRef?: "base" | "head";
 }
 
-/** Converts a project name to a safe LanceDB table name. */
-function sanitize(name: string): string {
-  const s = name
-    .toLowerCase()
-    .replace(/[^a-z0-9_]+/g, "_")
-    .replace(/^_+|_+$/g, "");
-  return s.length > 0 ? s : "idx";
-}
-
 /**
  * Closest indexed project name for a mistyped guess: case-insensitive substring
  * either way, else a shared-prefix ratio. Loose on purpose — this is an
@@ -617,6 +612,11 @@ export class IndexManager {
         this.runIndexJob(ctx.payload, ctx),
       );
     }
+    if (!this.jobQueue.hasHandler(MIGRATE_JOB)) {
+      this.jobQueue.registerHandler<MigrateJobPayload, MigrateResult>(MIGRATE_JOB, (ctx) =>
+        this.runMigrateJob(ctx.payload, ctx),
+      );
+    }
     // Clean up the index↔job mapping when finished.
     this.jobQueue.on("finished", (job: { id: string }) => {
       for (const [name, id] of this.jobByIndex) {
@@ -678,7 +678,7 @@ export class IndexManager {
     this.registry.setIndexStatus(name, "indexing");
     const target: IndexTarget = {
       indexName: rec.name,
-      tableName: rec.tableName,
+      tableName: tableNameFor(rec),
       baseDir: rec.path,
     };
     this.enqueueIndex(target, true);
@@ -700,20 +700,25 @@ export class IndexManager {
     if (rec.status === "indexing") return rec; // already in progress
 
     // A changed per-project embedding model (.cidx.json) can't be applied
-    // incrementally — vectors from two models can never share a table. Escalate
-    // to a full reindex, which rewrites every file with the new model.
+    // incrementally — vectors from two models can never share a table. Instead
+    // of a full reindex ON THE LIVE TABLE (which mixes stale and fresh vectors
+    // and leaves the project half-migrated on failure), O2 escalates to the
+    // zero-downtime migration: every vector is rebuilt in a shadow table with
+    // the new model while search keeps serving the current one, and the
+    // registry only flips once the shadow is complete.
     const pcfgModel = readProjectConfig(rec.path)?.embedModel;
     if (pcfgModel && rec.embedModel && pcfgModel !== rec.embedModel) {
       console.error(
-        `[manager] '${name}' .cidx.json embedModel changed (${rec.embedModel} → ${pcfgModel}); reindexing from scratch.`,
+        `[manager] '${name}' .cidx.json embedModel changed (${rec.embedModel} → ${pcfgModel}); ` +
+          `migrating to a shadow table (search keeps serving the current one until the swap).`,
       );
-      return this.reindex(name);
+      return this.startMigration(rec, pcfgModel);
     }
 
     this.registry.setIndexStatus(name, "indexing");
     const target: IndexTarget = {
       indexName: rec.name,
-      tableName: rec.tableName,
+      tableName: tableNameFor(rec),
       baseDir: rec.path,
     };
     this.enqueueIndex(target, false);
@@ -2354,10 +2359,25 @@ export class IndexManager {
     for (const rec of this.registry.listIndexes()) {
       const target: IndexTarget = {
         indexName: rec.name,
-        tableName: rec.tableName,
+        tableName: tableNameFor(rec),
         baseDir: rec.path,
       };
       this.ensureWatcher(target);
+      // A per-project model change must NOT be continued by an incremental sync
+      // at boot: the index job would write new-model vectors into the old
+      // table, and two models never share a table (invariant). Escalate to the
+      // O2 migration instead — the same rule `syncIndex` applies live. This
+      // covers both a migrate job that was interrupted mid-build (the stale
+      // shadow is pre-cleaned) and a .cidx.json edited while the daemon was down.
+      const pcfgModel = readProjectConfig(rec.path)?.embedModel;
+      const modelChanged = !!(pcfgModel && rec.embedModel && pcfgModel !== rec.embedModel);
+      if (modelChanged && (rec.status === "indexing" || rec.status === "ready")) {
+        console.error(
+          `[manager] '${rec.name}' .cidx.json embedModel changed (${rec.embedModel} → ${pcfgModel}); resuming as a migration.`,
+        );
+        this.startMigration(rec, pcfgModel);
+        continue;
+      }
       // Both half-finished ('indexing') and 'ready' projects are incrementally
       // synced: files added/changed/deleted while the daemon was down are caught
       // (thanks to the mtime cache + deleted-file cleanup).
@@ -2432,6 +2452,96 @@ export class IndexManager {
       if (this.registry.getIndex(t.indexName)) {
         this.registry.setIndexStatus(t.indexName, "error", msg);
       }
+      throw err;
+    }
+  }
+
+  // ------------------------------------------------- O2: zero-downtime migration
+
+  /**
+   * Escalates a per-project model change to the `migrate` job instead of a
+   * full reindex: every vector is rebuilt in a shadow table with the new model
+   * (search keeps serving the current table the whole time) and the registry
+   * only flips once the shadow is complete.
+   */
+  private startMigration(rec: IndexRecord, targetModel: string): IndexRecord {
+    const target: IndexTarget = {
+      indexName: rec.name,
+      tableName: tableNameFor(rec),
+      baseDir: rec.path,
+    };
+    this.registry.setIndexStatus(rec.name, "indexing");
+    // The watcher keeps running either way; the model-mismatch rule already
+    // suppresses its writes until the swap pins the new model.
+    this.ensureWatcher(target);
+    this.enqueueMigrate(rec, targetModel);
+    return this.registry.getIndex(rec.name)!;
+  }
+
+  private enqueueMigrate(rec: IndexRecord, targetModel: string): void {
+    const id = this.jobQueue.enqueue<MigrateJobPayload>(MIGRATE_JOB, {
+      project: rec.name,
+      targetModel,
+    });
+    // jobByIndex drives isIndexing (watcher deferral), progress and removal —
+    // a running migration counts exactly like a running index job.
+    this.jobByIndex.set(rec.name, id);
+  }
+
+  private async runMigrateJob(
+    payload: MigrateJobPayload,
+    ctx: { signal: AbortSignal; isCancelled: () => boolean; updateProgress: (p: number, t?: number, m?: string) => void },
+  ): Promise<MigrateResult> {
+    const rec = this.registry.getIndex(payload.project);
+    if (!rec) throw this.indexNotFound(payload.project);
+
+    // Duplicate escalation (the model already flipped since the job was
+    // enqueued): nothing to build.
+    if (rec.embedModel === payload.targetModel) {
+      return {
+        project: rec.name,
+        fromTable: tableNameFor(rec),
+        toTable: tableNameFor(rec),
+        rows: 0,
+        dim: null,
+        kind: "noop",
+        originalDropped: false,
+      };
+    }
+
+    this.registry.setIndexStatus(rec.name, "indexing");
+    const target: IndexTarget = {
+      indexName: rec.name,
+      tableName: tableNameFor(rec),
+      baseDir: rec.path,
+    };
+    try {
+      const result = await migrateTable(target, payload.targetModel, {
+        registry: this.registry,
+        signal: ctx.signal,
+        onProgress: (processed, total, message) => ctx.updateProgress(processed, total, message),
+      });
+      if (result.kind === "cancelled") {
+        // Aborted before the commit point: the old index is intact and still
+        // serving. Back to "ready" — the model change is still pending, so the
+        // next sync re-escalates (and pre-cleans the leftover shadow).
+        this.registry.setIndexStatus(rec.name, "ready");
+        console.error(`[migrate] '${rec.name}' cancelled before the swap; original index intact.`);
+      } else if (result.kind === "swapped") {
+        console.error(
+          `[migrate] '${rec.name}' now serves '${result.toTable}' (model '${payload.targetModel}', ` +
+            `${result.rows} rows re-embedded)` +
+            (result.originalDropped
+              ? `; superseded table '${result.fromTable}' dropped.`
+              : `; superseded table '${result.fromTable}' left in place (drop failed) — the doctor flags it.`),
+        );
+      } else {
+        console.error(`[migrate] '${rec.name}' already serves model '${payload.targetModel}' — nothing to do.`);
+      }
+      return result;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.registry.setIndexStatus(rec.name, "error", `migration failed: ${msg}`);
       throw err;
     }
   }
@@ -2696,7 +2806,10 @@ export class IndexManager {
 
   private uniqueTableName(name: string): string {
     const used = new Set(this.registry.listIndexes().map((r) => r.tableName));
-    const base = `idx_${sanitize(name)}`;
+    // The shared derivation (registry.ts) — the same recipe the legacy backfill
+    // and `tableNameFor` fallback use, so a name created here is what every
+    // consumer derives.
+    const base = deriveTableName(name);
     if (!used.has(base)) return base;
     let n = 2;
     while (used.has(`${base}_${n}`)) n++;

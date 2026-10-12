@@ -405,6 +405,145 @@ export async function tableSymbolsWithContent(
 }
 
 /**
+ * One row read back from a table in migration order: everything needed to
+ * re-embed and re-write the chunk, MINUS the embedding columns — `vector` and
+ * `doc_vector` are re-derived against the target model, never copied between
+ * models (they are not comparable across embedding spaces).
+ */
+export interface TableScanRow {
+  filePath: string;
+  content: string;
+  language: string | null;
+  symbolName: string | null;
+  symbolType: string | null;
+  startLine: number | null;
+  endLine: number | null;
+  /** Docstring / doc comment of the row (null when the table predates the column or the row has none). */
+  doc: string | null;
+}
+
+export interface TableScanResult {
+  rows: number;
+  /** Aborted through the signal before the last batch was handed over. */
+  aborted: boolean;
+}
+
+/**
+ * Streams ALL rows of a table in bounded batches (offset paging — the dataset is
+ * static for the duration of a scan: the O2 migration only writes to the shadow).
+ * `onBatch` receives FILE-ALIGNED batches: one batch may span several files, but
+ * a file's rows are never split across batches — `insertChunks` deletes by
+ * `filePath` before adding, so a split would silently drop the file's earlier
+ * rows. LanceDB storage order is not guaranteed to keep a file's rows contiguous,
+ * so a file re-appearing after other files since it was emitted aborts the scan
+ * with an error: the migration fails cleanly instead of copying a truncated file.
+ * The optional abort signal is honored at batch boundaries (before each page and
+ * before each `onBatch` call); rows handed over so far are exact.
+ */
+export async function scanTableBatches(
+  table: string,
+  rowsPerBatch: number,
+  onBatch: (rows: TableScanRow[]) => Promise<void>,
+  opts: { signal?: AbortSignal | undefined } = {},
+): Promise<TableScanResult> {
+  const conn = getDB();
+  const names = await conn.tableNames();
+  if (!names.includes(table)) return { rows: 0, aborted: false };
+  const t = await conn.openTable(table);
+  // `doc` lives only on current-schema tables; legacy tables scan with it null.
+  const withDoc = (await tableColumns(table)).has("doc");
+  const select = withDoc
+    ? ["filePath", "content", "language", "symbolName", "symbolType", "startLine", "endLine", "doc"]
+    : ["filePath", "content", "language", "symbolName", "symbolType", "startLine", "endLine"];
+
+  const s = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  const n = (v: unknown): number | null =>
+    typeof v === "number" && Number.isFinite(v) ? v : null;
+  const toRow = (raw: Record<string, unknown>): TableScanRow => ({
+    // A row without a path cannot be re-identified by insertChunks' delete —
+    // treat it as corrupt rather than emitting it.
+    filePath: s(raw.filePath) ?? "",
+    content: s(raw.content) ?? "",
+    language: s(raw.language),
+    symbolName: s(raw.symbolName),
+    symbolType: s(raw.symbolType),
+    startLine: n(raw.startLine),
+    endLine: n(raw.endLine),
+    doc: withDoc ? s(raw.doc) : null,
+  });
+
+  let offset = 0;
+  let emitted = 0;
+  let aborted = false;
+  let openRows: TableScanRow[] = []; // the file group still accumulating (may continue on the next page)
+  let batch: TableScanRow[] = []; // sealed file groups waiting for the next flush
+  const seenFiles = new Set<string>(); // files sealed so far (contiguity guard)
+
+  while (true) {
+    if (opts.signal?.aborted) {
+      aborted = true;
+      break;
+    }
+    const page = (await t
+      .query()
+      .select(select)
+      .limit(rowsPerBatch)
+      .offset(offset)
+      .toArray()) as unknown as Record<string, unknown>[];
+    if (page.length === 0) break;
+    offset += page.length;
+    for (const raw of page) {
+      const row = toRow(raw);
+      if (!row.filePath) {
+        throw new Error(`scanTableBatches: corrupt row without filePath in '${table}' — migration aborted`);
+      }
+      if (openRows.length > 0 && row.filePath !== openRows[0]!.filePath) {
+        // The open file group ended (its last row was this page's previous row):
+        // once the next file starts, the group can no longer grow.
+        if (seenFiles.has(row.filePath)) {
+          throw new Error(
+            `scanTableBatches: '${row.filePath}' appears in more than one run in '${table}' ` +
+              "(non-contiguous storage order) — migration aborted, original table intact",
+          );
+        }
+        batch.push(...openRows);
+        for (const r of openRows) seenFiles.add(r.filePath);
+        openRows = [];
+      }
+      openRows.push(row);
+    }
+    // Flush only what is SEALED: the last group may still grow on the next page.
+    while (batch.length >= rowsPerBatch) {
+      const rows = batch;
+      batch = [];
+      if (opts.signal?.aborted) {
+        aborted = true;
+        break;
+      }
+      await onBatch(rows);
+      emitted += rows.length;
+    }
+    if (aborted) break;
+  }
+
+  // End of table: seal the final group and hand over everything left. After an
+  // abort the tail is withheld — the migration discards the partial shadow.
+  batch.push(...openRows);
+  openRows = [];
+  if (!aborted && batch.length > 0) {
+    const rows = batch;
+    batch = [];
+    if (opts.signal?.aborted) {
+      aborted = true;
+    } else {
+      await onBatch(rows);
+      emitted += rows.length;
+    }
+  }
+  return { rows: emitted, aborted };
+}
+
+/**
  * Returns chunks whose `content` contains `term` as a substring (LIKE scan).
  * The basis of `find_references`: candidate chunks are fetched cheaply here, then
  * filtered to whole-identifier matches in JS. LIKE meta-characters are escaped.

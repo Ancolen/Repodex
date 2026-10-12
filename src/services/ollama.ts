@@ -1,7 +1,17 @@
 import { Ollama } from "ollama";
 import { CONFIG } from "../config";
 
-const ollama = new Ollama({ host: CONFIG.OLLAMA_URL });
+// The Ollama library binds a fetch implementation at Ollama-construction time
+// (`config.fetch ?? <module-scoped fetch>`); route it through the LIVE global
+// instead so this service behaves exactly like services/llamacpp.ts — test
+// stubs (and any future proxying) that install after this module loads are
+// honored, not bypassed by a captured reference.
+const liveFetch = (...args: Parameters<typeof globalThis.fetch>): Promise<Response> =>
+  globalThis.fetch(...args);
+const ollama = new Ollama({
+  host: CONFIG.OLLAMA_URL,
+  fetch: liveFetch as unknown as typeof globalThis.fetch,
+});
 
 /**
  * Ollama sizes its context buffer from `num_ctx` and allocates it up front for
