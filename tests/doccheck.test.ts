@@ -355,6 +355,30 @@ describe("checkSpan — env, endpoint, cmd", () => {
     expect(checkOne(state, span("GET /indexes/:name", "endpoint", { parts: ["GET", "/indexes/:name"] })).status).toBe("ok");
   });
 
+  test("endpoint: a hyphenated segment resolves as the quoted route literal", () => {
+    // Express-style routes are quoted strings — `bridge-session` is never a
+    // whole identifier, so the only resolvable form is the `"/bridge-session"`
+    // string in the code.
+    const state = baseState({ chunks: [chunk("src/s.ts", 'app.post("/bridge-session", (_req, res) => {});')] });
+    expect(checkOne(state, span("POST /bridge-session", "endpoint", { parts: ["POST", "/bridge-session"] })).status).toBe("ok");
+    const ghost = checkOne(state, span("POST /ghost-session", "endpoint", { parts: ["POST", "/ghost-session"] }));
+    expect(ghost.status).toBe("missing");
+    expect(ghost.confidence).toBe(93);
+  });
+
+  test("endpoint: a query string is call syntax, not route segments", () => {
+    // `GET /events?since=<cursor>` claims the `/events` route exists — the
+    // `?since=<cursor>` part must not become a phantom segment.
+    const classified = classifySpan("GET /events?since=<cursor>");
+    expect(classified?.spanClass).toBe("endpoint");
+    expect(classified?.parts).toEqual(["GET", "/events"]);
+    const state = baseState({ chunks: [chunk("src/s.ts", 'app.get("/events", (_req, res) => {});')] });
+    expect(checkOne(state, span("GET /events?since=<cursor>", "endpoint", { parts: ["GET", "/events"] })).status).toBe("ok");
+    // a query on a route that doesn't exist still drifts
+    const ghost = checkOne(state, span("GET /ghost?since=<cursor>", "endpoint", { parts: ["GET", "/ghost"] }));
+    expect(ghost.status).toBe("missing");
+  });
+
   test("cmd: scripts come from the manifest, path targets resolve through the file set", () => {
     const state = baseState({
       scripts: undefined,

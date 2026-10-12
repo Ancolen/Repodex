@@ -748,7 +748,16 @@ export function classifySpan(rawToken: string): ClassifiedSpan | null {
   if (ARTIFACT_EXT_RE.test(token)) return { spanClass: "artifact", skipReason: "artifact" };
 
   const endpoint = /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(\/\S*)$/i.exec(token);
-  if (endpoint) return { spanClass: "endpoint", parts: [endpoint[1]!.toUpperCase(), endpoint[2]!] };
+  if (endpoint) {
+    // The ROUTE claim is the path — a query string (`?since=<cursor>`) is call
+    // syntax, not a route segment, and `<placeholder>` values are vocabulary.
+    // Stripping it keeps `/events` resolvable instead of reading the whole
+    // `events?since=<cursor>` as one phantom segment.
+    const raw = endpoint[2]!;
+    const q = raw.indexOf("?");
+    const route = q === -1 ? raw : raw.slice(0, q) || raw;
+    return { spanClass: "endpoint", parts: [endpoint[1]!.toUpperCase(), route] };
+  }
 
   const dep = DEP_RE.exec(token);
   if (dep) return { spanClass: "dep" };
@@ -1124,7 +1133,12 @@ function checkEndpoint(token: string, parts: string[], ctx: ResolveCtx): SpanVer
   const route = parts[1] ?? "";
   const segments = route.split("/").filter((s) => s.length > 0 && !/^[{:*]/.test(s));
   if (segments.length === 0) return { status: "skipped", confidence: 0, skipReason: "generic" };
-  const unresolved = segments.filter((s) => !resolveIdentPart(s, ctx));
+  // A route segment resolves as an identifier (`events`, `doccheck`) OR as a
+  // ROUTE LITERAL: Express-style routes are quoted strings, so a hyphenated
+  // segment (`bridge-session`) is never a whole identifier — the `"/<seg>"`
+  // string in the code is the thing the doc claim actually names.
+  const routeLit = (s: string): DocEvidence[] | undefined => ctx.literalHits.get(`/${s}`);
+  const unresolved = segments.filter((s) => !resolveIdentPart(s, ctx) && (routeLit(s)?.length ?? 0) === 0);
   if (unresolved.length > 0) {
     return {
       status: "missing",
@@ -1133,7 +1147,8 @@ function checkEndpoint(token: string, parts: string[], ctx: ResolveCtx): SpanVer
       evidence: evOf(ctx.identHits, segments[0]!),
     };
   }
-  return { status: "ok", confidence: 100, evidence: evOf(ctx.identHits, segments[0]!) };
+  const first = segments[0]!;
+  return { status: "ok", confidence: 100, evidence: evOf(ctx.identHits, first) ?? routeLit(first) };
 }
 
 function checkCmd(parts: string[], ctx: ResolveCtx): SpanVerdict {
@@ -1474,7 +1489,13 @@ export function collectScanTokens(
       case "endpoint": {
         const route = span.parts?.[1] ?? "";
         for (const seg of route.split("/")) {
-          if (seg.length > 0 && !/^[{:*]/.test(seg) && /^[A-Za-z][\w$]*$/.test(seg)) addIdent(seg);
+          if (seg.length === 0 || /^[{:*]/.test(seg)) continue;
+          if (/^[A-Za-z][\w$]*$/.test(seg)) addIdent(seg);
+          // Route-literal evidence: every segment is also scanned as the
+          // quoted `"/<seg>"` string — the form Express-style route
+          // registrations actually write, and the only resolvable form for a
+          // hyphenated segment (`bridge-session`).
+          literalSet.add(`/${seg}`);
         }
         break;
       }
