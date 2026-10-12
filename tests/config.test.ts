@@ -255,6 +255,37 @@ describe("config — defaults and environment variable overrides", () => {
     expect(DEFAULT_CONFIG_YAML).toContain("judgeModel: \"\"");
     expect(DEFAULT_CONFIG_YAML).toContain("judgeUrl: \"\"");
   });
+
+  test("doccheck.watch defaults to false (off — no auto doccheck jobs)", async () => {
+    const def = await runConfig({});
+    expect(def.CONFIG.DOC_CHECK_WATCH).toBe(false);
+  });
+
+  test("DOC_CHECK_WATCH env mirrors the boolean (true/1 on, false/0 off, junk ignored)", async () => {
+    const on = await runConfig({ DOC_CHECK_WATCH: "true" });
+    expect(on.CONFIG.DOC_CHECK_WATCH).toBe(true);
+    const one = await runConfig({ DOC_CHECK_WATCH: "1" });
+    expect(one.CONFIG.DOC_CHECK_WATCH).toBe(true);
+    const off = await runConfig({ DOC_CHECK_WATCH: "false" });
+    expect(off.CONFIG.DOC_CHECK_WATCH).toBe(false);
+    const junk = await runConfig({ DOC_CHECK_WATCH: "yes" });
+    expect(junk.CONFIG.DOC_CHECK_WATCH).toBe(false);
+  });
+
+  test("doccheck.watch can be set true from YAML", async () => {
+    const yamlPath = join(tmpdir(), `cidx-dcw-${crypto.randomUUID()}.yml`);
+    writeFileSync(yamlPath, "doccheck:\n  watch: true\n");
+    try {
+      const { CONFIG } = await runConfig({ CIDX_CONFIG: yamlPath });
+      expect(CONFIG.DOC_CHECK_WATCH).toBe(true);
+    } finally {
+      rmSync(yamlPath, { force: true });
+    }
+  });
+
+  test("the generated config template carries the watch key, defaulted off", () => {
+    expect(DEFAULT_CONFIG_YAML).toContain("watch: false");
+  });
 });
 
 describe("config — legacy ~/.mcp-indexer → ~/.cidx migration", () => {

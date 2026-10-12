@@ -18,7 +18,9 @@ import {
   INDEX_JOB_TYPE,
   JOB_PRIORITY_BACKGROUND,
   MIGRATE_JOB_TYPE,
+  DOC_CHECK_JOB_TYPE,
   type MigrateJobPayload,
+  type DocCheckJobPayload,
 } from "./types";
 // Per-model embedding task framing: the pure resolution + the prefix helpers.
 import { resolveFraming, frameQuery } from "./framing";
@@ -161,6 +163,7 @@ import {
 
 const INDEX_JOB = INDEX_JOB_TYPE;
 const MIGRATE_JOB = MIGRATE_JOB_TYPE;
+const DOC_CHECK_JOB = DOC_CHECK_JOB_TYPE;
 
 /**
  * Per-search blame budget (proposal C4): at most this many hit files get ONE
@@ -184,6 +187,36 @@ export interface IndexJobPayload {
 }
 
 /**
+ * What a finished `doccheck` job carries (proposal D1c): the stored snapshot's
+ * verdict summary. `ts` is the moment the report was STORED; `stored` is true
+ * only when it actually reached the registry (a cancelled run stores nothing).
+ * Drift findings are NOT failures — a findings>0 run still completes.
+ */
+export interface DocCheckJobResult {
+  project: string;
+  ts: number;
+  /** `verdict.consistent` — zero hard drift findings. */
+  consistent: boolean;
+  findings: number;
+  needsReview: number;
+  stored: boolean;
+}
+
+/**
+ * The `--last` answer (`lastDocCheckReport` / `GET /doccheck/last`): the
+ * registry's latest stored snapshot plus the parsed report. It is a SNAPSHOT —
+ * `ts` is the moment the doccheck job stored it, never "now".
+ */
+export interface DocCheckLastReport {
+  project: string;
+  ts: number;
+  consistent: boolean;
+  findings: number;
+  needsReview: number;
+  report: DocCheckReport;
+}
+
+/**
  * The project a registered job is about, derived from its payload (A2). Kept
  * payload-based — NOT via jobByIndex — so the job-completed event publisher
  * works regardless of listener order (the mapping is cleaned up in the same
@@ -195,6 +228,9 @@ function jobProjectOf(job: Job): string | undefined {
   }
   if (job.type === MIGRATE_JOB_TYPE) {
     return (job.payload as MigrateJobPayload | undefined)?.project;
+  }
+  if (job.type === DOC_CHECK_JOB_TYPE) {
+    return (job.payload as DocCheckJobPayload | undefined)?.project;
   }
   return undefined;
 }
@@ -863,6 +899,11 @@ export class IndexManager {
         this.runMigrateJob(ctx.payload, ctx),
       );
     }
+    if (!this.jobQueue.hasHandler(DOC_CHECK_JOB)) {
+      this.jobQueue.registerHandler<DocCheckJobPayload, DocCheckJobResult>(DOC_CHECK_JOB, (ctx) =>
+        this.runDocCheckJob(ctx.payload, ctx),
+      );
+    }
     // A2: publish job completion BEFORE cleaning up the index↔job mapping —
     // the project comes straight from the job payload, so publishing does not
     // depend on that mapping (or on listener registration order).
@@ -879,6 +920,24 @@ export class IndexManager {
       // Clean up the index↔job mapping when finished.
       for (const [name, id] of this.jobByIndex) {
         if (id === job.id) this.jobByIndex.delete(name);
+      }
+    });
+    // D1c — doccheck watch mode (`doccheck.watch`, default off): a SUCCESSFUL
+    // index/sync/migrate job completion re-runs the deterministic check for that
+    // project. The flag is read at EVENT time (not construction), and the
+    // check is cheap and embedding-free (the semantic judge only runs when
+    // `doccheck.judgeModel` is configured). A `doccheck` completion deliberately
+    // does NOT re-trigger itself — the jobType filter below only ever reacts to
+    // index/migrate jobs.
+    this.onIndexEvent((ev) => {
+      if (ev.type !== "job-completed" || ev.status !== "completed") return;
+      if (ev.jobType !== INDEX_JOB && ev.jobType !== MIGRATE_JOB) return;
+      if (!CONFIG.DOC_CHECK_WATCH) return;
+      try {
+        this.maybeEnqueueDocCheckJob(ev.project);
+      } catch (err) {
+        // The watch chain must never take the watched job down.
+        console.error("[manager] doccheck watch enqueue failed:", err);
       }
     });
   }
@@ -3697,6 +3756,35 @@ export class IndexManager {
   // ---------------------------------------------------- doc–code conformance (D1)
 
   /**
+   * The project record behind a doccheck-family call (a fresh `checkDocs` AND
+   * the stored-snapshot read): a file path anchors to the containing project,
+   * an explicit name is validated, and neither given means the SINGLE indexed
+   * project — 0 or 2+ projects is an error that names them (the getCallGraph
+   * resolution). Shared so a stored report and a fresh check can never disagree
+   * about which project they meant.
+   */
+  private resolveDocCheckTarget(project?: string, filePath?: string): IndexRecord {
+    const filePathTrim = filePath?.trim();
+    if (filePathTrim) {
+      return this.resolveProjectForFile(path.resolve(filePathTrim), project);
+    }
+    if (project) {
+      const r = this.registry.getIndex(project);
+      if (!r) throw this.indexNotFound(project);
+      return r;
+    }
+    const all = this.registry.listIndexes();
+    if (all.length === 0) throw new Error("No indexed project; index a directory first.");
+    if (all.length > 1) {
+      throw new Error(
+        `check_docs could target multiple projects (${all.map((p) => p.name).join(", ")}) — ` +
+          "pass the 'project' (or 'path') argument.",
+      );
+    }
+    return all[0]!;
+  }
+
+  /**
    * Doc–code conformance check (proposal D1): assemble the pure engine's
    * state (docs from disk, code chunks from the cached snapshot, the path
    * universe from the indexed file set + root listing + manifest) and run it.
@@ -3728,25 +3816,7 @@ export class IndexManager {
   } = {}): Promise<DocCheckReport> {
     // Project resolution (the getCallGraph pattern): from a file path, an
     // explicit name, or the single indexed project.
-    let rec: IndexRecord;
-    const filePath = opts.path?.trim();
-    if (filePath) {
-      rec = this.resolveProjectForFile(path.resolve(filePath), opts.project);
-    } else if (opts.project) {
-      const r = this.registry.getIndex(opts.project);
-      if (!r) throw this.indexNotFound(opts.project);
-      rec = r;
-    } else {
-      const all = this.registry.listIndexes();
-      if (all.length === 0) throw new Error("No indexed project; index a directory first.");
-      if (all.length > 1) {
-        throw new Error(
-          `check_docs could target multiple projects (${all.map((p) => p.name).join(", ")}) — " +
-          "pass the 'project' (or 'path') argument.`,
-        );
-      }
-      rec = all[0]!;
-    }
+    const rec = this.resolveDocCheckTarget(opts.project, opts.path);
 
     // Per-project doc set: explicit args win, then `.cidx.json doccheck`.
     const cfg = readProjectConfig(rec.path);
@@ -3922,6 +3992,90 @@ export class IndexManager {
         `drift window: ${findingsBefore - report.findings.length} finding(s) and ${reviewBefore - report.needsReview.length} review item(s) predate the window`,
       );
     }
+  }
+
+  // ----------------------------------------- doccheck watch (D1c) + the stored snapshot
+
+  /**
+   * The `doccheck` job handler (D1c watch mode): re-runs the deterministic
+   * check for one project, UPSERTs the latest report into the registry, and
+   * completes with a short verdict summary. Embedding-free (and judge-free
+   * unless `doccheck.judgeModel` is configured), so a watch run is as cheap as
+   * the index job it followed. An abort before the store keeps the OLD snapshot
+   * untouched; a failure propagates and lands in the job's `error` (the same
+   * path every handler takes — the queue records it, nothing crashes).
+   */
+  private async runDocCheckJob(
+    payload: DocCheckJobPayload,
+    ctx: { signal: AbortSignal; isCancelled: () => boolean; updateProgress: (p: number, t?: number, m?: string) => void },
+  ): Promise<DocCheckJobResult> {
+    ctx.updateProgress(0, 1, "checking docs");
+    const report = await this.checkDocs({ project: payload.project });
+    const result: DocCheckJobResult = {
+      project: payload.project,
+      ts: Date.now(),
+      consistent: report.verdict.consistent,
+      findings: report.findings.length,
+      needsReview: report.needsReview.length,
+      stored: false,
+    };
+    if (ctx.isCancelled()) return result; // abort honored: a cancelled run stores nothing
+    this.registry.saveDocCheckReport({
+      project: result.project,
+      ts: result.ts,
+      consistent: result.consistent,
+      findings: result.findings,
+      needsReview: result.needsReview,
+      reportJson: JSON.stringify(report),
+    });
+    return { ...result, stored: true };
+  }
+
+  /**
+   * Watch mode's enqueue primitive (D1c): queues a `doccheck` job for the
+   * project — UNLESS one is already queued/running for it (the double-enqueue
+   * guard; a completed doccheck does not block the next legitimate re-check).
+   * Returns the job id, or null when nothing was enqueued: the `doccheck.watch`
+   * flag is off, the project is unknown/absent, or another doccheck run is
+   * already active. Callers: the job-completed watch trigger in the
+   * constructor, and tests.
+   */
+  maybeEnqueueDocCheckJob(project: string | undefined): string | null {
+    if (!CONFIG.DOC_CHECK_WATCH) return null;
+    if (!project || !this.registry.getIndex(project)) return null;
+    if (this.hasActiveDocCheckJob(project)) return null;
+    return this.jobQueue.enqueue<DocCheckJobPayload>(DOC_CHECK_JOB, { project });
+  }
+
+  /** Is a `doccheck` job queued/running for this project right now? */
+  private hasActiveDocCheckJob(project: string): boolean {
+    return this.jobQueue.listJobs().some(
+      (j) =>
+        j.type === DOC_CHECK_JOB &&
+        (j.status === "queued" || j.status === "running") &&
+        (j.payload as DocCheckJobPayload | undefined)?.project === project,
+    );
+  }
+
+  /**
+   * The STORED latest report for one project (D1c watch mode, `cidx doccheck
+   * --last`): the snapshot the last completed doccheck job wrote. NEVER a fresh
+   * check — the caller surfaces `ts` so a stale snapshot can't pose as a fresh
+   * one. Returns null when the project (valid — unknown names throw the
+   * self-healing error) has no stored report yet (watch never ran).
+   */
+  async lastDocCheckReport(opts: { project?: string; path?: string } = {}): Promise<DocCheckLastReport | null> {
+    const rec = this.resolveDocCheckTarget(opts.project, opts.path);
+    const row = this.registry.getDocCheckReport(rec.name);
+    if (!row) return null;
+    return {
+      project: rec.name,
+      ts: row.ts,
+      consistent: row.consistent,
+      findings: row.findings,
+      needsReview: row.needsReview,
+      report: JSON.parse(row.reportJson) as DocCheckReport,
+    };
   }
 
   private enqueueIndex(target: IndexTarget, fresh: boolean, priority = 0): void {

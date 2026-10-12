@@ -637,11 +637,15 @@ export const TOOL_DEFINITIONS: Tool[] = [
       "off by default): with `doccheck.judgeModel` in config, a local instruct model re-judges the " +
       "uncertain claims via yes/no completion logprobs — a high-confidence consistent verdict drops " +
       "the claim out of `needsReview` (`checked.judge` surfaces model/available/judged/resolved); the " +
-      "judge never produces drift findings and `judge: false` skips it per call.",
+      "judge never produces drift findings and `judge: false` skips it per call. Watch mode (D1c, " +
+      "`doccheck.watch` in config): after every successful index/migrate job a `doccheck` job re-runs " +
+      "this check and stores the latest report — `last: true` reads that STORED snapshot instead of " +
+      "running a fresh check (its `ts` is the store time; a stale snapshot never poses as fresh).",
     inputSchema: {
       type: "object",
       properties: {
         project: { type: "string", description: "The project to check (optional; inferred from 'path', or the single indexed project)." },
+        last: { type: "boolean", description: "Set true to return the STORED latest report for the project (the doccheck.watch job's snapshot) instead of running a fresh check." },
         path: { type: "string", description: "A file/dir inside the project to check (alternative to 'project')." },
         files: { type: "array", items: { type: "string" }, description: "Restrict the doc set (project-relative, root-anchored globs, e.g. ['docs/**/*.md']). Default: root *.md + docs/**." },
         ignore: { type: "array", items: { type: "string" }, description: "Doc files/globs to skip (also picked up from .cidx.json 'doccheck.ignore')." },

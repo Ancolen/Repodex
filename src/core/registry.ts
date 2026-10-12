@@ -153,6 +153,29 @@ export interface EmbedCacheStats {
   estimatedBytes: number;
 }
 
+// ---------------------------------------- doccheck reports (proposal D1c, watch)
+
+/**
+ * The LATEST stored doc–code conformance report for one project (proposal D1c
+ * watch mode): the `doccheck` job UPSERTs a row on every run and `cidx
+ * doccheck <project> --last` reads it back. One row per project (PRIMARY KEY
+ * on the name) — the registry deliberately keeps only the most recent
+ * snapshot; the full report rides as JSON.
+ */
+export interface DocCheckReportRow {
+  project: string;
+  /** Epoch ms of the moment the doccheck job stored the snapshot. */
+  ts: number;
+  /** `verdict.consistent` — zero drift findings. */
+  consistent: boolean;
+  /** `verdict.findings` (hard drift). */
+  findings: number;
+  /** `verdict.needsReview` (NOT failures). */
+  needsReview: number;
+  /** The full `DocCheckReport` as JSON. */
+  reportJson: string;
+}
+
 /**
 /** Rounds a (possibly NULL aggregate) number to `digits` decimals; non-finite → 0. */
 function round(x: number | null | undefined, digits: number): number {
@@ -167,6 +190,7 @@ function round(x: number | null | undefined, digits: number): number {
  * - file_cache:   per-file mtime cache (to skip unchanged files)
  * - jobs:         async job persistence (survives daemon restarts)
  * - query_log:    local search analytics (proposal A3, `cidx stats`)
+ * - doccheck_reports: latest doc-check snapshot per project (D1c watch mode)
  */
 export class Registry {
   private db: Database;
@@ -246,6 +270,20 @@ export class Registry {
         mode         TEXT NOT NULL,
         result_count INTEGER NOT NULL,
         latency_ms   INTEGER NOT NULL
+      );
+    `);
+
+    // Latest stored doc–code conformance report per project (proposal D1c watch
+    // mode): the `doccheck` job UPSERTs on every run, `cidx doccheck --last`
+    // reads the snapshot back. SQLite has no BOOLEAN — `consistent` is 0/1.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS doccheck_reports (
+        project      TEXT PRIMARY KEY,
+        ts           INTEGER NOT NULL,
+        consistent   INTEGER NOT NULL,
+        findings     INTEGER NOT NULL DEFAULT 0,
+        needs_review INTEGER NOT NULL DEFAULT 0,
+        report_json  TEXT NOT NULL
       );
     `);
 
@@ -461,6 +499,8 @@ export class Registry {
   removeIndexDeep(name: string): void {
     this.db.query(`DELETE FROM indexes WHERE name = $name`).run({ $name: name });
     this.db.query(`DELETE FROM file_cache WHERE index_name = $name`).run({ $name: name });
+    // The stored doccheck snapshot (D1c) belongs to the project — gone with it.
+    this.db.query(`DELETE FROM doccheck_reports WHERE project = $name`).run({ $name: name });
     // Stale job records are matched by a LIKE on the indexName field inside the
     // JSON payload (index jobs) and on the project field (migrate jobs, O2).
     const esc = name.replace(/'/g, "''").replace(/[\\%_]/g, "\\$&");
@@ -817,6 +857,47 @@ export class Registry {
       createdAt: r.created_at as number,
       startedAt: (r.started_at as number | null) ?? null,
       finishedAt: (r.finished_at as number | null) ?? null,
+    };
+  }
+
+  // ---------------------------------------- doccheck reports (proposal D1c, watch)
+
+  /**
+   * Stores the LATEST doc-check snapshot for one project (UPSERT — the D1c
+   * doccheck job writes it after every run; only the most recent report per
+   * project is kept).
+   */
+  saveDocCheckReport(row: DocCheckReportRow): void {
+    this.db
+      .query(
+        `INSERT INTO doccheck_reports (project, ts, consistent, findings, needs_review, report_json)
+         VALUES ($p, $ts, $c, $f, $r, $j)
+         ON CONFLICT(project) DO UPDATE SET
+           ts=$ts, consistent=$c, findings=$f, needs_review=$r, report_json=$j`,
+      )
+      .run({
+        $p: row.project,
+        $ts: row.ts,
+        $c: row.consistent ? 1 : 0,
+        $f: row.findings,
+        $r: row.needsReview,
+        $j: row.reportJson,
+      });
+  }
+
+  /** The stored latest doc-check snapshot for a project (null = none stored yet). */
+  getDocCheckReport(project: string): DocCheckReportRow | null {
+    const row = this.db
+      .query(`SELECT * FROM doccheck_reports WHERE project = $p`)
+      .get({ $p: project }) as Record<string, unknown> | null;
+    if (!row) return null;
+    return {
+      project: row.project as string,
+      ts: row.ts as number,
+      consistent: row.consistent === 1,
+      findings: row.findings as number,
+      needsReview: row.needs_review as number,
+      reportJson: row.report_json as string,
     };
   }
 

@@ -62,6 +62,7 @@ import {
   formatApiDiff,
   formatImpact,
   formatDocCheck,
+  formatDocCheckStored,
   formatCoupling,
   formatHotspots,
 } from "./server/format";
@@ -540,6 +541,24 @@ async function main(): Promise<void> {
         }
         // ---- doc–code conformance (proposal D1) ----
         case "check_docs": {
+          // D1c watch mode: `last` reads the STORED snapshot from the registry
+          // (GET /doccheck/last) instead of running a fresh check.
+          if (args.last === true) {
+            const project = typeof args.project === "string" ? args.project : undefined;
+            const filePath = typeof args.path === "string" ? args.path : undefined;
+            const q = project
+              ? `project=${encodeURIComponent(project)}`
+              : filePath
+                ? `path=${encodeURIComponent(filePath)}`
+                : "";
+            if (!q) return fail("Provide a 'project' name and/or a 'path' (at least one is required).");
+            const found = await api<{
+              project: string;
+              ts: number;
+              report: Parameters<typeof formatDocCheck>[0];
+            }>("GET", `/doccheck/last?${q}`);
+            return ok(formatDocCheckStored(found.project, found.ts, found.report));
+          }
           const report = await api<Parameters<typeof formatDocCheck>[0]>("POST", "/doccheck", {
             project: args.project,
             path: args.path,
