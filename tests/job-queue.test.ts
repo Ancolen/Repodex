@@ -157,3 +157,44 @@ describe("JobQueue worker pool (concurrency)", () => {
     expect(maxActive).toBe(1);
   });
 });
+
+describe("JobQueue activeJobCount (the idle-shutdown gate, proposal O4)", () => {
+  test("an empty queue counts 0", () => {
+    const q = new JobQueue();
+    expect(q.activeJobCount()).toBe(0);
+  });
+
+  test("counts queued and running jobs; terminal states are not active", async () => {
+    let release: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const q = new JobQueue(); // concurrency 1
+    q.registerHandler("blocker", async () => {
+      await gate;
+      return null;
+    });
+    q.registerHandler("noop", async () => null);
+
+    const blockerId = q.enqueue("blocker", {}); // running
+    const queuedId = q.enqueue("noop", {}); // queued behind the blocker
+    const cancelledId = q.enqueue("noop", {}); // will be cancelled while queued
+
+    expect(q.activeJobCount()).toBe(3); // 1 running + 2 queued
+
+    expect(q.cancel(cancelledId)).toBe(true);
+    expect(q.activeJobCount()).toBe(2);
+
+    release!();
+    await Promise.all([waitFinished(q, blockerId), waitFinished(q, queuedId)]);
+    expect(q.activeJobCount()).toBe(0);
+  });
+
+  test("a failed job is no longer active", async () => {
+    const q = new JobQueue();
+    q.registerHandler("boom", async () => {
+      throw new Error("boom");
+    });
+    const id = q.enqueue("boom", {});
+    await waitFinished(q, id);
+    expect(q.activeJobCount()).toBe(0);
+  });
+});

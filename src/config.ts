@@ -118,6 +118,15 @@ export interface IndexerConfig {
     /** Max `undocumented` symbol entries reported per call. */
     undocumentedLimit: number;
   };
+  daemon: {
+    /**
+     * Shut the daemon down after this many minutes without activity
+     * (proposal O4). Activity = any control-API/MCP HTTP request, a queued or
+     * running index job, or an open MCP session (stdio-bridge heartbeat).
+     * 0 disables idle shutdown (the default — behavior is unchanged).
+     */
+    idleTimeoutMinutes: number;
+  };
 }
 
 const DEFAULTS: IndexerConfig = {
@@ -172,6 +181,7 @@ const DEFAULTS: IndexerConfig = {
     mmr: { enabled: true, lambda: 0.5, topK: 20 },
   },
   doccheck: { maxChars: 12000, undocumentedLimit: 25 },
+  daemon: { idleTimeoutMinutes: 0 },
 };
 
 /** Editable default YAML template (written if the file does not exist). */
@@ -231,6 +241,9 @@ doccheck:
 
 watcher:
   debounceMs: ${DEFAULTS.watcher.debounceMs}        # reindexing delay after a file change
+
+daemon:
+  idleTimeoutMinutes: ${DEFAULTS.daemon.idleTimeoutMinutes}        # exit the daemon after N minutes without activity (requests, index jobs, open MCP sessions); 0 = off. Every cidx command / MCP entry point restarts it on demand.
 `;
 
 // ---- helpers ----
@@ -407,6 +420,14 @@ export const RESOLVED: IndexerConfig = {
       y.doccheck?.undocumentedLimit ??
       DEFAULTS.doccheck.undocumentedLimit,
   },
+  daemon: {
+    // A negative value is deliberately passed through: shouldIdleShutdown
+    // treats anything <= 0 as "off", so `-1` reads as the same opt-out as 0.
+    idleTimeoutMinutes:
+      num(process.env.DAEMON_IDLE_TIMEOUT_MINUTES) ??
+      y.daemon?.idleTimeoutMinutes ??
+      DEFAULTS.daemon.idleTimeoutMinutes,
+  },
 };
 
 /**
@@ -457,6 +478,8 @@ export const CONFIG = {
   HOST: RESOLVED.server.host,
   MCP_PORT: RESOLVED.server.mcpPort,
   CONTROL_PORT: RESOLVED.server.controlPort,
+
+  IDLE_TIMEOUT_MINUTES: RESOLVED.daemon.idleTimeoutMinutes,
 } as const;
 
 export type Config = typeof CONFIG;

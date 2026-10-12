@@ -124,6 +124,28 @@ describe("config — defaults and environment variable overrides", () => {
     const ovr = await runConfig({ MAX_CHUNK_TOKENS: "128" });
     expect(ovr.CONFIG.MAX_CHUNK_TOKENS).toBe(128);
   });
+
+  test("daemon.idleTimeoutMinutes defaults to 0 (off — behavior unchanged)", async () => {
+    const def = await runConfig({});
+    expect(def.CONFIG.IDLE_TIMEOUT_MINUTES).toBe(0);
+  });
+
+  test("DAEMON_IDLE_TIMEOUT_MINUTES overrides the idle timeout", async () => {
+    const ovr = await runConfig({ DAEMON_IDLE_TIMEOUT_MINUTES: "45" });
+    expect(ovr.CONFIG.IDLE_TIMEOUT_MINUTES).toBe(45);
+  });
+
+  test("a non-numeric DAEMON_IDLE_TIMEOUT_MINUTES falls back to the default (off)", async () => {
+    const bad = await runConfig({ DAEMON_IDLE_TIMEOUT_MINUTES: "soon" });
+    expect(bad.CONFIG.IDLE_TIMEOUT_MINUTES).toBe(0);
+  });
+
+  test("the generated config template carries the idle timeout, defaulted off", () => {
+    // A config.yml written at first boot pins whatever the template says, so
+    // the template must say 0 — existing installs must behave as before.
+    expect(DEFAULT_CONFIG_YAML).toContain("daemon:");
+    expect(DEFAULT_CONFIG_YAML).toContain("idleTimeoutMinutes: 0");
+  });
 });
 
 describe("config — legacy ~/.mcp-indexer → ~/.cidx migration", () => {
