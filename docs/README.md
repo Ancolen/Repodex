@@ -1,6 +1,6 @@
 # MCP Code Indexer — Documentation
 
-> Binary **`cidx`** (alias **`repodex`**) — a Bun daemon that vectorizes codebases with a local Ollama (`qwen3-embedding:0.6b` by default) and exposes hybrid (semantic + BM25) code search over MCP.
+> Binary **`cidx`** (alias **`repodex`**) — a Bun daemon that vectorizes codebases with local embeddings (pluggable backend: Ollama or a llama.cpp llama-server; `qwen3-embedding:0.6b` default) and exposes hybrid (semantic + BM25) code search over MCP.
 
 This folder is the **canonical, living documentation** for the project. The root [`README.md`](../README.md) is the user-facing install & usage guide; everything here is for contributors and for tracking what the system does, how it's built, and what's planned.
 
@@ -19,7 +19,7 @@ This folder is the **canonical, living documentation** for the project. The root
 | [status.md](./status.md) | ✅ **Done** / 🚧 **In progress** / 💡 **Proposed** / ⏸️ **Deferred** — the roadmap tracker | You finish something, start something, or decide on a proposal |
 | [proposals.md](./proposals.md) | Detailed designs for the 💡 Proposed items (motivation, mechanics, files touched, risks, acceptance) | You flesh out a proposal, or reality changes a proposal's design |
 | [changelog.md](./changelog.md) | Version-by-version implementation history (v1 → v4), newest first | You cut a release or finish a versioned milestone |
-| [cpu-only-ops.md](./cpu-only-ops.md) | Running Ollama CPU-only — operational notes | The CPU-mode workaround changes |
+| [cpu-only-ops.md](./cpu-only-ops.md) | Running the embedding backend CPU-only — Ollama and llama.cpp notes | The CPU-mode workaround changes |
 
 ## How to use these docs
 

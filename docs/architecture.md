@@ -1,6 +1,6 @@
 # Architecture
 
-The design of `cidx` (`cidx` / `repodex`): a single long-lived Bun daemon that vectorizes codebases with a local Ollama and exposes hybrid code search over MCP.
+The design of `cidx` (`cidx` / `repodex`): a single long-lived Bun daemon that vectorizes codebases with local embeddings (pluggable backend: Ollama or a llama.cpp llama-server) and exposes hybrid code search over MCP.
 
 ## Purpose
 
@@ -18,7 +18,7 @@ The design of `cidx` (`cidx` / `repodex`): a single long-lived Bun daemon that v
 | Language | TypeScript (Bun runs it directly) | `tsx`/`ts-node` unnecessary |
 | Persistent store | **`bun:sqlite`** (embedded SQLite) | Atomic, queryable, crash-resilient for registry + job state |
 | Vector DB | LanceDB (`@lancedb/lancedb`) | Confirmed to run under Bun (native NAPI test passed) |
-| Embedding | Ollama (`qwen3-embedding:0.6b` default), batch API | Local, fast |
+| Embedding | Ollama or llama.cpp llama-server (`qwen3-embedding:0.6b` default), batch APIs | Local, fast |
 | Chunking | **`web-tree-sitter` (WASM)** | Runtime-independent, Bun-safe, no native compilation |
 | Distribution | Single executable via `bun build --compile` | Daemon + CLI in one binary |
 
@@ -85,7 +85,9 @@ src/
     registry.ts         # bun:sqlite (meta.db) read/write
   services/
     db.ts               # multi-table LanceDB
-    ollama.ts           # batch embedding
+    embed.ts            # backend dispatch (Ollama | llama-server) + cached query embed
+    ollama.ts           # Ollama wire client (batch embedding, num_ctx)
+    llamacpp.ts         # llama-server wire client (/v1/embeddings, /v1/completions logprobs)
     indexer.ts          # file scan + indexing flow (progress + AbortSignal)
     git.ts              # git ls-files + branch detection
     watcher.ts          # chokidar + debounce
@@ -116,7 +118,7 @@ src/
 
 ## Test strategy
 
-- **Unit tests (`bun test`)** — pure, side-effect-free logic: concurrency, registry (temp sqlite), job-queue + worker pool, chunker, multi-language extraction, tree-sitter, RRF / `buildWhere`, config, indexer, text helpers. They **do not require a running Ollama**. Some load the LanceDB native module, so `bun install` must have run.
+- **Unit tests (`bun test`)** — pure, side-effect-free logic: concurrency, registry (temp sqlite), job-queue + worker pool, chunker, multi-language extraction, tree-sitter, RRF / `buildWhere`, config, indexer, text helpers. They **do not require a running embedding backend**. Some load the LanceDB native module, so `bun install` must have run.
 - **Integration smoke tests** — verified against real LanceDB after each version, then deleted (see [`changelog.md`](./changelog.md)). Persistent `db` / Control-API integration tests are a proposed addition.
 
 ## See also

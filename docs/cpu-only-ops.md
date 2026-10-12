@@ -1,4 +1,4 @@
-# Running Ollama CPU-Only
+# Running the Embedding Backend CPU-Only
 
 If your machine has no usable GPU (or you want to keep the GPU free), Ollama can
 be forced to run the embedding model on the CPU. Two reliable methods:
@@ -85,3 +85,18 @@ cidx sync <name>          # incremental sync
 cidx remove <name>        # remove a project and its index
 cidx config               # show the active configuration
 ```
+---
+
+# Alternative: llama.cpp CPU-only
+
+`llama-server` runs the same embedding models CPU-only with `-ngl 0` (no GPU layers):
+
+```bash
+llama-server -m qwen3-embedding-0.6b-Q8_0.gguf -a qwen3-embedding:0.6b \
+  --ctx-size 1024 --embedding -ngl 0 --host 127.0.0.1 --port 8080
+```
+
+Point cidx at it with `embedding.provider: llamacpp` + `embedding.llamacppUrl` (or set
+just those and leave other projects on Ollama). One llama-server serves one model; a
+llama.cpp **reranker** similarly needs its own server via `search.rerank.url` (an
+`--embedding` server cannot compute logits).

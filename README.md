@@ -4,7 +4,7 @@
 [![Release](https://github.com/Ancolen/repodex/actions/workflows/release.yml/badge.svg)](https://github.com/Ancolen/repodex/actions/workflows/release.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](./LICENSE)
 
-A **Bun**-based daemon that vectorizes codebases with a local **Ollama** (`qwen3-embedding:0.6b` by default) and exposes them so your AI agents can perform **hybrid (semantic + exact-term) search** over the **Model Context Protocol (MCP)**.
+A **Bun**-based daemon that vectorizes codebases with **local embeddings** through a pluggable backend — [**Ollama**](https://ollama.com) (`qwen3-embedding:0.6b` by default) **or a llama.cpp `llama-server`** — and exposes them so your AI agents can perform **hybrid (semantic + exact-term) search** over the **Model Context Protocol (MCP)**.
 
 A single long-lived daemon manages **multiple projects**. By sending commands to the running daemon through a thin **CLI**, you can index new projects; while one project is being indexed in the background, you can run **uninterrupted searches** in other projects.
 
@@ -38,10 +38,16 @@ A single long-lived daemon manages **multiple projects**. By sending commands to
   curl -fsSL https://bun.sh/install | bash
   ```
   > ⚠️ **Do not install via Snap.** Snap gives the app an isolated `HOME` (`~/snap/.../<revision>`); since the revision changes on every update, your data/settings "disappear". If `install.sh` detects a bun installed via snap, it stops the installation and redirects you to the official installer. If you already have a snap bun: `sudo snap remove bun-js` then the official installation above.
-- A running [Ollama](https://ollama.com) and the embedding model:
-  ```bash
-  ollama pull qwen3-embedding:0.6b
-  ```
+- An **embedding backend** — whichever you already run (cidx auto-detects; see [Configuration](#configuration) for `embedding.provider`):
+  - **Ollama** + the embedding model:
+    ```bash
+    ollama pull qwen3-embedding:0.6b
+    ```
+  - **or** a **llama.cpp `llama-server`** process (OpenAI-compatible; one model per process):
+    ```bash
+    llama-server -m embeddinggemma-2-BF16.gguf -a qwen3-embedding --ctx-size 1024 --embedding
+    ```
+    The `-a` alias must match the model cidx sends. With both backends up, cidx prefers the one that actually serves the configured model (Ollama first); pin a side explicitly with `embedding.provider: ollama|llamacpp`.
 
 ## Installation
 
@@ -57,11 +63,11 @@ This command (Linux/macOS · x64/arm64):
 
 1. Detects the operating system + architecture and downloads the appropriate binary from **GitHub Releases** (+ verifies sha256).
 2. Installs the **`cidx`** command and its alias **`repodex`** to PATH (`~/.local/bin`).
-3. Checks **Ollama** and the `qwen3-embedding:0.6b` model.
+3. Checks the **embedding backend** (Ollama or llama-server) and the `qwen3-embedding:0.6b` model.
 4. On Linux, installs a **systemd user service** → the daemon starts automatically on every boot (with `linger`). On macOS, the daemon is started with `cidx start`.
 5. Starts the daemon and performs a health check.
 
-> **No Bun or source code needed** — the binary carries everything (including grammars) within itself. You still need a running [Ollama](https://ollama.com) for embeddings: `ollama pull qwen3-embedding:0.6b`.
+> **No Bun or source code needed** — the binary carries everything (including grammars) within itself. You still need an embedding backend: Ollama with `ollama pull qwen3-embedding:0.6b`, or a `llama-server --embedding` process (see Requirements above).
 
 Optional environment variables:
 
@@ -88,7 +94,7 @@ cd cidx
 1. Checks **Bun**, installs it if missing.
 2. Installs dependencies (`bun install`).
 3. Adds the **`cidx`** command and its alias **`repodex`** to PATH.
-4. Checks **Ollama** and the `qwen3-embedding:0.6b` model (offers to download it if missing).
+4. Checks the **embedding backend** (Ollama or llama-server) and the `qwen3-embedding:0.6b` model (offers to download it when Ollama is the backend).
 5. Installs a **systemd user service** → the daemon starts automatically on every boot (with `linger`, even when not logged in).
 6. Starts the daemon and performs a health check.
 
@@ -221,7 +227,7 @@ cidx search "config" --path "src/*"                      # file path pattern
 
 - **`--mode hybrid`** (default): vector + BM25, merged with RRF.
 - **`--mode vector`**: semantic only. **`--mode text`**: BM25 only (requires no embedding model; works on old/incompatible indexes too).
-- **`--rerank [true|false]`**: a second-stage reranker (a small Qwen3-Reranker model in Ollama) re-scores the top results for higher precision. On by default; auto-disables if no reranker model is configured, and `--rerank false` skips it for a faster lookup.
+- **`--rerank [true|false]`**: a second-stage reranker (a small Qwen3-Reranker model on the embedding backend) re-scores the top results for higher precision. With llama.cpp the reranker needs its own llama-server (an `--embedding` server cannot score) — point to it via `search.rerank.url`. On by default; auto-disables if no reranker model is configured, and `--rerank false` skips it for a faster lookup.
 - **`--mmr [true|false]`**: MMR diversification re-orders the top results so they aren't near-duplicates (e.g. copies of the same function). On by default (`search.mmr.lambda`, default 0.5); `--mmr false` keeps a pure relevance order.
 - **`--max-chars <n>`**: cap the returned text to ~n characters — results are kept whole in ranked order while they fit (top-1 always returned), so you can raise `--limit` for recall without bloating output.
 - **`--doc [true|false]`** (default true): each symbol's docstring / doc-comment is embedded into a separate `doc_vector` column, and hybrid search merges doc-vector + doc-BM25 legs alongside the code legs — so intent queries ("how to do X") can hit the *documentation* even when the code body doesn't match. Results found via a doc leg carry a `[doc hit]` marker. `--doc false` skips the doc legs for a faster pure-code lookup. Only affects tables indexed with 2.4.0+ (reindex older projects).
@@ -349,7 +355,7 @@ Every tool that takes a `project` also takes a **`path`** — a file/dir inside 
 
 ### Index freshness (important for agents)
 
-The daemon watches file changes live, but a change is reflected in the index **not instantly** but with a **~1-2 sec delay**. The chain: save detection (`awaitWriteFinish` ~200ms) + debounce (~300ms) + embedding of the changed parts (Ollama, variable by file size) + LanceDB write.
+The daemon watches file changes live, but a change is reflected in the index **not instantly** but with a **~1-2 sec delay**. The chain: save detection (`awaitWriteFinish` ~200ms) + debounce (~300ms) + embedding of the changed parts (the embedding backend, variable by file size) + LanceDB write.
 
 Practical consequences — what AI agents need to know:
 
@@ -395,14 +401,17 @@ ollama:
 
 embedding:
   cacheMax: 50000             # max records in the content-hash embedding cache
+  provider: auto              # auto | ollama | llamacpp; auto = an Ollama that serves the model wins, else a live llama-server
+  llamacppUrl: http://127.0.0.1:8080  # llama-server base URL; start it with -m <model.gguf> -a <model> --ctx-size 1024 --embedding
 
 search:
   rerank:
-    enabled: true             # on by default; auto-disables if the reranker model is absent in Ollama
+    enabled: true             # on by default; auto-disables if the reranker model is absent on the backend
     model: qwen3-reranker-q8  # causal-LM reranker; scored via yes/no token logprobs
     topK: 20                  # how many candidates to rerank before slicing to limit
-    concurrency: 4            # concurrent reranker calls to Ollama
+    concurrency: 4            # concurrent reranker calls to the backend
     numCtx: 1024              # Ollama num_ctx for the rerank prompt (query + one chunk + template ≈ 500 tokens)
+    url: ""                   # reranker base URL; empty = same server as the embedding backend (a llama.cpp reranker needs its own server)
   mmr:
     enabled: true             # diversify the top results (Maximal Marginal Relevance)
     lambda: 0.5               # 1.0 = pure relevance, 0.0 = pure diversity (0.5 dedupes near-duplicates)
@@ -429,7 +438,7 @@ watcher:
   debounceMs: 300
 ```
 
-**Priority:** in-code defaults < YAML < environment variables. Environment variables can also be used for a quick temporary override: `CIDX_HOME`, `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX`, `MCP_PORT`, `CONTROL_PORT`, `EMBED_BATCH_SIZE`, `EMBED_CONCURRENCY`, `EMBED_CACHE_MAX`, `MAX_CHUNK_TOKENS`, `VECTOR_INDEX_THRESHOLD`, `JOB_CONCURRENCY`, `RERANK_MODEL`, `RERANK_TOP_K`, `RERANK_CONCURRENCY`, `RERANK_NUM_CTX`, `MMR_LAMBDA`, `MMR_TOP_K`. You can define additional ignore rules by placing a `.cidxignore` at a project root (`.gitignore` is also obeyed).
+**Priority:** in-code defaults < YAML < environment variables. Environment variables can also be used for a quick temporary override: `CIDX_HOME`, `EMBED_PROVIDER`, `LLAMACPP_URL`, `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX`, `MCP_PORT`, `CONTROL_PORT`, `EMBED_BATCH_SIZE`, `EMBED_CONCURRENCY`, `EMBED_CACHE_MAX`, `MAX_CHUNK_TOKENS`, `VECTOR_INDEX_THRESHOLD`, `JOB_CONCURRENCY`, `RERANK_MODEL`, `RERANK_URL`, `RERANK_TOP_K`, `RERANK_CONCURRENCY`, `RERANK_NUM_CTX`, `MMR_LAMBDA`, `MMR_TOP_K`. You can define additional ignore rules by placing a `.cidxignore` at a project root (`.gitignore` is also obeyed).
 
 > 💡 **Exclude large data folders.** Since `allowedExtensions` includes `.json`, generated/very large JSON data files (e.g. HuggingFace `tokenizer.json`, fixture/static data) get split into thousands of chunks and embedded — this slows down indexing and pollutes search results. Exclude such folders by placing a `.cidxignore` at the project root:
 > ```gitignore
