@@ -42,6 +42,16 @@ export interface IndexRecord {
   chunkCount: number;
   embedModel: string | null;
   embedDim: number | null;
+  /**
+   * The embedding task-framing identity the table was built with (per-model
+   * framing layer, `src/core/framing.ts`): a preset id ("embeddinggemma-2" |
+   * "qwen3-embedding") or null for unframed. Nullable like the other optional
+   * columns (CodeRecord.doc): rows stored before the column existed read as
+   * null, and null is also the legitimate pin for records resolving to no
+   * framing — the two are the same behavior, so legacy rows need no backfill
+   * and keep byte-identical search.
+   */
+  framing?: string | null;
   lastIndexedAt: number | null;
   createdAt: number;
   error: string | null;
@@ -173,6 +183,7 @@ export class Registry {
         chunk_count     INTEGER NOT NULL DEFAULT 0,
         embed_model     TEXT,
         embed_dim       INTEGER,
+        framing         TEXT,
         last_indexed_at INTEGER,
         created_at      INTEGER NOT NULL,
         error           TEXT
@@ -234,6 +245,9 @@ export class Registry {
     // then backfill any row stored without one. Both are idempotent.
     this.ensureTableNameColumn();
     this.backfillTableNames();
+    // Stored embedding framing (per-model task prefixes): ensure the column on
+    // a registry that predates it, idempotent (see ensureFramingColumn).
+    this.ensureFramingColumn();
   }
 
   /**
@@ -262,20 +276,37 @@ export class Registry {
     console.error(`[registry] backfilled ${rows.length} index record(s) with a derived table name.`);
   }
 
+  /**
+   * Lazy schema migration for the stored embedding framing: a foreign meta.db
+   * whose `indexes` table predates the column gets it added lazily rather than
+   * failing every boot. No data backfill follows — DELIBERATELY, unlike
+   * `table_name`: null IS the legacy value (an unframed index), so rows stored
+   * without a framing are already correct and must stay byte-identical, with
+   * no forced reindex. (`rowToIndex` normalizes an empty string to null, so a
+   * corrupt '' reads as the unframed pin it can only mean.) Idempotent, like
+   * the rest of `migrate()`.
+   */
+  private ensureFramingColumn(): void {
+    const cols = this.db.query(`PRAGMA table_info(indexes)`).all() as { name: string | null }[];
+    if (!cols.some((c) => c.name === "framing")) {
+      this.db.run(`ALTER TABLE indexes ADD COLUMN framing TEXT`);
+    }
+  }
+
   // ---------------------------------------------------------------- indexes
   upsertIndex(rec: IndexRecord): void {
     this.db
       .query(
         `INSERT INTO indexes
            (name, path, table_name, status, file_count, chunk_count,
-            embed_model, embed_dim, last_indexed_at, created_at, error)
+            embed_model, embed_dim, framing, last_indexed_at, created_at, error)
          VALUES
            ($name, $path, $table, $status, $fileCount, $chunkCount,
-            $embedModel, $embedDim, $lastIndexedAt, $createdAt, $error)
+            $embedModel, $embedDim, $framing, $lastIndexedAt, $createdAt, $error)
          ON CONFLICT(name) DO UPDATE SET
            path=$path, table_name=$table, status=$status,
            file_count=$fileCount, chunk_count=$chunkCount,
-           embed_model=$embedModel, embed_dim=$embedDim,
+           embed_model=$embedModel, embed_dim=$embedDim, framing=$framing,
            last_indexed_at=$lastIndexedAt, error=$error`,
       )
       .run({
@@ -287,6 +318,7 @@ export class Registry {
         $chunkCount: rec.chunkCount,
         $embedModel: rec.embedModel,
         $embedDim: rec.embedDim,
+        $framing: rec.framing ?? null,
         $lastIndexedAt: rec.lastIndexedAt,
         $createdAt: rec.createdAt,
         $error: rec.error,
@@ -329,13 +361,27 @@ export class Registry {
   }
 
   /**
+   * Records which embedding task-framing identity the table was pinned with
+   * (per-model framing layer): a preset id, or null for unframed. Called at the
+   * end of every index job (the embedModel precedent) and on the migration's
+   * commit; null keeps the pre-framing pin.
+   */
+  setIndexFraming(name: string, framing: string | null): void {
+    this.db
+      .query(`UPDATE indexes SET framing=$f WHERE name=$name`)
+      .run({ $name: name, $f: framing });
+  }
+
+  /**
    * THE COMMIT POINT of a zero-downtime model migration (O2): one sqlite
    * transaction atomically flips the project's stored table name to the
-   * COMPLETED shadow table, pins the new embedding model/dimension and marks
-   * the index ready. Before this transaction: a crash leaves the original
-   * table + record untouched (the half-built shadow is garbage the doctor
-   * flags); after it: the registry points at a complete, self-consistent table
-   * — the migration is done no matter what happens next.
+   * COMPLETED shadow table, pins the new embedding model/dimension and framing
+   * and marks the index ready. Before this transaction: a crash leaves the
+   * original table + record untouched (the half-built shadow is garbage the
+   * doctor flags); after it: the registry points at a complete, self-consistent
+   * table — the migration is done no matter what happens next. The framing
+   * rides along so a shadow is never committed with a pin that does not
+   * describe its vectors.
    */
   commitTableSwap(
     name: string,
@@ -343,6 +389,7 @@ export class Registry {
       tableName: string;
       embedModel: string;
       embedDim: number | null;
+      framing: string | null;
       chunkCount: number;
       lastIndexedAt: number;
     },
@@ -351,13 +398,14 @@ export class Registry {
       tableName: string;
       embedModel: string;
       embedDim: number | null;
+      framing: string | null;
       chunkCount: number;
       lastIndexedAt: number;
     }) => {
       this.db
         .query(
           `UPDATE indexes SET
-             table_name=$t, embed_model=$m, embed_dim=$d, chunk_count=$c,
+             table_name=$t, embed_model=$m, embed_dim=$d, framing=$f, chunk_count=$c,
              last_indexed_at=$ts, status='ready', error=NULL
            WHERE name=$name`,
         )
@@ -365,6 +413,7 @@ export class Registry {
           $t: s.tableName,
           $m: s.embedModel,
           $d: s.embedDim,
+          $f: s.framing,
           $c: s.chunkCount,
           $ts: s.lastIndexedAt,
           $name: name,
@@ -410,6 +459,9 @@ export class Registry {
       chunkCount: r.chunk_count as number,
       embedModel: (r.embed_model as string | null) ?? null,
       embedDim: (r.embed_dim as number | null) ?? null,
+      // An empty framing can only be legacy junk (the identity values are
+      // non-empty preset ids) — read as the unframed pin it can only mean.
+      framing: typeof r.framing === "string" && r.framing.length > 0 ? r.framing : null,
       lastIndexedAt: (r.last_indexed_at as number | null) ?? null,
       createdAt: r.created_at as number,
       error: (r.error as string | null) ?? null,

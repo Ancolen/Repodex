@@ -3,6 +3,7 @@ import path from "node:path";
 import ignore, { type Ignore } from "ignore";
 import { CONFIG } from "../config";
 import { readProjectConfig, extToLanguage, languageAllowSet } from "../core/project-config";
+import { resolveFraming, frameDoc } from "../core/framing";
 import { chunkCode } from "../chunking/chunker";
 import { extractIdTerms } from "../core/idterms";
 import { getEmbeddings } from "./embed";
@@ -195,6 +196,13 @@ async function embedTexts(
  * into a separate `doc_vector` (same model, same dimension), so symbol docs form
  * their own retrieval leg. Compound identifiers are split into subparts into
  * `id_terms` (`src/core/idterms.ts`) — a pure CPU step, no embedding.
+ *
+ * Task framing (per-model framing layer): the record's framing id frames BOTH
+ * embed sites — the chunk contents and the docstring texts get the preset's
+ * document prefix before `embedTexts`, so the cached key is the hash of the
+ * FRAMED text ("hash what you embed"). The stored `content`/`doc` columns keep
+ * the raw text; a null framing embeds the raw bytes exactly as before framing
+ * existed.
  */
 export async function indexFile(
   target: IndexTarget,
@@ -202,6 +210,7 @@ export async function indexFile(
   registry?: Registry,
   signal?: AbortSignal,
   embedModel?: string | undefined,
+  framing?: string | null | undefined,
 ): Promise<FileIndexResult> {
   if (!isAllowed(filePath)) return { chunks: 0, dim: null };
   if (signal?.aborted) return { chunks: 0, dim: null };
@@ -224,9 +233,10 @@ export async function indexFile(
   }
 
   const model = embedModel ?? CONFIG.OLLAMA_MODEL;
-  const vectors = await embedTexts(chunks.map((c) => c.content), model, registry, signal);
+  const vectors = await embedTexts(chunks.map((c) => frameDoc(c.content, framing)), model, registry, signal);
 
-  // Docstring leg: one extra embedding per doc-carrying chunk.
+  // Docstring leg: one extra embedding per doc-carrying chunk (framed too —
+  // the docstring is a document for the same framing).
   const docIdx: number[] = [];
   const docTexts: string[] = [];
   if (CONFIG.DOCSTRINGS) {
@@ -234,7 +244,7 @@ export async function indexFile(
       const doc = chunks[i]!.doc;
       if (doc && doc.trim().length > 0) {
         docIdx.push(i);
-        docTexts.push(doc);
+        docTexts.push(frameDoc(doc, framing));
       }
     }
   }
@@ -330,8 +340,9 @@ export async function indexDirectory(
   }
 
   // Per-project configuration (.cidx.json): extra ignore patterns, language
-  // allowlist, embedding model. Read fresh on every job, so a reindex picks up
-  // edits; filtered-out files are pruned by the deleted-file cleanup.
+  // allowlist, embedding model + task framing. Read fresh on every job, so a
+  // reindex picks up edits; filtered-out files are pruned by the deleted-file
+  // cleanup.
   const pcfg = readProjectConfig(target.baseDir);
   if (pcfg?.embedModel && pcfg.embedModel !== CONFIG.OLLAMA_MODEL) {
     console.error(`[indexer] '${target.indexName}' using per-project embedding model: ${pcfg.embedModel}`);
@@ -339,6 +350,14 @@ export async function indexDirectory(
   const langSet = languageAllowSet(pcfg);
   if (langSet) {
     console.error(`[indexer] '${target.indexName}' language filter: ${[...langSet].join(", ")}`);
+  }
+  // The framing every embed of this job uses — resolved under the same model
+  // the job embeds with (the `.cidx.json` model override, else the global).
+  // Must match what `runIndexJob` re-pins: the pin describes the table's
+  // framing as of this job.
+  const framing = resolveFraming(pcfg?.framing ?? CONFIG.EMBEDDING_FRAMING, pcfg?.embedModel ?? CONFIG.OLLAMA_MODEL);
+  if (framing) {
+    console.error(`[indexer] '${target.indexName}' embedding framing: ${framing}`);
   }
 
   const ig = await buildIgnore(target.baseDir, pcfg?.ignore);
@@ -375,7 +394,7 @@ export async function indexDirectory(
   for (const file of files) {
     if (opts.signal?.aborted) break;
     try {
-      const r = await indexFile(target, file, opts.registry, opts.signal, pcfg?.embedModel);
+      const r = await indexFile(target, file, opts.registry, opts.signal, pcfg?.embedModel, framing);
       chunks += r.chunks;
       if (dim === null && r.dim !== null) dim = r.dim;
     } catch (err) {
@@ -429,6 +448,14 @@ export interface MigrateContext {
   registry: Registry;
   signal?: AbortSignal | undefined;
   onProgress?: ((processed: number, total: number, message?: string) => void) | undefined;
+  /**
+   * The framing identity to embed the shadow with (per-model framing layer):
+   * a preset id or null for none. Passed by `runMigrateJob` from the migrate
+   * payload so a framing change rides the same zero-downtime machinery as a
+   * model change; omitted (test/direct callers) means null — pre-framing
+   * behavior, byte-identical re-embeds.
+   */
+  framing?: string | null | undefined;
 }
 
 export interface MigrateResult {
@@ -441,6 +468,8 @@ export interface MigrateResult {
   rows: number;
   /** Dimension of the newly embedded vectors (null when nothing was embedded). */
   dim: number | null;
+  /** The framing the committed record now pins (what the shadow embedded with). */
+  framing: string | null;
   /**
    * "swapped"  — shadow built, the registry transaction flipped to it, the old
    *              table dropped best-effort. An empty source table commits an
@@ -461,7 +490,11 @@ export interface MigrateResult {
  * search keeps serving the untouched original table with self-consistent
  * vectors; only after the shadow is COMPLETE (rows re-embedded, ANN + BM25
  * indexes built) does one registry transaction flip `{ tableName, embedModel,
- * embedDim, chunkCount, lastIndexedAt }` and mark the index ready.
+ * embedDim, framing, chunkCount, lastIndexedAt }` and mark the index ready.
+ *
+ * The re-embeds are framed with the target framing (`ctx.framing`, null =
+ * unframed): a framing change escalates through this same machinery, so a
+ * table is always rebuilt as a whole under the one framing its record pins.
  *
  * Crash safety: before the transaction a crash leaves the original untouched
  * (the partial shadow is stale garbage the doctor flags as `*_mig` and the next
@@ -483,6 +516,9 @@ export async function migrateTable(
   ctx: MigrateContext,
 ): Promise<MigrateResult> {
   const { registry, signal, onProgress } = ctx;
+  // No framing given (omitted context) or resolved to none → the pre-framing
+  // byte-identical behavior.
+  const targetFraming = ctx.framing ?? null;
   const project = target.indexName;
   // The stored name — after the first migration this is NOT the derived
   // default, so the shadow name keeps nesting instead of colliding with the
@@ -496,6 +532,7 @@ export async function migrateTable(
     toTable: fromTable,
     rows: 0,
     dim: null,
+    framing: targetFraming,
     kind: "noop",
     originalDropped: false,
   });
@@ -512,13 +549,14 @@ export async function migrateTable(
   if ((await countTableRows(fromTable)) === 0) {
     // An existing but empty table has no vectors to re-embed — and LanceDB
     // cannot create an empty one (the first insert pins the vector dimension).
-    // Pin the target model in place: the registry transaction IS the whole
-    // migration; future writes (watcher/next sync) build the table with the
-    // new model.
+    // Pin the target model AND framing in place: the registry transaction IS
+    // the whole migration; future writes (watcher/next sync) build the table
+    // with the new model and framing.
     registry.commitTableSwap(project, {
       tableName: fromTable,
       embedModel: targetModel,
       embedDim: null,
+      framing: targetFraming,
       chunkCount: 0,
       lastIndexedAt: Date.now(),
     });
@@ -559,9 +597,12 @@ export async function migrateTable(
           lastFile = filePath;
 
           // Re-embed the content (cache-first) and the doc legs — the same
-          // embedTexts/caching recipe as indexing, keyed on the TARGET model.
+          // embedTexts/caching recipe as indexing, keyed on the TARGET model,
+          // framed with the TARGET framing (hash what you embed: the cache
+          // keys on the framed text, so a framing change re-keys cleanly and
+          // an unchanged framing keeps hitting the existing cache).
           const vectors = await embedTexts(
-            rows.map((r) => r.content),
+            rows.map((r) => frameDoc(r.content, targetFraming)),
             targetModel,
             registry,
             signal,
@@ -573,7 +614,7 @@ export async function migrateTable(
               const doc = rows[k]!.doc;
               if (doc && doc.trim().length > 0) {
                 docIdx.push(k);
-                docTexts.push(doc);
+                docTexts.push(frameDoc(doc, targetFraming));
               }
             }
           }
@@ -652,6 +693,7 @@ export async function migrateTable(
         toTable: fromTable,
         rows: 0,
         dim: null,
+        framing: targetFraming,
         kind: "cancelled",
         originalDropped: false,
       };
@@ -684,6 +726,7 @@ export async function migrateTable(
         tableName: shadowName,
         embedModel: targetModel,
         embedDim: dim,
+        framing: targetFraming,
         chunkCount: rows,
         lastIndexedAt: Date.now(),
       });
@@ -716,6 +759,7 @@ export async function migrateTable(
       toTable: shadowName,
       rows,
       dim,
+      framing: targetFraming,
       kind: "swapped",
       originalDropped,
     };

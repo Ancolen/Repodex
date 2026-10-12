@@ -55,4 +55,15 @@ export const MIGRATE_JOB_TYPE = "migrate";
 export interface MigrateJobPayload {
   project: string;
   targetModel: string;
+  /**
+   * The framing identity to embed the shadow table with (per-model framing
+   * layer, `src/core/framing.ts`): the resolved preset id
+   * ("embeddinggemma-2" | "qwen3-embedding") or null for none. `startMigration`
+   * resolves it from the effective framing setting under `targetModel`, so the
+   * commit pins exactly what the shadow embedded — a framing change rides the
+   * same zero-downtime machinery as a model change. Payloads enqueued before
+   * framing existed carry no field and read as null (the only framing those
+   * records could have pinned).
+   */
+  framing?: string | null;
 }

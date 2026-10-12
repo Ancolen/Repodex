@@ -275,12 +275,13 @@ describe("commitTableSwap (O2)", () => {
     }
   });
 
-  test("flips the serving table, model and stats and marks the index ready", () => {
+  test("flips the serving table, model, framing and stats and marks the index ready", () => {
     reg.upsertIndex(makeIndex("alpha"));
     reg.commitTableSwap("alpha", {
       tableName: "idx_alpha_mig",
       embedModel: "model-b",
       embedDim: 4,
+      framing: "embeddinggemma-2",
       chunkCount: 12,
       lastIndexedAt: 555,
     });
@@ -289,6 +290,7 @@ describe("commitTableSwap (O2)", () => {
     expect(rec!.tableName).toBe("idx_alpha_mig");
     expect(rec!.embedModel).toBe("model-b");
     expect(rec!.embedDim).toBe(4);
+    expect(rec!.framing).toBe("embeddinggemma-2");
     expect(rec!.chunkCount).toBe(12);
     expect(rec!.lastIndexedAt).toBe(555);
     expect(rec!.status).toBe("ready");
@@ -302,11 +304,13 @@ describe("commitTableSwap (O2)", () => {
       tableName: "idx_alpha_mig",
       embedModel: "model-b",
       embedDim: null,
+      framing: null, // unframed stays unframed across the swap
       chunkCount: 0,
       lastIndexedAt: 556,
     });
     const rec = reg.getIndex("alpha");
     expect(rec!.status).toBe("ready");
     expect(rec!.error).toBeNull();
+    expect(rec!.framing).toBeNull();
   });
 });
