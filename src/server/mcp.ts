@@ -36,6 +36,22 @@ import type { IndexManager } from "../core/index-manager";
 export interface McpDeps {
   jobQueue: JobQueue;
   manager: IndexManager;
+  /**
+   * Bumps the idle-shutdown activity marker (proposal O4): every request this
+   * server handles counts as daemon activity. Undefined when no idle timeout
+   * is armed.
+   */
+  onActivity?: () => void;
+}
+
+/** What `startMcpServer` hands back to the daemon. */
+export interface McpServerHandle {
+  /**
+   * Live legacy-SSE MCP sessions. The idle-shutdown gate treats them as an
+   * open MCP session: a connected-but-silent /sse client has no way to
+   * heartbeat, so the tick reads this directly.
+   */
+  openSseSessions: () => number;
 }
 
 /** Builds a configured MCP Server instance for each connection. */
@@ -605,7 +621,7 @@ export function startMcpServer(
   deps: McpDeps,
   port: number = CONFIG.MCP_PORT,
   host: string = CONFIG.HOST,
-): Promise<void> {
+): Promise<McpServerHandle> {
   const app = express();
   // SECURITY: Restrict CORS to localhost origins only. Even though the server is
   // bound to 127.0.0.1, a wide-open cors() would allow a malicious web page in the
@@ -624,6 +640,11 @@ export function startMcpServer(
   // The Streamable HTTP transport additionally validates the Host itself for
   // POST /mcp; this middleware covers /health, /sse and /message too.
   app.use(hostGuard(host, port));
+  // Idle shutdown (proposal O4): every request handled here is daemon activity.
+  app.use((_req, _res, next) => {
+    deps.onActivity?.();
+    next();
+  });
 
   app.get("/health", (_req, res) => {
     const jobs = deps.jobQueue.listJobs();
@@ -713,12 +734,12 @@ export function startMcpServer(
     await transport.handlePostMessage(req, res);
   });
 
-  return new Promise<void>((resolve, reject) => {
+  return new Promise<McpServerHandle>((resolve, reject) => {
     const server = app.listen(port, host, () => {
       console.error(
         `[mcp] MCP server listening: http://${host}:${port}/mcp (Streamable HTTP) · /sse (legacy)`,
       );
-      resolve();
+      resolve({ openSseSessions: () => transports.size });
     });
     // Fail loudly (the daemon exits with a clear message) instead of silently
     // logging "ready" while another daemon instance owns the port.

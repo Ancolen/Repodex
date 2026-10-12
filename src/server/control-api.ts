@@ -12,6 +12,7 @@ import { probeLlamaServer } from "../services/llamacpp";
 import type { JobQueue } from "../core/job-queue";
 import { indexNotFoundMessage } from "../core/index-manager";
 import type { IndexManager } from "../core/index-manager";
+import type { BridgeSessionRegistry } from "../core/bridgesessions";
 import type { IndexRecord } from "../core/registry";
 
 export interface ControlDeps {
@@ -19,6 +20,14 @@ export interface ControlDeps {
   jobQueue: JobQueue;
   /** Shuts down the daemon gracefully (same path as SIGINT). */
   onShutdown: () => Promise<void> | void;
+  /**
+   * Bumps the idle-shutdown activity marker (proposal O4). Every request this
+   * server handles counts as activity; undefined when the daemon has no idle
+   * timeout armed (no behavior change).
+   */
+  onActivity?: () => void;
+  /** Tracks live stdio-bridge MCP sessions (the idle guardrail). */
+  bridgeSessions: BridgeSessionRegistry;
 }
 
 /** Presents an index record along with live job progress. */
@@ -135,6 +144,13 @@ export function startControlApi(
   const app = express();
   app.use(hostGuard(host, port));
   app.use(express.json());
+  // Idle shutdown (proposal O4): ANY request handled here counts as activity,
+  // including /ping and /bridge-session traffic (the bridge's heartbeat keeps
+  // an open MCP session alive — that is the guardrail, not noise).
+  app.use((_req, _res, next) => {
+    deps.onActivity?.();
+    next();
+  });
 
   app.get("/ping", (_req, res) => {
     res.json({ ok: true, version: "2.5.0", pid: process.pid });
@@ -685,6 +701,35 @@ export function startControlApi(
       const msg = err instanceof Error ? err.message : String(err);
       res.status(msg.startsWith("Index not found") || msg.startsWith("No indexed project") ? 404 : 400).json({ error: msg });
     }
+  });
+
+  // ------------------------------------------------- bridge sessions (O4)
+
+  /**
+   * The stdio bridge (`cidx mcp`) registers itself here so an OPEN MCP session
+   * counts as activity for the idle shutdown: registrations, heartbeats and
+   * unregisters keep `openBridgeSessions` above zero. The wire shape built by
+   * `src/core/bridgesessions.ts → *SessionRequest` must stay in sync.
+   */
+  app.post("/bridge-session", (_req, res) => {
+    const sessionId = deps.bridgeSessions.register(Date.now());
+    res.json({ sessionId });
+  });
+
+  /** Heartbeat/touch: 404 sends the bridge back to /bridge-session (re-register). */
+  app.post("/bridge-session/:id", (req, res) => {
+    if (!deps.bridgeSessions.touch(req.params.id, Date.now())) {
+      res.status(404).json({ error: "Unknown or expired bridge session" });
+      return;
+    }
+    res.json({ ok: true });
+  });
+
+  // Idempotent: an unregister for a session that is already gone (daemon
+  // restart, TTL expiry) is not an error — the bridge is just cleaning up.
+  app.delete("/bridge-session/:id", (req, res) => {
+    const removed = deps.bridgeSessions.remove(req.params.id);
+    res.json({ removed });
   });
 
   app.post("/shutdown", (_req, res) => {
