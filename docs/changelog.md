@@ -2,11 +2,13 @@
 
 Version-by-version implementation history, **newest first**. For the current done / proposed picture, see [`status.md`](./status.md); for what the tools do, [`features.md`](./features.md).
 
-> **How this repo versions:** the design uses informal "waves" (v1 → v4); the **release version** in `package.json` is bumped per wave (currently `2.6.0`). The version string lives in **five** places that must be bumped together on release: `package.json`, `src/server/mcp.ts` (`Server` info), `src/server/control-api.ts` (`/ping`), `src/stdio-bridge.ts`, and `src/cli.ts` (`CLI_VERSION`). The `web-install.sh` / Release workflow fires on a pushed `v*` git tag.
+> **How this repo versions:** the design uses informal "waves" (v1 → v4); the **release version** in `package.json` is bumped per wave (currently `2.6.1`). The version string lives in **five** places that must be bumped together on release: `package.json`, `src/server/mcp.ts` (`Server` info), `src/server/control-api.ts` (`/ping`), `src/stdio-bridge.ts`, and `src/cli.ts` (`CLI_VERSION`). The `web-install.sh` / Release workflow fires on a pushed `v*` git tag.
 
 ---
 
-## Unreleased
+## 2.6.1 (2026-10-13)
+
+A production bug found the day 2.6.0 shipped, healing a silent indexing failure as old as the llama.cpp backend: any file whose 4-byte emoji straddled the 1500-char chunk-window boundary had failed to index on **every sync** (Ollama's lenient JSON parser had masked the whole class). Test suite: **1066/1066** passing (12 new tests, 3471 expectations); `bun run typecheck` clean.
 
 ### Fixed
 

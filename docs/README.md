@@ -6,9 +6,9 @@ This folder is the **canonical, living documentation** for the project. The root
 
 ## At a glance
 
-- **Current version:** `2.6.0` (the entire proposals backlog shipped: search quality — boost / fuzzy / expansion / blame / framing; code intelligence — coupling / hotspots; agent UX — resources, events, query log; ops — zero-downtime migration, stats/compact, idle shutdown, job priority; doccheck — judge + watch mode)
+- **Current version:** `2.6.1` (chunker cut-safety fix — astral characters can no longer be split at chunk-window boundaries; prior `2.6.0` shipped the entire proposals backlog: search quality — boost / fuzzy / expansion / blame / framing; code intelligence — coupling / hotspots; agent UX — resources, events, query log; ops — zero-downtime migration, stats/compact, idle shutdown, job priority; doccheck — judge + watch mode)
 - **Status:** core architecture, hybrid search (rerank / MMR / docstring legs / boost), multi-language chunking (incl. Godot), every code-intelligence tool, and all robustness/security fixes are **complete and stable** — the proposals backlog is empty. See [`status.md`](./status.md) for the full done / not-done breakdown.
-- **Test suite:** `bun test` — 1052/1052 passing (3434 expectations), including a persistent daemon/Control-API integration battery (`tests/integration/`).
+- **Test suite:** `bun test` — 1066/1066 passing (3471 expectations), including a persistent daemon/Control-API integration battery (`tests/integration/`).
 
 ## Documentation map
 
