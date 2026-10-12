@@ -194,7 +194,7 @@ async function cmdSearch(positionals: string[], flags: Record<string, string | b
   await requireDaemon();
   const query = positionals.join(" ");
   if (!query) {
-    console.error('Usage: cidx search "<query>" [--project x] [--limit n] [--mode hybrid|vector|text] [--language x] [--type x] [--path glob] [--rerank] [--mmr] [--max-chars n] [--doc]');
+    console.error('Usage: cidx search "<query>" [--project x] [--limit n] [--mode hybrid|vector|text] [--language x] [--type x] [--path glob] [--rerank] [--mmr] [--boost] [--max-chars n] [--doc]');
     process.exit(1);
   }
   const body: {
@@ -208,6 +208,7 @@ async function cmdSearch(positionals: string[], flags: Record<string, string | b
     contextLines?: number;
     rerank?: boolean;
     mmr?: boolean;
+    boost?: boolean;
     maxChars?: number;
     doc?: boolean;
   } = { query };
@@ -224,6 +225,9 @@ async function cmdSearch(positionals: string[], flags: Record<string, string | b
   // --mmr / --mmr true turns diversification on; --mmr false turns it off (default-on).
   if (flags.mmr === true || flags.mmr === "true") body.mmr = true;
   else if (flags.mmr === "false") body.mmr = false;
+  // --boost / --boost true turns path/surface boosting on; --boost false turns it off (default-on).
+  if (flags.boost === true || flags.boost === "true") body.boost = true;
+  else if (flags.boost === "false") body.boost = false;
   // --max-chars caps the returned text (results dropped whole to fit; top-1 always kept).
   if (typeof flags["max-chars"] === "string") body.maxChars = Number(flags["max-chars"]);
   // --doc false skips the docstring retrieval legs (on by default where available).
@@ -237,7 +241,7 @@ async function cmdOpen(positionals: string[], flags: Record<string, string | boo
   await requireDaemon();
   const query = positionals.join(" ");
   if (!query) {
-    console.error('Usage: cidx open "<query>" [--pick n] [--project x] [--mode hybrid|vector|text] [--limit n] [--language x] [--type x] [--path glob] [--rerank] [--mmr] [--doc]');
+    console.error('Usage: cidx open "<query>" [--pick n] [--project x] [--mode hybrid|vector|text] [--limit n] [--language x] [--type x] [--path glob] [--rerank] [--mmr] [--boost] [--doc]');
     console.error("\nSearches, prints the results, and opens the selected one in $VISUAL/$EDITOR at the matching line.");
     process.exit(1);
   }
@@ -251,6 +255,7 @@ async function cmdOpen(positionals: string[], flags: Record<string, string | boo
     pathGlob?: string;
     rerank?: boolean;
     mmr?: boolean;
+    boost?: boolean;
     doc?: boolean;
   } = { query, limit: 10 }; // a list worth picking from, unless --limit says otherwise
   if (typeof flags.project === "string") body.project = flags.project;
@@ -263,6 +268,8 @@ async function cmdOpen(positionals: string[], flags: Record<string, string | boo
   else if (flags.rerank === "false") body.rerank = false;
   if (flags.mmr === true || flags.mmr === "true") body.mmr = true;
   else if (flags.mmr === "false") body.mmr = false;
+  if (flags.boost === true || flags.boost === "true") body.boost = true;
+  else if (flags.boost === "false") body.boost = false;
   if (flags.doc === true || flags.doc === "true") body.doc = true;
   else if (flags.doc === "false") body.doc = false;
 
@@ -317,6 +324,7 @@ async function cmdBatch(positionals: string[], flags: Record<string, string | bo
     contextLines?: number;
     rerank?: boolean;
     mmr?: boolean;
+    boost?: boolean;
     maxChars?: number;
     doc?: boolean;
   } = { queries };
@@ -331,6 +339,8 @@ async function cmdBatch(positionals: string[], flags: Record<string, string | bo
   else if (flags.rerank === "false") body.rerank = false;
   if (flags.mmr === true || flags.mmr === "true") body.mmr = true;
   else if (flags.mmr === "false") body.mmr = false;
+  if (flags.boost === true || flags.boost === "true") body.boost = true;
+  else if (flags.boost === "false") body.boost = false;
   if (typeof flags["max-chars"] === "string") body.maxChars = Number(flags["max-chars"]);
   if (flags.doc === true || flags.doc === "true") body.doc = true;
   else if (flags.doc === "false") body.doc = false;
@@ -944,6 +954,7 @@ const COMMANDS: Record<string, CmdDoc> = {
       ["--context <n>", "Include ±n surrounding lines (read live from the file) around each result."],
       ["--rerank [bool]", "Second-stage reranker (on by default). --rerank true forces it on; --rerank false skips it for a faster lookup. Auto-disables if no reranker model is configured."],
       ["--mmr [bool]", "MMR diversification (on by default). --mmr true forces it on; --mmr false keeps a pure relevance order. Drops near-duplicate chunks so the top results are distinct."],
+      ["--boost [bool]", "Path/surface boost (on by default). --boost true forces it on; --boost false keeps a pure RRF order. Nudges merged results: short paths & src-like roots slightly up, test & generated paths slightly down."],
       ["--max-chars <n>", "Cap returned text to ~n chars: results are kept whole in ranked order while they fit (top-1 always returned). Pair with a higher --limit for recall without bloating output."],
       ["--doc [bool]", "Docstring retrieval legs (on by default where available): results whose docstring/doc comment matched are marked [doc hit]. --doc false skips the doc legs."],
     ],
@@ -971,6 +982,7 @@ const COMMANDS: Record<string, CmdDoc> = {
       ["--path <glob>", "File path pattern ('*' wildcard)."],
       ["--rerank [bool]", "Reranker (on by default). --rerank false skips it."],
       ["--mmr [bool]", "MMR diversification (on by default). --mmr false skips it."],
+      ["--boost [bool]", "Path/surface boost (on by default). --boost false keeps a pure RRF order."],
       ["--doc [bool]", "Docstring retrieval legs (on by default where available). --doc false skips them."],
     ],
     details: [
@@ -997,6 +1009,7 @@ const COMMANDS: Record<string, CmdDoc> = {
       ["--context <n>", "Include ±n surrounding lines around each result."],
       ["--rerank [bool]", "Second-stage reranker (on by default). --rerank false skips it."],
       ["--mmr [bool]", "MMR diversification (on by default). --mmr false keeps pure relevance."],
+      ["--boost [bool]", "Path/surface boost (on by default). --boost false keeps a pure RRF order."],
       ["--max-chars <n>", "Character budget applied PER QUERY; results kept whole while they fit."],
       ["--doc [bool]", "Docstring retrieval legs (on by default where available). --doc false skips them."],
     ],
@@ -1358,7 +1371,8 @@ function printHelp(): void {
   lines.push("  OLLAMA_NUM_CTX, MCP_PORT, CONTROL_PORT, EMBED_BATCH_SIZE, EMBED_CONCURRENCY,");
   lines.push("  EMBED_CACHE_MAX, MAX_CHUNK_TOKENS, VECTOR_INDEX_THRESHOLD, JOB_CONCURRENCY,");
   lines.push("  RERANK_MODEL, RERANK_URL, RERANK_TOP_K, RERANK_CONCURRENCY, RERANK_NUM_CTX,");
-  lines.push("  MMR_LAMBDA, MMR_TOP_K");
+  lines.push("  MMR_LAMBDA, MMR_TOP_K, BOOST_SHORT_PATH, BOOST_SOURCE_ROOT, BOOST_TEST_DEMOTION,");
+  lines.push("  BOOST_GENERATED_DEMOTION");
   lines.push("");
   lines.push("DATA LOCATION");
   lines.push(`  Root:    ${CONFIG.ROOT_DIR}`);

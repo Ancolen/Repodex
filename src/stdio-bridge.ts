@@ -163,6 +163,7 @@ async function main(): Promise<void> {
             contextLines: args.contextLines,
             rerank: args.rerank,
             mmr: args.mmr,
+            boost: args.boost,
             maxChars: args.maxChars,
             doc: args.doc,
           });
@@ -181,6 +182,7 @@ async function main(): Promise<void> {
             contextLines: args.contextLines,
             rerank: args.rerank,
             mmr: args.mmr,
+            boost: args.boost,
             maxChars: args.maxChars,
             doc: args.doc,
           });

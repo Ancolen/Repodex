@@ -65,6 +65,7 @@ function buildServer(deps: McpDeps): Server {
         contextLines?: number;
         rerank?: boolean;
         mmr?: boolean;
+        boost?: boolean;
         maxChars?: number;
         doc?: boolean;
       };
@@ -77,6 +78,7 @@ function buildServer(deps: McpDeps): Server {
         contextLines: args.contextLines,
         rerank: args.rerank,
         mmr: args.mmr,
+        boost: args.boost,
         maxChars: args.maxChars,
         doc: args.doc,
       };
@@ -106,6 +108,7 @@ function buildServer(deps: McpDeps): Server {
         contextLines?: number;
         rerank?: boolean;
         mmr?: boolean;
+        boost?: boolean;
         maxChars?: number;
         doc?: boolean;
       };
@@ -124,6 +127,7 @@ function buildServer(deps: McpDeps): Server {
         contextLines: args.contextLines,
         rerank: args.rerank,
         mmr: args.mmr,
+        boost: args.boost,
         maxChars: args.maxChars,
         doc: args.doc,
       };
