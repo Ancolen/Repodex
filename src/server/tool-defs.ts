@@ -192,6 +192,9 @@ export const TOOL_DEFINITIONS: Tool[] = [
     description:
       "Finds a symbol (function/class/method) directly by NAME (exact + prefix). " +
       "More precise than semantic search; use it when you know the exact name. If 'project' is not given, searches all projects. " +
+      "When exact AND prefix both find nothing and 'fuzzy' is not false, a FUZZY tier (n-gram BM25 over symbolName, " +
+      "model-independent) recovers near misses like typos — every such hit carries fuzzy: true and is capped by 'limit'. " +
+      "Tables indexed before the fuzzy tier existed never fuzzy-match (their next index job / a reindex enables it). " +
       "FRESHNESS: The index is updated with a ~1-2 sec delay; a symbol you just added/renamed " +
       "may not show up immediately. To confirm a change you just made yourself, read the file directly.",
     inputSchema: {
@@ -205,6 +208,13 @@ export const TOOL_DEFINITIONS: Tool[] = [
             "Alternative to 'project': a file/dir inside the project (the owning project is inferred). Ignored when 'project' is also given.",
         },
         limit: { type: "number", description: "Maximum results (default: 20)." },
+        fuzzy: {
+          type: "boolean",
+          description:
+            "Fuzzy fallback when exact + prefix find nothing (default true — an opt-out of the new tier). " +
+            "Pass false to keep the strict exact/prefix-only behavior. Fuzzy hits are approximate, ranked by " +
+            "n-gram overlap, and marked fuzzy: true.",
+        },
         language: { type: "string", description: "Filter by language (optional)." },
         symbolType: { type: "string", description: "Filter by symbol type (optional)." },
       },

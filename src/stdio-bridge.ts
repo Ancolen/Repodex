@@ -224,6 +224,7 @@ async function main(): Promise<void> {
             project: args.project,
             path: args.path,
             limit: args.limit,
+            fuzzy: args.fuzzy,
             language: args.language,
             symbolType: args.symbolType,
           });

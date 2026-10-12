@@ -349,11 +349,12 @@ export function startControlApi(
   });
 
   app.post("/find", async (req, res) => {
-    const { name, project, path: projectPath, limit, language, symbolType } = (req.body ?? {}) as {
+    const { name, project, path: projectPath, limit, fuzzy, language, symbolType } = (req.body ?? {}) as {
       name?: string;
       project?: string;
       path?: string;
       limit?: number;
+      fuzzy?: boolean;
       language?: string;
       symbolType?: string;
     };
@@ -366,7 +367,7 @@ export function startControlApi(
       const results = await deps.manager.findSymbol(name, scope, limit ?? 20, {
         language,
         symbolType,
-      });
+      }, { fuzzy });
       res.json(results);
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });

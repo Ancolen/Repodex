@@ -49,6 +49,11 @@ export interface SearchResult extends CodeRecord {
   _rerankScore?: number;
   /** This result matched via a docstring leg (doc_vector ANN or doc BM25). */
   _docHit?: boolean;
+  /**
+   * This result matched via the fuzzy symbol-name fallback of `find_symbol`
+   * (S2 — n-gram FTS over `symbolName`) instead of an exact/prefix match.
+   */
+  fuzzy?: boolean;
 }
 
 /** Metadata filters that narrow search results. */
@@ -350,6 +355,90 @@ export async function searchSymbol(
   return rows;
 }
 
+/**
+ * N-gram size of the fuzzy symbol leg: `symbolName` is BM25-indexed as
+ * character trigrams (min = max = 3), and a query word can only yield a
+ * token when it is at least this many characters long. Both the index
+ * configuration and the query-side gate derive from this one constant.
+ */
+export const SYMBOL_NGRAM_SIZE = 3;
+
+/**
+ * Pure query-side gate of the fuzzy symbol leg: would `name` produce at least
+ * one n-gram token under the configured tokenizer? Words are split on every
+ * non-alphanumeric run (`_`, `.`, `$`, whitespace — the boundaries the n-gram
+ * analyzer treats as separators) and keep only runs of length ≥
+ * `SYMBOL_NGRAM_SIZE`; a name of nothing shorter yields no tokens at all and
+ * the FTS query would resolve to nothing ("ab", "x.y").
+ */
+export function hasNgramTokens(name: string): boolean {
+  return name
+    .split(/[^\p{L}\p{N}]+/u)
+    .some((word) => [...word].length >= SYMBOL_NGRAM_SIZE);
+}
+
+/**
+ * Fuzzy symbol-name search — the fallback tier of `find_symbol` (proposal S2).
+ * When exact + prefix (`searchSymbol`) find nothing, this searches an FTS
+ * index over `symbolName` configured with an n-gram (trigram) tokenizer: the
+ * typo'd query `getUserNme` and the real `getUserName` share most trigrams,
+ * so BM25 ranks the intended symbol first — with no embedding model involved.
+ *
+ * Gated on the index (tables whose index jobs never built the n-gram symbol
+ * FTS — all tables from before S2 — return [] instead of erroring), on
+ * `hasNgramTokens` (a token-less query is an empty FTS query), and wrapped in
+ * a try/catch like every other FTS path. Results are ordered by BM25
+ * relevance with a deterministic tie-break (`symbolName` ascending).
+ *
+ * Verified against `@lancedb/lancedb` 0.30.0: the n-gram tokenizer is
+ * configurable (`Index.fts({ baseTokenizer: "ngram" })`), but a STRING query
+ * does not apply it on the query side (it never becomes trigrams) — only a
+ * structured `MatchQuery` tokenizes the query text with the column's
+ * analyzer, so that is what this uses.
+ */
+export async function searchSymbolFuzzy(
+  table: string,
+  name: string,
+  limit = 20,
+  extraWhere?: string,
+): Promise<SearchResult[]> {
+  const conn = getDB();
+  const names = await conn.tableNames();
+  if (!names.includes(table)) return [];
+  if (!hasNgramTokens(name)) return [];
+  const t = await conn.openTable(table);
+  const indexed = (await t.listIndices()).some(
+    (ix) => ix.columns.includes("symbolName") && /fts|inverted/i.test(ix.indexType),
+  );
+  if (!indexed) return [];
+  try {
+    let q = t
+      .query()
+      .fullTextSearch(new lancedb.MatchQuery(name, "symbolName"), { columns: ["symbolName"] })
+      .limit(limit);
+    if (extraWhere) q = q.where(extraWhere);
+    const rows = (await q.toArray()) as SearchResult[];
+    const score = (r: SearchResult) =>
+      typeof r._score === "number" && Number.isFinite(r._score) ? r._score : Number.NEGATIVE_INFINITY;
+    return rows.sort((a, b) => {
+      const sa = score(a);
+      const sb = score(b);
+      if (sa === sb) {
+        // Deterministic tie-break (equal BM25 scores): symbol name ascending.
+        return (a.symbolName ?? "") < (b.symbolName ?? "")
+          ? -1
+          : (a.symbolName ?? "") > (b.symbolName ?? "")
+            ? 1
+            : 0;
+      }
+      return sb - sa;
+    });
+  } catch {
+    // No index (dropped mid-flight) or an unparseable query: honestly empty.
+    return [];
+  }
+}
+
 /** Lightweight chunk metadata (no vectors/content) for repo aggregation. */
 export interface ChunkMeta {
   filePath: string;
@@ -474,11 +563,25 @@ export async function ensureVectorIndex(table: string, minRows: number, column =
 }
 
 /**
+ * True when an FTS/inverted index covers `column` (structural subset of
+ * LanceDB's `IndexConfig`). Shared by `ensureFtsIndex` (build guard) and
+ * `searchSymbolFuzzy` (the S2 leg's table gate).
+ */
+function hasFtsOnColumn(
+  indices: { columns: string[]; indexType: string }[],
+  column: string,
+): boolean {
+  return indices.some((ix) => ix.columns.includes(column) && /fts|inverted/i.test(ix.indexType));
+}
+
+/**
  * Builds full-text (BM25) indexes on the `content` column, on `doc` when the
- * table has the docstring column, and on `id_terms` when the table has the
- * identifier-terms column (each if absent). Required for the BM25 legs of
- * hybrid search. The optional legs have their own try/catch — a failure warns
- * and never fails the index. Skipped if the table is empty.
+ * table has the docstring column, on `id_terms` when the table has the
+ * identifier-terms column, and on `symbolName` with an n-gram (trigram)
+ * tokenizer for the fuzzy `find_symbol` fallback (each if absent). Required
+ * for the BM25 legs of hybrid search. The optional legs have their own
+ * try/catch — a failure warns and never fails the index. Skipped if the table
+ * is empty.
  *
  * @returns the number of indexes built.
  */
@@ -491,8 +594,8 @@ export async function ensureFtsIndex(table: string): Promise<number> {
   if ((await t.countRows()) === 0) return 0;
 
   const existing = await t.listIndices();
-  const hasFtsOn = (col: string) =>
-    existing.some((ix) => ix.columns.includes(col) && /fts|inverted/i.test(ix.indexType));
+  const hasFtsOn = (col: string) => hasFtsOnColumn(existing, col);
+  const cols = await tableColumns(table);
 
   let built = 0;
   if (!hasFtsOn("content")) {
@@ -501,7 +604,7 @@ export async function ensureFtsIndex(table: string): Promise<number> {
   }
   // The doc column duplicates docstring text only; BM25 over it gives the text
   // leg of the docstring search. Legacy tables without the column are skipped.
-  if ((await tableColumns(table)).has("doc") && !hasFtsOn("doc")) {
+  if (cols.has("doc") && !hasFtsOn("doc")) {
     try {
       await t.createIndex("doc", { config: lancedb.Index.fts() });
       built++;
@@ -513,13 +616,33 @@ export async function ensureFtsIndex(table: string): Promise<number> {
   // The identifier-terms column holds compound identifiers split into subparts;
   // BM25 over it is the natural-language → identifier leg (no vectors involved).
   // Legacy tables without the column are skipped.
-  if ((await tableColumns(table)).has("id_terms") && !hasFtsOn("id_terms")) {
+  if (cols.has("id_terms") && !hasFtsOn("id_terms")) {
     try {
       await t.createIndex("id_terms", { config: lancedb.Index.fts() });
       built++;
     } catch (err) {
       // Never fail the whole job over the optional identifier leg.
       console.error(`[db] failed to build FTS index on 'id_terms' for '${table}':`, err);
+    }
+  }
+  // The symbol leg (S2): `symbolName` indexed as character trigrams — the
+  // fallback tier of `find_symbol`, a pure BM25 match with no embedding
+  // model. Tables from before S2 simply have no such index and are skipped
+  // here; their NEXT index job (not only a full reindex) builds it.
+  if (cols.has("symbolName") && !hasFtsOn("symbolName")) {
+    try {
+      await t.createIndex("symbolName", {
+        config: lancedb.Index.fts({
+          baseTokenizer: "ngram",
+          ngramMinLength: SYMBOL_NGRAM_SIZE,
+          ngramMaxLength: SYMBOL_NGRAM_SIZE,
+          lowercase: true,
+        }),
+      });
+      built++;
+    } catch (err) {
+      // Never fail the whole job over the optional fuzzy leg.
+      console.error(`[db] failed to build FTS index on 'symbolName' for '${table}':`, err);
     }
   }
   return built;

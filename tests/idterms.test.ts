@@ -226,7 +226,7 @@ describe("id_terms column + legacy tables (LanceDB)", () => {
     const table = "idx_idterms_fts";
     await db.insertChunks(table, rows());
     const built = await db.ensureFtsIndex(table);
-    expect(built).toBe(3); // content + doc + id_terms
+    expect(built).toBe(4); // content + doc + id_terms + symbolName (n-gram fuzzy leg, S2)
     // Second run is a no-op (already indexed).
     expect(await db.ensureFtsIndex(table)).toBe(0);
     await db.dropTable(table);

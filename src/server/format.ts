@@ -91,6 +91,7 @@ export function formatResults(
       const meta = [
         relevance,
         r._docHit ? "doc hit" : "",
+        r.fuzzy ? "⚠ fuzzy" : "",
         r.indexedAt ? `indexed: ${fmtTime(r.indexedAt)}` : "",
       ]
         .filter(Boolean)
