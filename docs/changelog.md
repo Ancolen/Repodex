@@ -61,6 +61,17 @@ Agent-UX and observability wave driven by a week of real MCP-usage review.
   (`processed / written / deleted cleaned up`); previously the bare per-run
   chunk count read as if the table had shrunk to it.
 
+### Fixed
+
+- **The reranker availability probe is a no-op when reranking is off by
+  config.** `IndexManager.ensureRerankAvailable` (reached via the `/doctor`
+  `rerankerAvailable()` port even with the tool-level gates closed) used to
+  probe the backend while `search.rerank.enabled=false` and print
+  `reranker model '…' not found … set search.rerank.enabled=false` — telling
+  the user to do the thing they had already done (observed with that setting
+  literally false). Config-off is now a hard off: no probe, no console line,
+  and doctor reports "disabled by config" straight from the setting.
+
 ---
 
 ## 2.6.1 (2026-10-13)

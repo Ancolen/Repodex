@@ -85,6 +85,8 @@ function doctorPorts(deps: ControlDeps): DoctorPorts {
         return { provider: null, url: "", up: false, models: [] };
       }
     },
+    // No probe happens when search.rerank.enabled=false (config-off = hard
+    // off) — doctor then reports "disabled by config" without a backend call.
     rerankerAvailable: () => deps.manager.ensureRerankAvailable(),
     configPath: () => CONFIG_SOURCE,
     readText: async (filePath) => {

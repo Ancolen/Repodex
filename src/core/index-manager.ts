@@ -3277,7 +3277,12 @@ export class IndexManager {
    */
   async ensureRerankAvailable(): Promise<boolean> {
     if (this.rerankAvailable !== null) return this.rerankAvailable;
-    if (!CONFIG.RERANK_MODEL) {
+    // Config-off = hard off: skip the probe entirely (it costs a backend
+    // round-trip and — via the /doctor rerankerAvailable() port — used to
+    // reach this path and emit the "install it, or set
+    // search.rerank.enabled=false" console line while the setting was ALREADY
+    // false, telling the user to do something they had done).
+    if (!CONFIG.RERANK_ENABLED || !CONFIG.RERANK_MODEL) {
       this.rerankAvailable = false;
       return false;
     }
