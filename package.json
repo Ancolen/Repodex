@@ -1,6 +1,6 @@
 {
   "name": "cidx",
-  "version": "2.6.1",
+  "version": "2.7.0",
   "type": "module",
   "module": "src/index.ts",
   "private": true,
