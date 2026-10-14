@@ -23,6 +23,14 @@ Agent-UX and observability wave driven by a week of real MCP-usage review.
   `cidx status` (`note: collected 0 files — …`). The note is cleared as soon as
   a job leaves the table non-empty again.
 
+- **`get_repo_overview` / `GET /overview` pick-one response (agent UX)**: with
+  no `project`/`path` anchor and several projects indexed, `/overview` now
+  answers with a graceful `200 { pickOne: true, note }` payload (and the MCP
+  tool renders the same listing) instead of a hard 404 ambiguity error. Real
+  usage showed agents in a not-indexed session directory losing a round-trip
+  on the error, re-issuing the identical call, and only then falling back to
+  `list_indexes`. The single-project and anchored paths are unchanged.
+
 ### Changed
 
 - **`[index] 'X' ready:` log line is now honest about deltas** — it reports the

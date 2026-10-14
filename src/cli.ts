@@ -512,6 +512,12 @@ async function cmdOverview(positionals: string[], flags: Record<string, string |
   else if (arg && existsSync(arg) && statSync(arg).isDirectory()) body.path = path.resolve(arg);
   else if (arg) body.name = arg;
   const o = await api<any>("POST", "/overview", body);
+  // The graceful pick-one payload (several projects indexed, no anchor): print
+  // the choices instead of a partial render of a non-overview shape.
+  if (o?.pickOne === true) {
+    console.log(o.note);
+    return;
+  }
   const t = o.lastIndexedAt ? new Date(o.lastIndexedAt).toISOString() : "—";
   console.log(`\nRepo: ${o.name}  [${o.status}]`);
   console.log(`Path: ${o.path}`);

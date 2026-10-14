@@ -17,6 +17,7 @@ import type { BridgeSessionRegistry } from "../core/bridgesessions";
 // A2 — the GET /events backing store and the shared index-serializer.
 import type { DaemonEventRing } from "../core/events";
 import { viewIndex } from "./resource-defs";
+import { overviewPickOneNote, type OverviewPickOne } from "./format";
 import type { IndexRecord, QueryLogStatsOpts } from "../core/registry";
 
 export interface ControlDeps {
@@ -443,8 +444,16 @@ export function startControlApi(
       path?: string;
     };
     // 'name' (legacy CLI shape) and 'project' (the MCP tool's arg) are synonyms;
-    // with neither, the single indexed project is summarized (else an error).
+    // with neither, the single indexed project is summarized — but when several
+    // are indexed, answer with the graceful pick-one payload (a 200 describing
+    // the choices) instead of a self-healing 404: agents lose a round-trip on
+    // the error and re-issue the identical call.
     const wanted = project ?? name;
+    if (!wanted && !projectPath && deps.manager.listIndexes().length > 1) {
+      const views = deps.manager.listIndexes().map((r) => viewIndex(deps.manager, r));
+      res.json({ pickOne: true, note: overviewPickOneNote(views) } satisfies OverviewPickOne);
+      return;
+    }
     try {
       const scope = deps.manager.resolveProjectScope(wanted, projectPath, false)!;
       const overview = await deps.manager.repoOverview(scope);

@@ -25,6 +25,7 @@ import {
   type IndexView,
   type ResourceReadTargets,
 } from "../src/server/resource-defs";
+import { overviewPickOneNote, isOverviewPickOne } from "../src/server/format";
 import { buildServer } from "../src/server/mcp";
 
 // ------------------------------------------------------------------ fixtures
@@ -59,6 +60,7 @@ describe("viewIndex — the shared Control-API serializer", () => {
       chunks: 7,
       lastIndexedAt: 1000,
       error: null,
+      note: null,
       job: null,
     });
   });
@@ -374,5 +376,25 @@ describe("buildServer — resources over the MCP SDK (in-memory transport)", () 
         "Index not found: missing",
       );
     });
+  });
+});
+// ------------------------------------------------------- overview pick-one
+
+describe("overviewPickOne — the graceful multi-project /overview response", () => {
+  test("lists every project with the anchor hint", () => {
+    const note = overviewPickOneNote([
+      { name: "server", path: "/home/duldul/robot/server", status: "ready", files: 92, chunks: 955 },
+      { name: "oyun", path: "/home/duldul/oyun", status: "ready", files: 1312, chunks: 5344 },
+    ]);
+    expect(note).toContain("Multiple projects are indexed");
+    expect(note).toContain("'project' (or 'path')");
+    expect(note).toContain("• server [ready] — /home/duldul/robot/server (92 files, 955 chunks)");
+    expect(note).toContain("• oyun [ready] — /home/duldul/oyun (1312 files, 5344 chunks)");
+  });
+
+  test("isOverviewPickOne accepts only the pickOne payload", () => {
+    expect(isOverviewPickOne({ pickOne: true, note: "x" })).toBe(true);
+    expect(isOverviewPickOne({ name: "demo" })).toBe(false);
+    expect(isOverviewPickOne(null)).toBe(false);
   });
 });

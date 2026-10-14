@@ -31,6 +31,7 @@ import {
   formatOutline,
   formatReferences,
   formatOverview,
+  overviewPickOneNote,
   formatDependencies,
   formatDeadCode,
   formatCallGraph,
@@ -430,6 +431,13 @@ export function buildServer(deps: McpDeps): Server {
 
     if (name === "get_repo_overview") {
       const args = rawArgs as { project?: string; path?: string };
+      // Neither given and several projects exist → a graceful pick-one response
+      // (a plain 200, not an error): one round-trip describing the choices
+      // instead of throw → list_indexes → retry.
+      if (!args.project && !args.path && deps.manager.listIndexes().length > 1) {
+        const views = deps.manager.listIndexes().map((r) => viewIndex(deps.manager, r));
+        return { content: [{ type: "text", text: overviewPickOneNote(views) }] };
+      }
       try {
         // Neither given → the single indexed project, or an error naming them all.
         const project = deps.manager.resolveProjectScope(args.project, args.path, false)!;

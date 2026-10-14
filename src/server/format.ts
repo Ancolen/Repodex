@@ -954,3 +954,35 @@ export function formatHotspots(r: HotspotReport): string {
   }
   return lines.join("\n");
 }
+
+// ---------------------------------------------- overview pick-one (agent UX)
+
+/**
+ * The graceful response `/overview` (and the `get_repo_overview` tool) gives
+ * when NO anchor (project/path) is given and more than one project is indexed
+ * — a plain 200 describing the choices, instead of a hard error. First seen in
+ * real usage: an agent in a not-indexed session directory guessed the project
+ * name, lost a round-trip on the error, then re-issued the identical call.
+ */
+export interface OverviewPickOne {
+  pickOne: true;
+  note: string;
+}
+
+/** Renders the pick-one list from index views (same bullet style as list_indexes). */
+export function overviewPickOneNote(
+  views: ReadonlyArray<{ name: string; path: string; status: string; files: number; chunks: number }>,
+): string {
+  const lines = views.map(
+    (ix) => `• ${ix.name} [${ix.status}] — ${ix.path} (${ix.files} files, ${ix.chunks} chunks)`,
+  );
+  return (
+    "Multiple projects are indexed — pass the 'project' (or 'path') argument to pick one:\n" +
+    lines.join("\n")
+  );
+}
+
+/** Type-guard for the Control-API `/overview` pick-one payload. */
+export function isOverviewPickOne(x: unknown): x is OverviewPickOne {
+  return typeof x === "object" && x !== null && (x as OverviewPickOne).pickOne === true;
+}

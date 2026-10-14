@@ -55,6 +55,7 @@ import {
   formatOutline,
   formatReferences,
   formatOverview,
+  isOverviewPickOne,
   formatDependencies,
   formatDeadCode,
   formatCallGraph,
@@ -466,11 +467,15 @@ async function main(): Promise<void> {
           return ok(formatReferences(refs));
         }
         case "get_repo_overview": {
-          const overview = await api<Parameters<typeof formatOverview>[0]>("POST", "/overview", {
+          const overview = await api<unknown>("POST", "/overview", {
             project: args.project,
             path: args.path,
           });
-          return ok(formatOverview(overview));
+          // The graceful pick-one payload (several projects, no anchor) reads
+          // as its note — not an error, so the agent re-issues once with an
+          // anchor instead of round-tripping through list_indexes.
+          if (isOverviewPickOne(overview)) return ok(overview.note);
+          return ok(formatOverview(overview as Parameters<typeof formatOverview>[0]));
         }
         case "get_dependencies": {
           const dep = await api<Parameters<typeof formatDependencies>[0]>("POST", "/dependencies", {
