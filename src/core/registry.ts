@@ -55,6 +55,13 @@ export interface IndexRecord {
   lastIndexedAt: number | null;
   createdAt: number;
   error: string | null;
+  /**
+   * Ephemeral diagnostic note from the last index job — currently the
+   * why-empty explanation for a table with zero files ("collected 0 files —
+   * …"). Optional on the row shape because legacy literals predate the
+   * column; `setIndexNote` clears it whenever the table is non-empty again.
+   */
+  note?: string | null;
 }
 
 /** Persistent row representation of jobs (mapped to Job in core/types.ts). */
@@ -215,6 +222,7 @@ export class Registry {
         embed_model     TEXT,
         embed_dim       INTEGER,
         framing         TEXT,
+        note            TEXT,
         last_indexed_at INTEGER,
         created_at      INTEGER NOT NULL,
         error           TEXT
@@ -297,6 +305,10 @@ export class Registry {
     // Job priority (queue claim order): ensure the column on a registry whose
     // `jobs` table predates it, idempotent (see ensureJobsPriorityColumn).
     this.ensureJobsPriorityColumn();
+    // Index note (zero-file explanation): ensure the column on a registry that
+    // predates it, idempotent (see ensureNoteColumn). No backfill — a note
+    // describes only the most recent index job, and null IS the legacy value.
+    this.ensureNoteColumn();
   }
 
   /**
@@ -357,21 +369,36 @@ export class Registry {
     }
   }
 
+  /**
+   * Lazy schema migration for the index note: a foreign meta.db whose
+   * `indexes` table predates the column gets it added lazily rather than
+   * failing every boot. No data backfill follows — the note is ephemeral
+   * diagnostic state ("why is this table empty?") written by whichever index
+   * job runs last; rows stored without one read as null, which is correct.
+   * Idempotent, like the rest of `migrate()`.
+   */
+  private ensureNoteColumn(): void {
+    const cols = this.db.query(`PRAGMA table_info(indexes)`).all() as { name: string | null }[];
+    if (!cols.some((c) => c.name === "note")) {
+      this.db.run(`ALTER TABLE indexes ADD COLUMN note TEXT`);
+    }
+  }
+
   // ---------------------------------------------------------------- indexes
   upsertIndex(rec: IndexRecord): void {
     this.db
       .query(
         `INSERT INTO indexes
            (name, path, table_name, status, file_count, chunk_count,
-            embed_model, embed_dim, framing, last_indexed_at, created_at, error)
+            embed_model, embed_dim, framing, note, last_indexed_at, created_at, error)
          VALUES
            ($name, $path, $table, $status, $fileCount, $chunkCount,
-            $embedModel, $embedDim, $framing, $lastIndexedAt, $createdAt, $error)
+            $embedModel, $embedDim, $framing, $note, $lastIndexedAt, $createdAt, $error)
          ON CONFLICT(name) DO UPDATE SET
            path=$path, table_name=$table, status=$status,
            file_count=$fileCount, chunk_count=$chunkCount,
            embed_model=$embedModel, embed_dim=$embedDim, framing=$framing,
-           last_indexed_at=$lastIndexedAt, error=$error`,
+           note=$note, last_indexed_at=$lastIndexedAt, error=$error`,
       )
       .run({
         $name: rec.name,
@@ -383,6 +410,7 @@ export class Registry {
         $embedModel: rec.embedModel,
         $embedDim: rec.embedDim,
         $framing: rec.framing ?? null,
+        $note: rec.note ?? null,
         $lastIndexedAt: rec.lastIndexedAt,
         $createdAt: rec.createdAt,
         $error: rec.error,
@@ -415,6 +443,15 @@ export class Registry {
         `UPDATE indexes SET file_count=$fc, chunk_count=$cc, last_indexed_at=$ts WHERE name=$name`,
       )
       .run({ $name: name, $fc: fileCount, $cc: chunkCount, $ts: lastIndexedAt });
+  }
+
+  /**
+   * Diagnostic note for the latest index job (null clears it). Currently the
+   * zero-file explanation: when the table is non-empty again, the next job
+   * clears it — the note never outlives the state it describes.
+   */
+  setIndexNote(name: string, note: string | null): void {
+    this.db.query(`UPDATE indexes SET note = $note WHERE name = $name`).run({ $note: note, $name: name });
   }
 
   /** Records which embedding model/dimension the index was created with. */
@@ -531,6 +568,7 @@ export class Registry {
       lastIndexedAt: (r.last_indexed_at as number | null) ?? null,
       createdAt: r.created_at as number,
       error: (r.error as string | null) ?? null,
+      note: typeof r.note === "string" && r.note.length > 0 ? r.note : null,
     };
   }
 

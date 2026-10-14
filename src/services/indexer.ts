@@ -41,6 +41,25 @@ export interface IndexOptions {
   registry?: Registry | undefined;
 }
 
+/**
+ * Skip-reason counters gathered by `collectFiles` — the why-empty telemetry:
+ * a zero-file collection is a legitimate outcome (e.g. everything under a
+ * `languages` allowlist or an ignore rule), so the job surfaces *why* instead
+ * of reporting a bare "ready" with nothing in the table.
+ */
+export interface CollectStats {
+  /** File/dir entries skipped by the ignore matcher (.gitignore/.cidxignore/ignoredDirs). */
+  ignored: number;
+  /** Files rejected because their extension is not in `indexing.allowedExtensions`. */
+  disallowedExt: number;
+  /** Files rejected by the git-tracked-only mode (not in the tracked set). */
+  untracked: number;
+  /** Files rejected by the per-project `.cidx.json` `languages` allowlist. */
+  langFiltered: number;
+  /** Files rejected by the `maxFileSizeBytes` guard. */
+  oversized: number;
+}
+
 export interface IndexResult {
   files: number;
   chunks: number;
@@ -53,6 +72,11 @@ export interface IndexResult {
    * the ready log line).
    */
   skippedOversized: number;
+  /**
+   * Why-candidates-were-skipped counters for the last `collectFiles` — carried
+   * so a zero-processed run can explain itself (registry note + status).
+   */
+  filterStats: CollectStats;
 }
 
 /** Single-file indexing result (chunk count + observed embedding dimension). */
@@ -126,8 +150,9 @@ export async function collectFiles(
   allowSet?: Set<string> | null,
   langSet?: Set<string> | null,
   maxFileSizeBytes?: number | undefined,
-): Promise<string[]> {
+): Promise<{ files: string[]; stats: CollectStats }> {
   const out: string[] = [];
+  const stats: CollectStats = { ignored: 0, disallowedExt: 0, untracked: 0, langFiltered: 0, oversized: 0 };
   async function walk(dir: string): Promise<void> {
     let entries;
     try {
@@ -137,22 +162,38 @@ export async function collectFiles(
     }
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
-      if (isPathIgnored(ig, baseDir, full)) continue;
+      if (isPathIgnored(ig, baseDir, full)) {
+        stats.ignored++;
+        continue;
+      }
       if (entry.isDirectory()) {
         await walk(full);
-      } else if (entry.isFile() && isAllowed(full)) {
+      } else if (entry.isFile()) {
+        if (!isAllowed(full)) {
+          stats.disallowedExt++;
+          continue;
+        }
         // In git-tracked mode, only files in the allowed set.
-        if (allowSet && !allowSet.has(full)) continue;
+        if (allowSet && !allowSet.has(full)) {
+          stats.untracked++;
+          continue;
+        }
         // Per-project language allowlist (.cidx.json `languages`).
         if (langSet) {
           const lang = extToLanguage(path.extname(full));
-          if (!lang || !langSet.has(lang)) continue;
+          if (!lang || !langSet.has(lang)) {
+            stats.langFiltered++;
+            continue;
+          }
         }
         // Oversized-file guard (active only when a positive limit is set).
         if (maxFileSizeBytes !== undefined && maxFileSizeBytes > 0) {
           try {
             const fst = await stat(full);
-            if (fst.size > maxFileSizeBytes) continue;
+            if (fst.size > maxFileSizeBytes) {
+              stats.oversized++;
+              continue;
+            }
           } catch {
             // Unreadable/unstat-able file: keep it — indexFile reports the
             // failure, and no record is silently pruned on a bad stat.
@@ -163,7 +204,22 @@ export async function collectFiles(
     }
   }
   await walk(baseDir);
-  return out;
+  return { files: out, stats };
+}
+
+/**
+ * One-line human summary of why `collectFiles` kept what it kept — attached to
+ * the ready log line and the registry note when a run processes zero files,
+ * so an agent or the user can see which filter ate the candidates.
+ */
+export function describeFilterStats(stats: CollectStats): string {
+  const parts: string[] = [];
+  if (stats.ignored > 0) parts.push(`${stats.ignored} ignored by .gitignore/.cidxignore/ignoredDirs`);
+  if (stats.disallowedExt > 0) parts.push(`${stats.disallowedExt} with a disallowed extension`);
+  if (stats.untracked > 0) parts.push(`${stats.untracked} not git-tracked`);
+  if (stats.langFiltered > 0) parts.push(`${stats.langFiltered} filtered by the languages allowlist`);
+  if (stats.oversized > 0) parts.push(`${stats.oversized} oversized`);
+  return parts.length > 0 ? parts.join(", ") : "no candidate files seen";
 }
 
 /**
@@ -420,8 +476,19 @@ export async function indexDirectory(
   if (CONFIG.GIT_TRACKED_ONLY && allowSet) {
     console.error(`[indexer] '${target.indexName}' git-tracked mode: ${allowSet.size} tracked files.`);
   }
-  const files = await collectFiles(target.baseDir, ig, allowSet, langSet, maxFileBytes);
+  const { files, stats } = await collectFiles(target.baseDir, ig, allowSet, langSet, maxFileBytes);
   const total = files.length;
+  if (total === 0) {
+    // A zero-file collection is a legitimate outcome, but never a silent one:
+    // an earlier full index would have everything pruned as "deleted", and a
+    // first index would register an empty table. Log loudly and carry the
+    // reason into the job result (registry note + status surface).
+    console.error(
+      `[indexer] '${target.indexName}' collected 0 files — ${describeFilterStats(stats)}. ` +
+        "Check .gitignore/.cidxignore/ignoredDirs, indexing.allowedExtensions, " +
+        "the .cidx.json `languages` allowlist and maxFileSizeBytes settings.",
+    );
+  }
 
   // --- Clean up deleted/ignored files (incremental sync) ---
   let deleted = 0;
@@ -487,7 +554,7 @@ export async function indexDirectory(
     }
   }
 
-  return { files: processed, chunks, dim, deleted, skippedOversized };
+  return { files: processed, chunks, dim, deleted, skippedOversized, filterStats: stats };
 }
 
 // ------------------------------------------------- O2: zero-downtime migration

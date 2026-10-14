@@ -6,6 +6,32 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ---
 
+## Unreleased
+
+Agent-UX and observability wave driven by a week of real MCP-usage review.
+
+### Added
+
+- **Zero-file index transparency**: an index job that collects 0 files is a
+  legitimate outcome but was previously silent — a `ready` record with an empty
+  table and no explanation (first seen when indexing a directory whose only
+  candidates were outside the extension allowlist). `collectFiles` now gathers
+  `CollectStats` (ignored / disallowedExt / untracked / langFiltered / oversized
+  counters), `indexDirectory` logs a loud explanation when the collection is
+  empty, and the reason is persisted in a new lazy-migrated `indexes.note`
+  column, surfaced on `get_index_status` / `list_indexes` / `GET /indexes` /
+  `cidx status` (`note: collected 0 files — …`). The note is cleared as soon as
+  a job leaves the table non-empty again.
+
+### Changed
+
+- **`[index] 'X' ready:` log line is now honest about deltas** — it reports the
+  table's true state (`N files, M chunks in table`) plus what *this* run did
+  (`processed / written / deleted cleaned up`); previously the bare per-run
+  chunk count read as if the table had shrunk to it.
+
+---
+
 ## 2.6.1 (2026-10-13)
 
 A production bug found the day 2.6.0 shipped, healing a silent indexing failure as old as the llama.cpp backend: any file whose 4-byte emoji straddled the 1500-char chunk-window boundary had failed to index on **every sync** (Ollama's lenient JSON parser had masked the whole class). Test suite: **1066/1066** passing (12 new tests, 3471 expectations); `bun run typecheck` clean.

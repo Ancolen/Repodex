@@ -136,20 +136,20 @@ describe("collectFiles with a language allowlist", () => {
 
   test("no filter → all allowed extensions", async () => {
     const ig = await buildIgnore(root);
-    const files = await collectFiles(root, ig);
+    const { files } = await collectFiles(root, ig);
     const rel = files.map((f) => f.slice(root.length + 1)).sort();
     expect(rel).toEqual(["README.md", "src/app.ts", "src/util.py"]);
   });
 
   test("languages: ['typescript'] keeps only .ts", async () => {
     const ig = await buildIgnore(root);
-    const files = await collectFiles(root, ig, null, new Set(["typescript"]));
+    const { files } = await collectFiles(root, ig, null, new Set(["typescript"]));
     expect(files.map((f) => f.slice(root.length + 1))).toEqual(["src/app.ts"]);
   });
 
   test("languages: ['markdown'] keeps only labeled doc formats", async () => {
     const ig = await buildIgnore(root);
-    const files = await collectFiles(root, ig, null, new Set(["markdown"]));
+    const { files } = await collectFiles(root, ig, null, new Set(["markdown"]));
     expect(files.map((f) => f.slice(root.length + 1))).toEqual(["README.md"]);
   });
 });

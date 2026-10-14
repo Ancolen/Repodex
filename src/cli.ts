@@ -81,6 +81,7 @@ function printIndex(ix: any): void {
   console.log(`    path:   ${ix.path}`);
   console.log(`    data:   ${ix.files} files, ${ix.chunks} chunks  (table: ${ix.table})`);
   if (ix.error) console.log(`    error:  ${ix.error}`);
+  if (ix.note) console.log(`    note:   ${ix.note}`);
 }
 
 // ------------------------------------------------------------------ commands

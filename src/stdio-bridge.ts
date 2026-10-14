@@ -135,7 +135,7 @@ function formatIndexList(indexes: IndexView[]): string {
   return indexes
     .map(
       (ix) =>
-        `• ${ix.name} [${ix.status}] — ${ix.path}\n  ${ix.files} files, ${ix.chunks} chunks${ix.error ? `\n  error: ${ix.error}` : ""}`,
+        `• ${ix.name} [${ix.status}] — ${ix.path}\n  ${ix.files} files, ${ix.chunks} chunks${ix.error ? `\n  error: ${ix.error}` : ""}${ix.note ? `\n  note: ${ix.note}` : ""}`,
     )
     .join("\n");
 }
@@ -143,7 +143,7 @@ function formatIndexList(indexes: IndexView[]): string {
 function formatIndexStatus(ix: IndexView): string {
   const prog =
     ix.job && ix.job.total > 0 ? ` — %${ix.job.percent} (${ix.job.processed}/${ix.job.total})` : "";
-  return `${ix.name} [${ix.status}]${prog}\n  ${ix.files} files, ${ix.chunks} chunks${ix.error ? `\n  error: ${ix.error}` : ""}`;
+  return `${ix.name} [${ix.status}]${prog}\n  ${ix.files} files, ${ix.chunks} chunks${ix.error ? `\n  error: ${ix.error}` : ""}${ix.note ? `\n  note: ${ix.note}` : ""}`;
 }
 
 function ok(text: string) {

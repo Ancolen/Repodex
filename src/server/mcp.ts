@@ -317,7 +317,7 @@ export function buildServer(deps: McpDeps): Server {
       const text = indexes
         .map(
           (ix) =>
-            `• ${ix.name} [${ix.status}] — ${ix.path}\n  ${ix.fileCount} files, ${ix.chunkCount} chunks${ix.error ? `\n  error: ${ix.error}` : ""}`,
+            `• ${ix.name} [${ix.status}] — ${ix.path}\n  ${ix.fileCount} files, ${ix.chunkCount} chunks${ix.error ? `\n  error: ${ix.error}` : ""}${ix.note ? `\n  note: ${ix.note}` : ""}`,
         )
         .join("\n");
       return { content: [{ type: "text", text }] };
@@ -333,7 +333,7 @@ export function buildServer(deps: McpDeps): Server {
           job && job.progress.total > 0
             ? ` — %${Math.round((job.progress.processed / job.progress.total) * 100)} (${job.progress.processed}/${job.progress.total})`
             : "";
-        return `${ix.name} [${ix.status}]${prog}\n  ${ix.fileCount} files, ${ix.chunkCount} chunks, model: ${ix.embedModel ?? "—"}${ix.error ? `\n  error: ${ix.error}` : ""}`;
+        return `${ix.name} [${ix.status}]${prog}\n  ${ix.fileCount} files, ${ix.chunkCount} chunks, model: ${ix.embedModel ?? "—"}${ix.error ? `\n  error: ${ix.error}` : ""}${ix.note ? `\n  note: ${ix.note}` : ""}`;
       };
       if (args.project) {
         const text = fmt(args.project);

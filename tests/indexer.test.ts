@@ -7,7 +7,7 @@ import { test, expect, describe, beforeAll, afterAll, spyOn } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildIgnore, collectFiles, isPathIgnored, indexFile } from "../src/services/indexer";
+import { buildIgnore, collectFiles, describeFilterStats, isPathIgnored, indexFile } from "../src/services/indexer";
 
 let root: string;
 
@@ -61,7 +61,7 @@ describe("isPathIgnored", () => {
 describe("collectFiles", () => {
   test("only files with allowed extensions that are not ignored are collected", async () => {
     const ig = await buildIgnore(root);
-    const files = await collectFiles(root, ig);
+    const { files } = await collectFiles(root, ig);
     const rel = files.map((f) => f.slice(root.length + 1)).sort();
 
     // Allowed sources included
@@ -90,14 +90,14 @@ describe("collectFiles", () => {
   test("only files in allowSet are collected (git-tracked simulation)", async () => {
     const ig = await buildIgnore(root);
     const only = new Set([join(root, "src/app.ts")]);
-    const files = await collectFiles(root, ig, only);
+    const { files } = await collectFiles(root, ig, only);
     expect(files).toEqual([join(root, "src/app.ts")]);
   });
 
   test("unreachable subdirectory is silently skipped (upper scan continues)", async () => {
     const ig = await buildIgnore(root);
     // Non-existent root -> empty list (does not throw).
-    const files = await collectFiles(join(root, "no-such-directory"), ig);
+    const { files } = await collectFiles(join(root, "no-such-directory"), ig);
     expect(files).toEqual([]);
   });
 });
@@ -119,21 +119,21 @@ describe("collectFiles — maxFileSizeBytes guard (oversized-file filter)", () =
   test("no limit (undefined / 0) collects everything", async () => {
     const ig = await buildIgnore(sroot);
     for (const limit of [undefined, 0]) {
-      const rel = (await collectFiles(sroot, ig, null, null, limit)).map((f) => f.slice(sroot.length + 1)).sort();
+      const rel = (await collectFiles(sroot, ig, null, null, limit)).files.map((f) => f.slice(sroot.length + 1)).sort();
       expect(rel).toEqual(["big.ts", "exact.ts", "small.ts"]);
     }
   });
 
   test("files strictly larger than the limit are absent", async () => {
     const ig = await buildIgnore(sroot);
-    const rel = (await collectFiles(sroot, ig, null, null, 120)).map((f) => f.slice(sroot.length + 1)).sort();
+    const rel = (await collectFiles(sroot, ig, null, null, 120)).files.map((f) => f.slice(sroot.length + 1)).sort();
     // 240 > 120 excluded; 120 == limit kept (the rule is strictly-larger).
     expect(rel).toEqual(["exact.ts", "small.ts"]);
   });
 
   test("a tight limit keeps only the small file", async () => {
     const ig = await buildIgnore(sroot);
-    const rel = (await collectFiles(sroot, ig, null, null, 20)).map((f) => f.slice(sroot.length + 1));
+    const rel = (await collectFiles(sroot, ig, null, null, 20)).files.map((f) => f.slice(sroot.length + 1));
     expect(rel).toEqual(["small.ts"]);
   });
 });
@@ -164,5 +164,29 @@ describe("indexFile — AbortSignal (mid-file cancellation guarantee)", () => {
     // must return {chunks: 0, dim: null} without going to embedding or DB at all.
     const r = await indexFile(target, join(root, "src/app.ts"), undefined, ac.signal);
     expect(r).toEqual({ chunks: 0, dim: null });
+  });
+});
+
+describe("collectFiles — skip telemetry (CollectStats)", () => {
+  test("each filter bucket is counted exactly once in the shared fixture", async () => {
+    const ig = await buildIgnore(root);
+    const { files, stats } = await collectFiles(root, ig);
+    expect(files.length).toBe(5);
+    expect(stats.untracked).toBe(0);
+    expect(stats.langFiltered).toBe(0);
+    expect(stats.oversized).toBe(0);
+    expect(stats.disallowedExt).toBe(4); // notes.txt, image.png + the two ignore files themselves
+    // Dir entries: node_modules, .git, dist, target, secret, vendor + app.log
+    expect(stats.ignored).toBe(7);
+  });
+
+  test("describeFilterStats names only the non-zero buckets", async () => {
+    const ig = await buildIgnore(root);
+    const { stats, files } = await collectFiles(root, ig);
+    const text = describeFilterStats(stats);
+    expect(text).toContain("ignored by .gitignore/.cidxignore/ignoredDirs");
+    expect(text).toContain("disallowed extension");
+    expect(text).not.toContain("oversized");
+    expect(files.length).toBeGreaterThan(0);
   });
 });

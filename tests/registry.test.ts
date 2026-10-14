@@ -432,3 +432,52 @@ describe("commitTableSwap (O2)", () => {
     expect(rec!.framing).toBeNull();
   });
 });
+
+describe("index note — zero-file explanation (lazy migration)", () => {
+  test("setIndexNote writes and clears the ephemeral note", () => {
+    const dbPath = tempDbPath();
+    const reg = new Registry(dbPath);
+    try {
+      reg.upsertIndex(makeIndex("mynote", { status: "ready" }));
+      expect(reg.getIndex("mynote")?.note ?? null).toBeNull();
+      reg.setIndexNote("mynote", "collected 0 files — 3 with a disallowed extension");
+      expect(reg.getIndex("mynote")?.note).toBe("collected 0 files — 3 with a disallowed extension");
+      reg.setIndexNote("mynote", null);
+      expect(reg.getIndex("mynote")?.note ?? null).toBeNull();
+    } finally {
+      reg.close();
+      rmSync(dbPath, { force: true });
+    }
+  });
+
+  test("an indexes table predating the note column is ALTERed and reads null", () => {
+    const dbPath = tempDbPath();
+    const raw = new Database(dbPath);
+    // A foreign/very-old meta.db: no note column on indexes at all.
+    raw.run(`CREATE TABLE indexes (
+      name TEXT PRIMARY KEY, path TEXT NOT NULL, table_name TEXT NOT NULL,
+      status TEXT NOT NULL, file_count INTEGER NOT NULL DEFAULT 0,
+      chunk_count INTEGER NOT NULL DEFAULT 0, embed_model TEXT, embed_dim INTEGER,
+      last_indexed_at INTEGER, created_at INTEGER NOT NULL, error TEXT
+    )`);
+    raw.run(`INSERT INTO indexes (name, path, table_name, status, created_at)
+             VALUES ('legacy', '/tmp/legacy', 'idx_legacy', 'ready', 1)`);
+    raw.close();
+
+    const lazy = new Registry(dbPath);
+    try {
+      const rec = lazy.getIndex("legacy");
+      expect(rec).not.toBeNull();
+      expect(rec?.note ?? null).toBeNull();
+      // The ALTERed table accepts note writes, and the unrelated update paths
+      // (stats/status) leave a written note untouched.
+      lazy.setIndexNote("legacy", "collected 0 files — 2 ignored by .gitignore/.cidxignore/ignoredDirs");
+      expect(lazy.getIndex("legacy")?.note).toContain("collected 0 files");
+      lazy.setIndexStats("legacy", 0, 0, Date.now());
+      expect(lazy.getIndex("legacy")?.note).toContain("collected 0 files");
+    } finally {
+      lazy.close();
+      rmSync(dbPath, { force: true });
+    }
+  });
+});

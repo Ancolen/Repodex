@@ -57,6 +57,8 @@ export interface IndexView {
   chunks: number;
   lastIndexedAt: number | null;
   error: string | null;
+  /** Diagnostic note from the last index job (zero-file explanation); null when none. */
+  note: string | null;
   job: ActiveJobView | null;
 }
 
@@ -82,6 +84,7 @@ export function viewIndex(jobs: ResourceViewJobs, rec: IndexRecord): IndexView {
     chunks: rec.chunkCount,
     lastIndexedAt: rec.lastIndexedAt,
     error: rec.error,
+    note: rec.note ?? null,
     job: job
       ? {
           id: job.id,

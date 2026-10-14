@@ -27,6 +27,7 @@ import { resolveFraming, frameQuery } from "./framing";
 import {
   indexDirectory,
   migrateTable,
+  describeFilterStats,
   type IndexResult,
   type IndexTarget,
   type MigrateResult,
@@ -3624,12 +3625,20 @@ export class IndexManager {
           resolveFraming(pcfg?.framing ?? CONFIG.EMBEDDING_FRAMING, usedModel),
         );
         this.registry.setIndexStatus(t.indexName, "ready");
+        // Explain an empty table where the emptiness was decided: the
+        // filterStats describe which collector ate the candidates. Cleared as
+        // soon as the table is non-empty again — the note never outlives it.
+        this.registry.setIndexNote(
+          t.indexName,
+          fileCount === 0 ? `collected 0 files — ${describeFilterStats(result.filterStats)}` : null,
+        );
         const pruned = this.registry.pruneEmbeddingCache(CONFIG.EMBED_CACHE_MAX);
         console.error(
-          `[index] '${t.indexName}' ready: ${result.files} files, ${result.chunks} chunks` +
+          `[index] '${t.indexName}' ready: ${fileCount} files, ${chunkCount} chunks in table` +
+            ` (this run: ${result.files} processed, ${result.chunks} chunks written` +
             (result.deleted > 0 ? `, ${result.deleted} deleted cleaned up` : "") +
             (result.skippedOversized > 0 ? `, ${result.skippedOversized} oversized skipped` : "") +
-            ` → ${t.tableName}` +
+            `) → ${t.tableName}` +
             (pruned > 0 ? ` (cache prune: ${pruned})` : ""),
         );
       }
