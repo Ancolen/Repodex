@@ -122,7 +122,7 @@ async function cmdIndex(positionals: string[], flags: Record<string, string | bo
   await requireDaemon();
   const dir = positionals[0];
   if (!dir) {
-    console.error("Usage: cidx index <directory> [--name <name>]");
+    console.error("Usage: cidx index <directory> [--name <name>] [--wait]");
     process.exit(1);
   }
   const abs = path.resolve(dir);
@@ -130,12 +130,17 @@ async function cmdIndex(positionals: string[], flags: Record<string, string | bo
     console.error(`Directory not found: ${abs}`);
     process.exit(1);
   }
-  const body: { path: string; name?: string } = { path: abs };
+  const body: { path: string; name?: string; wait?: boolean } = { path: abs };
   if (typeof flags.name === "string") body.name = flags.name;
+  if (flags.wait === true) body.wait = true;
   const ix = await api("POST", "/index", body);
-  console.log("Indexing started (in the background):");
+  console.log(flags.wait === true ? "Indexing (waited for the final status):" : "Indexing started (in the background):");
   printIndex(ix);
-  console.log(`\nTo see progress:  cidx status ${ix.name}`);
+  if (ix.timedOut) console.log("    (wait budget elapsed — still indexing; poll with `cidx status`.)");
+  if (ix.warning) console.log(`    ⚠ ${ix.warning}`);
+  if (flags.wait !== true) {
+    console.log(`\nTo see progress:  cidx status ${ix.name}`);
+  }
 }
 
 async function cmdList(): Promise<void> {

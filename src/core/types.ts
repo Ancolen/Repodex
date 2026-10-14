@@ -61,6 +61,15 @@ export const INDEX_JOB_TYPE = "index";
  */
 export const JOB_PRIORITY_BACKGROUND = -5;
 
+/**
+ * How long the optional `wait` on an index start (`/index`/`/reindex`/`/sync`
+ * body, MCP `index_project`) blocks for the final status — one round-trip for
+ * agents that cannot receive job-completion notifications, but never a
+ * deadlock on a slow backend: past the budget the call returns with
+ * `timedOut: true` and the caller falls back to polling like before.
+ */
+export const INDEX_WAIT_MS = 120_000;
+
 /** The zero-downtime model migration job (proposal O2): rebuild every vector of the
  * project's current table in a shadow table with `targetModel` and swap the
  * registry to it in one transaction once the shadow is complete. Search keeps

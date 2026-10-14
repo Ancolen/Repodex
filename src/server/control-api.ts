@@ -168,8 +168,8 @@ export function startControlApi(
     res.json(viewIndex(deps.manager, rec));
   });
 
-  app.post("/index", (req, res) => {
-    const { path: dir, name } = (req.body ?? {}) as { path?: string; name?: string };
+  app.post("/index", async (req, res) => {
+    const { path: dir, name, wait } = (req.body ?? {}) as { path?: string; name?: string; wait?: boolean };
     if (!dir) {
       res.status(400).json({ error: "'path' is required" });
       return;
@@ -180,35 +180,44 @@ export function startControlApi(
     }
     try {
       const rec = deps.manager.createIndex(dir, name);
-      res.json(viewIndex(deps.manager, rec));
+      // Duplicate-scope catch BEFORE the disk work happens: an overlapping
+      // note is computed at start time and rides the response.
+      const warningNote = deps.manager.pathOverlapWarning(rec.path);
+      const settled = await deps.manager.waitForIndexSettle(rec.name, wait);
+      const view = viewIndex(deps.manager, settled.rec);
+      res.json({ ...view, ...(warningNote ? { warning: warningNote } : {}), ...(settled.timedOut ? { timedOut: true } : {}) });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });
 
-  app.post("/reindex", (req, res) => {
-    const { name } = (req.body ?? {}) as { name?: string };
+  app.post("/reindex", async (req, res) => {
+    const { name, wait } = (req.body ?? {}) as { name?: string; wait?: boolean };
     if (!name) {
       res.status(400).json({ error: "'name' is required" });
       return;
     }
     try {
       const rec = deps.manager.reindex(name);
-      res.json(viewIndex(deps.manager, rec));
+      const settled = await deps.manager.waitForIndexSettle(rec.name, wait);
+      const view = viewIndex(deps.manager, settled.rec);
+      res.json({ ...view, ...(settled.timedOut ? { timedOut: true } : {}) });
     } catch (err) {
       res.status(404).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });
 
-  app.post("/sync", (req, res) => {
-    const { name } = (req.body ?? {}) as { name?: string };
+  app.post("/sync", async (req, res) => {
+    const { name, wait } = (req.body ?? {}) as { name?: string; wait?: boolean };
     if (!name) {
       res.status(400).json({ error: "'name' is required" });
       return;
     }
     try {
       const rec = deps.manager.syncIndex(name);
-      res.json(viewIndex(deps.manager, rec));
+      const settled = await deps.manager.waitForIndexSettle(rec.name, wait);
+      const view = viewIndex(deps.manager, settled.rec);
+      res.json({ ...view, ...(settled.timedOut ? { timedOut: true } : {}) });
     } catch (err) {
       res.status(404).json({ error: err instanceof Error ? err.message : String(err) });
     }

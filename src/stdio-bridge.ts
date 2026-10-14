@@ -443,10 +443,20 @@ async function main(): Promise<void> {
           return ok(indexes.length ? indexes.map(formatIndexStatus).join("\n") : "No projects indexed yet.");
         }
         case "index_project": {
-          const ix = await api<IndexView>("POST", "/index", { path: args.path, name: args.name });
-          return ok(
-            `Indexing started (in the background): '${ix.name}' [${ix.status}] → ${ix.path}\nFor progress: get_index_status("${ix.name}").`,
-          );
+          const ix = await api<IndexView & { warning?: string; timedOut?: boolean }>("POST", "/index", {
+            path: args.path,
+            name: args.name,
+            wait: args.wait === true,
+          });
+          const lines = [
+            ix.timedOut
+              ? `Indexing still running: '${ix.name}' [${ix.status}] → ${ix.path}\n(wait: timed out after a budget — poll get_index_status("${ix.name}") for the final state.)`
+              : ix.status === "indexing"
+                ? `Indexing started (in the background): '${ix.name}' [${ix.status}] → ${ix.path}\nFor progress: get_index_status("${ix.name}").`
+                : `Indexing done: '${ix.name}' [${ix.status}] → ${ix.path}\n  ${ix.files} files, ${ix.chunks} chunks`,
+          ];
+          if (ix.warning) lines.push(`⚠ ${ix.warning}`);
+          return ok(lines.join("\n"));
         }
         case "get_file_outline": {
           const outline = await api<Parameters<typeof formatOutline>[0]>("POST", "/outline", {

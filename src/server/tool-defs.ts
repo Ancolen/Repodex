@@ -260,12 +260,21 @@ export const TOOL_DEFINITIONS: Tool[] = [
   {
     name: "index_project",
     description:
-      "Starts indexing a local directory as a new project (in the background, returns immediately). If the same path already exists, it is reindexed.",
+      "Starts indexing a local directory as a new project. If the same path already exists, it is reindexed. " +
+      "Without 'wait' it returns immediately (indexing continues in the background; poll get_index_status). " +
+      "With 'wait: true' it blocks up to a budget and returns the FINAL status in this reply — preferred, " +
+      "since HTTP-attached agents cannot receive completion notifications. Warns when an already-indexed " +
+      "project overlaps (contains or is contained by) this path.",
     inputSchema: {
       type: "object",
       properties: {
         path: { type: "string", description: "Absolute path of the directory to index." },
         name: { type: "string", description: "Project name (optional; if not given, the folder name)." },
+        wait: {
+          type: "boolean",
+          description:
+            "Block until indexing finishes (up to a budget) and include the final status. Default false = return immediately.",
+        },
       },
       required: ["path"],
     },

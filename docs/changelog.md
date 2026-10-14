@@ -31,6 +31,21 @@ Agent-UX and observability wave driven by a week of real MCP-usage review.
   on the error, re-issuing the identical call, and only then falling back to
   `list_indexes`. The single-project and anchored paths are unchanged.
 
+- **`index_project` / `/index`+`/reindex`+`/sync` got a `wait` option** — with
+  `wait: true` the call blocks up to `INDEX_WAIT_MS` (120 s) for the final
+  status instead of returning immediately (`timedOut: true` past the budget,
+  poll as before). HTTP-attached MCP agents cannot receive job-completion
+  notifications (only the stdio bridge sees `/events`), so real usage boiled
+  down to one `index_project` + one-or-three `get_index_status` polls per
+  index; `wait: true` collapses that to one round-trip. The tool description
+  recommends it. `cidx index --wait` on the CLI.
+- **Overlapping-scope warning at index start**: `index_project` responds with
+  a `⚠` note when the target path lies inside (or contains) an
+  already-indexed project — observed live with `~robot/server/src` indexed as
+  its own project next to `~robot/server`, doubling disk work and splitting
+  `find_symbol` results across two scopes. Pure helper `utils/pathtools.ts`;
+  Control-API responses carry `warning`.
+
 ### Changed
 
 - **`[index] 'X' ready:` log line is now honest about deltas** — it reports the

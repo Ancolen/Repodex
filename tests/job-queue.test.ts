@@ -198,3 +198,31 @@ describe("JobQueue activeJobCount (the idle-shutdown gate, proposal O4)", () => 
     expect(q.activeJobCount()).toBe(0);
   });
 });
+
+describe("JobQueue waitForJob — timeout variant (the index-start wait budget)", () => {
+  test("false when the budget elapses, then true once the job finishes", async () => {
+    const q = new JobQueue();
+    let release: () => void = () => {};
+    const started = new Promise<void>((r) => (release = r));
+    q.registerHandler("slow", async () => {
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      return null;
+    });
+    const id = q.enqueue("slow", {});
+    await started;
+    // Budget too short → false, and the call returns without the job finishing.
+    expect(await q.waitForJob(id, 20)).toBe(false);
+    // A settled-timeout listener must not leak: a second wait resolves false again.
+    expect(await q.waitForJob(id, 20)).toBe(false);
+    // Waiting past the job's real duration → true.
+    await waitFinished(q, id);
+    expect(q.getJob(id)?.status).toBe("completed");
+    expect(await q.waitForJob(id, 100)).toBe(true);
+  });
+
+  test("unknown id and already-terminal jobs resolve true immediately", async () => {
+    const q = new JobQueue();
+    expect(await q.waitForJob("no-such-job", 10)).toBe(true);
+  });
+});

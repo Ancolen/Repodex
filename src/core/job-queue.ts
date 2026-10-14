@@ -128,20 +128,40 @@ export class JobQueue extends EventEmitter {
    * after being cancelled (e.g. to guarantee that an in-progress write finishes
    * before dropping the table).
    */
-  waitForJob(id: string): Promise<void> {
+  waitForJob(id: string): Promise<void>;
+  /**
+   * With a `timeoutMs`, resolves `true` when the job reached a terminal state
+   * (or never existed) and `false` when the budget elapsed first — the
+   * listener is removed and the timer unref'd either way. Used by the
+   * Control-API/MCP `wait` option on index starts: block up to a budget so an
+   * agent gets the final status in one round-trip, but never deadlock on a
+   * slow backend.
+   */
+  waitForJob(id: string, timeoutMs: number): Promise<boolean>;
+  waitForJob(id: string, timeoutMs?: number): Promise<void | boolean> {
     const job = this.jobs.get(id);
-    if (!job) return Promise.resolve();
+    if (!job) return Promise.resolve(timeoutMs === undefined ? undefined : true);
     if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
-      return Promise.resolve();
+      return Promise.resolve(timeoutMs === undefined ? undefined : true);
     }
-    return new Promise<void>((resolve) => {
+    return new Promise<void | boolean>((resolve) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (value: boolean): void => {
+        if (settled) return;
+        settled = true;
+        if (timer !== undefined) clearTimeout(timer);
+        this.off("finished", onFinished);
+        resolve(timeoutMs === undefined ? undefined : value);
+      };
       const onFinished = (j: Job): void => {
-        if (j.id === id) {
-          this.off("finished", onFinished);
-          resolve();
-        }
+        if (j.id === id) finish(true);
       };
       this.on("finished", onFinished);
+      if (timeoutMs !== undefined) {
+        timer = setTimeout(() => finish(false), timeoutMs);
+        timer.unref?.();
+      }
     });
   }
 

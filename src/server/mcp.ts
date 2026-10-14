@@ -361,7 +361,7 @@ export function buildServer(deps: McpDeps): Server {
     }
 
     if (name === "index_project") {
-      const args = rawArgs as { path: string; name?: string };
+      const args = rawArgs as { path: string; name?: string; wait?: boolean };
       if (!args.path) {
         return { content: [{ type: "text", text: "'path' is required." }], isError: true };
       }
@@ -373,14 +373,17 @@ export function buildServer(deps: McpDeps): Server {
       }
       try {
         const ix = deps.manager.createIndex(args.path, args.name);
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Indexing started (in the background): '${ix.name}' [${ix.status}] → ${ix.path}\nFor progress: get_index_status("${ix.name}").`,
-            },
-          ],
-        };
+        const warning = deps.manager.pathOverlapWarning(ix.path);
+        const settled = await deps.manager.waitForIndexSettle(ix.name, args.wait);
+        const statusLine = `Indexing ${settled.timedOut ? "still running" : "started"}: '${ix.name}' [${settled.rec.status}] → ${ix.path}`;
+        const lines = [statusLine];
+        if (settled.timedOut) {
+          lines.push(`(wait: timed out after a budget — poll get_index_status("${ix.name}") for the final state.)`);
+        } else if (settled.rec.status === "indexing") {
+          lines.push(`For progress: get_index_status("${ix.name}").`);
+        }
+        if (warning) lines.push(`⚠ ${warning}`);
+        return { content: [{ type: "text", text: lines.join("\n") }] };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text", text: `Failed to start indexing: ${msg}` }], isError: true };

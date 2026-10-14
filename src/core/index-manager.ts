@@ -16,12 +16,14 @@ import type { JobQueue } from "./job-queue";
 import type { Job } from "./types";
 import {
   INDEX_JOB_TYPE,
+  INDEX_WAIT_MS,
   JOB_PRIORITY_BACKGROUND,
   MIGRATE_JOB_TYPE,
   DOC_CHECK_JOB_TYPE,
   type MigrateJobPayload,
   type DocCheckJobPayload,
 } from "./types";
+import { pathOverlapNote } from "../utils/pathtools";
 // Per-model embedding task framing: the pure resolution + the prefix helpers.
 import { resolveFraming, frameQuery } from "./framing";
 import {
@@ -1103,6 +1105,35 @@ export class IndexManager {
     this.enqueueIndex(target, false);
     this.ensureWatcher(target);
     return this.registry.getIndex(name)!;
+  }
+
+  /**
+   * With `wait` set (the Control-API `/index`,`/reindex`,`/sync` `wait` body
+   * option and the MCP `index_project` `wait` arg), blocks up to
+   * `INDEX_WAIT_MS` for the just-enqueued job to reach a terminal state so the
+   * caller gets the FINAL record in one round-trip — HTTP-attached MCP agents
+   * cannot receive job-completion notifications (only the stdio bridge sees
+   * `/events`), so without this they must poll `get_index_status`. Returns the
+   * latest record plus `timedOut` (still indexing when the budget elapsed).
+   */
+  async waitForIndexSettle(name: string, wait?: boolean): Promise<{ rec: IndexRecord; timedOut: boolean }> {
+    const rec = this.registry.getIndex(name);
+    if (!rec) throw this.indexNotFound(name);
+    if (!wait) return { rec, timedOut: false };
+    const jobId = this.jobByIndex.get(name);
+    // An entry already removed from jobByIndex means the job finished before
+    // we looked; a missed lookup is settled, not an error.
+    const done = jobId ? await this.jobQueue.waitForJob(jobId, INDEX_WAIT_MS) : true;
+    return { rec: this.registry.getIndex(name) ?? rec, timedOut: !done };
+  }
+
+  /**
+   * A note describing how a to-be-indexed directory overlaps an ALREADY
+   * indexed project (null = no overlap) — attached to the index-start
+   * response so duplicate/inner projects are caught before the disk work.
+   */
+  pathOverlapWarning(baseDir: string): string | null {
+    return pathOverlapNote(baseDir, this.registry.listIndexes().map((r) => ({ name: r.name, path: r.path })));
   }
 
   /**
