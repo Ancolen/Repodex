@@ -310,6 +310,23 @@ export interface DocCheckReport {
   /** True when reverse coverage was turned off (`noUndocumented`) — the empty list means nothing then. */
   undocumentedDisabled?: boolean | undefined;
   notes: string[];
+  /**
+   * Caller-attached (not engine-produced), present only when an explicit doc
+   * ref list was passed (`opts.files` / `.cidx.json` `doccheck.files`): what
+   * became of each requested ref. A ref the discovery never picked up is NOT
+   * silent — without this the checked subset can read as `docs: 1` with no
+   * hint that the rest were out-of-root, missing or filtered away.
+   */
+  requestedDocs?: RequestedDocResolution[];
+}
+
+/** How one caller-passed doc ref resolved against the discovered doc set. */
+export type RequestedDocStatus = "matched" | "missing" | "filtered" | "outsideRoot";
+
+export interface RequestedDocResolution {
+  /** The requested ref verbatim (relative glob/path or absolute path as given). */
+  ref: string;
+  status: RequestedDocStatus;
 }
 
 // --------------------------------------------------------------- constants

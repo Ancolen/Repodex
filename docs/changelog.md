@@ -48,6 +48,14 @@ Agent-UX and observability wave driven by a week of real MCP-usage review.
 
 ### Changed
 
+- **`check_docs` requested refs are no longer silent drops** — with an
+  explicit `files` list (the tool arg or `.cidx.json` `doccheck.files`), the
+  report now carries `requestedDocs` (per-ref `matched` / `missing` /
+  `filtered` / `outsideRoot`) and a rendered `⚠ requested docs — NOT included:`
+  section. Real usage observed an agent issuing nine `check_docs` calls
+  probing doc refs the discovery silently ignored (docs outside the project
+  root) with `docsUnreadable: 0` and no explanation each time.
+
 - **`[index] 'X' ready:` log line is now honest about deltas** — it reports the
   table's true state (`N files, M chunks in table`) plus what *this* run did
   (`processed / written / deleted cleaned up`); previously the bare per-run

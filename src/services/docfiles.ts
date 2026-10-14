@@ -148,3 +148,32 @@ export async function readProjectManifest(baseDir: string): Promise<{
     return empty;
   }
 }
+// ------------------------------------------------- requested-doc resolution
+
+/**
+ * Resolves caller-passed doc refs (`opts.files` / `.cidx.json`
+ * `doccheck.files`) against a discovered set: a ref the engine never picks up
+ * is NOT silent — an out-of-root path, a non-existent file, or an on-disk file
+ * excluded by the include globs / ignore rules each get their own status, so a
+ * report whose checked subset reads `docs: 1` can explain itself. Pure data +
+ * one fs existence check per ref (this module is the fs half of D1).
+ */
+export function resolveRequestedDocs(
+  refs: readonly string[],
+  root: string,
+  matchedAbs: ReadonlySet<string>,
+): Array<{ ref: string; status: "matched" | "missing" | "filtered" | "outsideRoot" }> {
+  return refs.map((ref) => {
+    const abs = path.isAbsolute(ref) ? path.resolve(ref) : path.resolve(root, ref);
+    const rel = path.relative(root, abs);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) return { ref, status: "outsideRoot" };
+    let onDisk = false;
+    try {
+      onDisk = fs.statSync(abs).isFile();
+    } catch {
+      onDisk = false;
+    }
+    if (!onDisk) return { ref, status: "missing" };
+    return { ref, status: matchedAbs.has(abs) ? "matched" : "filtered" };
+  });
+}

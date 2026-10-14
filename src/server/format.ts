@@ -655,6 +655,16 @@ export function formatDocCheck(r: DocCheckReport): string {
     .map(([k, n]) => `${k}: ${n}`)
     .join(", ");
   if (skipped) lines.push(`Skipped (never findings): ${skipped}`);
+  if (r.requestedDocs) {
+    const matched = r.requestedDocs.filter((x) => x.status === "matched").length;
+    const unmatched = r.requestedDocs.filter((x) => x.status !== "matched");
+    if (unmatched.length > 0) {
+      lines.push(
+        `\n⚠ requested docs — ${matched} of ${r.requestedDocs.length} made it into the check; NOT included:`,
+      );
+      for (const x of unmatched) lines.push(`  ${x.ref} [${x.status}]`);
+    }
+  }
 
   lines.push(`\n✗ drift (${r.verdict.findings}) — the doc contradicts the code`);
   if (r.findings.length === 0) {

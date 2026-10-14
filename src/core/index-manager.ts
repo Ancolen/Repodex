@@ -151,7 +151,7 @@ import {
 export type { DocCheckReport, DocFinding, UndocumentedEntry } from "./doccheck";
 // D1b — the semantic judge's wire client (built here, injected into the engine).
 import { createDocJudge, createJudgeAvailabilityProbe } from "../services/docjudge";
-import { collectDocFiles, listRootFiles, readProjectManifest } from "../services/docfiles";
+import { collectDocFiles, listRootFiles, readProjectManifest, resolveRequestedDocs } from "../services/docfiles";
 // A2 — event stream: the events the daemon subscribes to (job completion,
 // index add/remove) and forwards into its in-memory ring for GET /events.
 import type { DaemonEventInput } from "./events";
@@ -3945,6 +3945,25 @@ export class IndexManager {
     report.checked.truncated = discovery.truncated || snapshot.truncated;
     if (docsUnreadable > 0) report.checked.docsUnreadable = docsUnreadable;
     if (notes.length > 0) report.notes.push(...notes);
+
+    // Requested-doc resolution feedback (agent UX): when an explicit ref list
+    // was passed, each ref that matched nothing gets its own status — without
+    // this the checked subset would read `docs: 1` with no hint that the rest
+    // were out-of-root, missing, or swallowed by the include/ignore rules
+    // (observed live: an agent re-issued 9 check_docs calls probing doc paths).
+    const requestedRefs = opts.files ?? cfg?.doccheck?.files;
+    if (requestedRefs && requestedRefs.length > 0) {
+      const matchedAbs = new Set<string>();
+      for (const abs of discovery.files) matchedAbs.add(path.resolve(abs));
+      const requestedDocs = resolveRequestedDocs(requestedRefs, rec.path, matchedAbs);
+      report.requestedDocs = requestedDocs;
+      const unmatched = requestedDocs.filter((x) => x.status !== "matched");
+      if (unmatched.length > 0) {
+        report.notes.push(
+          `requested docs not included: ${unmatched.map((x) => `${x.ref} [${x.status}]`).join(", ")}`,
+        );
+      }
+    }
 
     if (opts.since || opts.window) {
       await this.applyDocCheckWindow(rec, report, docs, opts.since, !!opts.window);

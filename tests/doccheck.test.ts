@@ -26,7 +26,13 @@ import {
   type DocJudgeContext,
   type DocSpan,
 } from "../src/core/doccheck";
-import { collectDocFiles, listRootFiles, readProjectManifest, DOC_MAX_FILES } from "../src/services/docfiles";
+import {
+  collectDocFiles,
+  listRootFiles,
+  readProjectManifest,
+  resolveRequestedDocs,
+  DOC_MAX_FILES,
+} from "../src/services/docfiles";
 import { NAME_REGEX_CAP } from "../src/core/deadcode";
 
 // ---------------------------------------------------------------- fixtures
@@ -1089,5 +1095,46 @@ describe("runDocCheck — semantic judge (D1b)", () => {
     expect(surrounding[2]!.endsWith("…")).toBe(true);
     expect(surrounding[0]).toBe("before one");
     expect(surrounding[4]).toBe("after three");
+  });
+});
+
+// ------------------------------------------------- requested-doc resolution
+
+describe("resolveRequestedDocs — the non-silent requested doc feedback", () => {
+  let root: string;
+  beforeAll(() => {
+    root = mkdtempSync(path.join(os.tmpdir(), "cidx-reqdocs-"));
+    mkdirSync(path.join(root, "docs"), { recursive: true });
+    writeFileSync(path.join(root, "README.md"), "# d\n");
+    writeFileSync(path.join(root, "docs/PLAN.md"), "# p\n");
+    writeFileSync(path.join(root, "notes.txt"), "on disk, not a doc include\n");
+  });
+  afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+  const matched = () => new Set<string>([path.join(root, "README.md"), path.join(root, "docs/PLAN.md")]);
+
+  test("each status is assigned where the checker was silent before", () => {
+    const res = resolveRequestedDocs(
+      ["README.md", "docs/PLAN.md", "docs/NOPE.md", "../outside.md"],
+      root,
+      matched(),
+    );
+    expect(res).toEqual([
+      { ref: "README.md", status: "matched" },
+      { ref: "docs/PLAN.md", status: "matched" },
+      { ref: "docs/NOPE.md", status: "missing" },
+      { ref: "../outside.md", status: "outsideRoot" },
+    ]);
+  });
+
+  test("on-disk-but-not-discovered is 'filtered'; outside-root wins even if missing", () => {
+    const res = resolveRequestedDocs(["notes.txt", "../definitely-not-here.md"], root, matched());
+    // On disk inside the root, but not in the discovered doc set (not a doc
+    // include) — the ref the discovery silently dropped before this existed.
+    expect(res[0]).toEqual({ ref: "notes.txt", status: "filtered" });
+    expect(res[1]).toEqual({ ref: "../definitely-not-here.md", status: "outsideRoot" });
+    // An absolute ref INSIDE the root resolves like its relative form.
+    expect(resolveRequestedDocs([path.join(root, "docs/PLAN.md")], root, matched())[0])
+      .toEqual({ ref: path.join(root, "docs/PLAN.md"), status: "matched" });
   });
 });
