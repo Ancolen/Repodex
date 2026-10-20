@@ -540,6 +540,23 @@ describe("runDocCheck", () => {
     expect(f.doc.line).toBe(2);
   });
 
+  test("identical spans repeated on one line collapse to one finding", async () => {
+    // Regression: `NOTICE` appeared twice on README.md:575 (two backtick spans)
+    // and produced two byte-identical review findings (D-6/D-7).
+    const state = baseState({
+      chunks: codeChunks,
+      docs: [docFile("docs/a.md", "`madeUpThing` then `madeUpThing` and `NOTICE` and `NOTICE`")],
+    });
+    const report = await runDocCheck(state, { noUndocumented: true });
+    expect(report.findings).toHaveLength(1);
+    expect(report.findings[0]!.message).toContain("madeUpThing");
+    expect(report.needsReview).toHaveLength(1);
+    expect(report.needsReview[0]!.message).toContain("NOTICE");
+    // ids stay contiguous after dedupe
+    expect(report.findings[0]!.id).toBe("D-1");
+    expect(report.needsReview[0]!.id).toBe("D-2");
+  });
+
   test("prose examples land in needsReview, never in findings", async () => {
     const state = baseState({
       chunks: codeChunks,

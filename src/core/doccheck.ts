@@ -1771,6 +1771,14 @@ export async function runDocCheck(state: DocCheckState, opts: DocCheckOpts = {})
   const needsReview: DocFinding[] = [];
   /** `needsReview` candidates, kept pending until the optional judge (D1b) has had its say. */
   const pending: ReviewPending[] = [];
+  /**
+   * A token can legitimately appear more than once on the same doc line (e.g.
+   * the LICENSE/NOTICE sentence names each file twice). Each span is a claim,
+   * but two identical claims must not become two identical findings: dedupe on
+   * the full claim identity BEFORE assigning the sequential id, so the ids stay
+   * contiguous and deterministic.
+   */
+  const seenFindings = new Set<string>();
 
   for (const span of allSpans) {
     const mates = lineSpans.get(`${span.docRelPath}:${span.line}`) ?? [];
@@ -1781,6 +1789,9 @@ export async function runDocCheck(state: DocCheckState, opts: DocCheckOpts = {})
     }
     claims++;
     if (verdict.status === "ok") continue;
+    const dedupeKey = `${span.docRelPath}\0${span.line}\0${span.spanClass}\0${span.token}\0${verdict.status}\0${verdict.confidence}\0${verdict.message ?? ""}`;
+    if (seenFindings.has(dedupeKey)) continue;
+    seenFindings.add(dedupeKey);
     seq++;
     const f = toFinding(span, verdict, seq);
     if (verdict.status === "missing" && verdict.confidence >= 90) {
