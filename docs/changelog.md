@@ -6,6 +6,31 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ---
 
+## Unreleased
+
+### Changed
+
+- **Report tools no longer own the daemon's event loop.** The daemon is
+  single-threaded, so the synchronous scans behind `check_docs`,
+  `find_dead_code`, `get_hotspots` and `get_call_graph` blocked *every* other
+  request for their full duration (2–3 s on the maintainer's index) — which is
+  what the previous release's busy/up/down probe had to work around. Those
+  scans now run in ~15 ms slices: `src/utils/cooperative.ts` (`sliceClock` /
+  `yieldIfExpired` via `setImmediate`) hands the event loop back between
+  chunks, and the pure engines expose cooperative variants next to their
+  synchronous exports (`scanDocTokensCooperative` in `doccheck.ts`,
+  `countReferencesCooperative` in `deadcode.ts`,
+  `buildCallEdgesCooperative` in `callgraph.ts`). The sync functions remain the
+  unit-tested reference implementation (and stay byte-identical); the
+  cooperative ones are covered by equivalence tests that force a yield on every
+  chunk (`sliceMs: 0`). Measured during `check_docs` on a 2,686-chunk index:
+  `/ping` **2,562 ms → ~25 ms**, `cidx status` **2.7 s → 76 ms**, with no "busy"
+  message; the report itself takes ~0.2 s longer in wall-clock (3.1 s vs 2.9 s).
+  The `busy` liveness state stays as an honest fallback for any remaining
+  un-sliced block (a single huge file being parsed, a wedged daemon).
+
+Test suite: **1091/1091** passing (3548 expectations); `bun run typecheck` clean.
+
 ## 2.7.2 (2026-10-20)
 
 ### Fixed

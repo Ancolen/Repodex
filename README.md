@@ -212,12 +212,14 @@ cidx status backend          # progress: 63% — 1200/1900
 ```
 
 `status`/`list` (and the other CLI commands) never mistake a **busy** daemon for a
-dead one. The daemon is single-threaded, and the report tools (`check_docs`,
-`find_dead_code`, `get_hotspots`, …) do a synchronous CPU pass that blocks its
-event loop for a few seconds — a `/ping` issued meanwhile simply queues. The
-CLI probes the control port to tell "listening but occupied" from "nothing
-listening", announces the busy wait on stderr, and prints the real status as
-soon as the pass finishes.
+dead one. The report tools (`check_docs`, `find_dead_code`, `get_hotspots`, …)
+do a CPU pass over the index; since 2.7.3 that pass runs in ~15 ms slices and
+hands the event loop back between them, so `/ping` and `status` stay responsive
+while a report is running (`status` returns in ~76 ms instead of waiting out a
+2.9 s `check_docs`). Should a pass ever hold the loop long enough to swallow a
+ping, the CLI probes the control port to tell "listening but occupied" from
+"nothing listening", announces the busy wait on stderr, and prints the real
+status as soon as the pass finishes.
 
 ### 4) Search
 
