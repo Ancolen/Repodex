@@ -70,6 +70,13 @@ describe("Registry", () => {
     reg.setIndexStats("alpha", 12, 99, 12345);
     expect(reg.getIndex("alpha")?.fileCount).toBe(12);
     expect(reg.getIndex("alpha")?.chunkCount).toBe(99);
+    expect(reg.getIndex("alpha")?.lastIndexedAt).toBe(12345);
+
+    // Watcher reconcile path: counters only, freshness untouched.
+    reg.setIndexCounts("alpha", 7, 42);
+    expect(reg.getIndex("alpha")?.fileCount).toBe(7);
+    expect(reg.getIndex("alpha")?.chunkCount).toBe(42);
+    expect(reg.getIndex("alpha")?.lastIndexedAt).toBe(12345);
 
     reg.setIndexEmbedding("alpha", "m2", 768);
     expect(reg.getIndex("alpha")?.embedModel).toBe("m2");

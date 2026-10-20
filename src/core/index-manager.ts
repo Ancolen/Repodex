@@ -874,6 +874,8 @@ function cachedForwardImports(
  */
 export class IndexManager {
   private watchers = new Map<string, FSWatcher>();
+  /** Debounced per-project registry-counter reconcile timers (watcher writes). */
+  private statsReconcileTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private branchWatchers = new Map<string, FSWatcher>();
   private jobByIndex = new Map<string, string>();
   /** On-demand, mtime-keyed reverse-dependency graph, one entry per project. */
@@ -1157,6 +1159,11 @@ export class IndexManager {
     this.watchers.delete(name);
     await this.branchWatchers.get(name)?.close();
     this.branchWatchers.delete(name);
+    const statsTimer = this.statsReconcileTimers.get(name);
+    if (statsTimer) {
+      clearTimeout(statsTimer);
+      this.statsReconcileTimers.delete(name);
+    }
 
     await dropTable(rec.tableName);
     // Deep cleanup: removes indexes, file_cache, AND stale job records
@@ -3678,6 +3685,8 @@ export class IndexManager {
     await Promise.all([...this.branchWatchers.values()].map((w) => w.close()));
     this.watchers.clear();
     this.branchWatchers.clear();
+    for (const timer of this.statsReconcileTimers.values()) clearTimeout(timer);
+    this.statsReconcileTimers.clear();
   }
 
   // ------------------------------------------------------------------ private
@@ -4221,9 +4230,45 @@ export class IndexManager {
       registry: this.registry,
       // While a full index/sync is running, the watcher should not write individual files (race avoidance).
       isBusy: () => this.isIndexing(target.indexName),
+      // Per-file writes bypass the job's setIndexStats; refresh the counters
+      // (debounced) so `cidx status` / doctor see the true shape.
+      onFileSettled: () => this.scheduleStatsReconcile(target.indexName),
     });
     this.watchers.set(target.indexName, w);
     this.ensureBranchWatcher(target);
+  }
+
+  /**
+   * Debounced registry-counter reconcile after watcher writes. The watcher
+   * updates the table directly and does not know the resulting counts; without
+   * this, `cidx status` kept reporting the pre-edit numbers (doctor flagged the
+   * mismatch and only a sync repaired it). One pending timer per project; only
+   * the counters are written (Registry.setIndexCounts), so report caches keyed
+   * on lastIndexedAt are not invalidated on every save.
+   */
+  private scheduleStatsReconcile(name: string): void {
+    if (this.statsReconcileTimers.has(name)) return;
+    const timer = setTimeout(() => {
+      this.statsReconcileTimers.delete(name);
+      void this.reconcileStats(name).catch((err: unknown) => {
+        console.error(`[manager] '${name}' watcher stats reconcile failed:`, err);
+      });
+    }, 1000);
+    // A counter refresh must never keep the process alive.
+    timer.unref?.();
+    this.statsReconcileTimers.set(name, timer);
+  }
+
+  /** Read the TRUE file/chunk counts and store them (watcher reconcile path). */
+  private async reconcileStats(name: string): Promise<void> {
+    // A full index/sync/migrate sets the final counts at job completion; skip
+    // while one is active so the two writers cannot race.
+    if (this.isIndexing(name)) return;
+    const rec = this.registry.getIndex(name);
+    if (!rec || rec.status !== "ready") return;
+    const fileCount = this.registry.listCachedFiles(name).length;
+    const chunkCount = await countTableRows(tableNameFor(rec));
+    this.registry.setIndexCounts(name, fileCount, chunkCount);
   }
 
   /**

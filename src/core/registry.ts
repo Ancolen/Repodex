@@ -446,6 +446,19 @@ export class Registry {
   }
 
   /**
+   * Refresh ONLY the file/chunk counters — the watcher's reconcile path.
+   * Deliberately leaves `last_indexed_at` untouched: a per-file watcher write is
+   * not a full index run, and bumping it would invalidate every
+   * `lastIndexedAt`-keyed report cache (`docChunkCache`, `hotspotFeedCache`,
+   * `callGraphCache`, …) on each editor save.
+   */
+  setIndexCounts(name: string, fileCount: number, chunkCount: number): void {
+    this.db
+      .query(`UPDATE indexes SET file_count=$fc, chunk_count=$cc WHERE name=$name`)
+      .run({ $name: name, $fc: fileCount, $cc: chunkCount });
+  }
+
+  /**
    * Diagnostic note for the latest index job (null clears it). Currently the
    * zero-file explanation: when the table is non-empty again, the next job
    * clears it — the note never outlives the state it describes.

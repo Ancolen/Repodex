@@ -16,6 +16,12 @@ export interface WatchOptions {
    * while a full index/sync is running (race avoidance).
    */
   isBusy?: (() => boolean) | undefined;
+  /**
+   * Called after a per-file write/removal settles (success OR failure). The
+   * manager uses it to reconcile the registry's file/chunk counters, which the
+   * watcher's table writes would otherwise leave stale.
+   */
+  onFileSettled?: (() => void) | undefined;
 }
 
 type PendingAction = "index" | "remove";
@@ -138,6 +144,14 @@ export function startWatcher(target: IndexTarget, opts: WatchOptions = {}): FSWa
       }
     } catch (e) {
       console.error(`[watcher] failed to process '${filePath}' (${action}):`, e);
+    } finally {
+      // Every settled event (write/removal, skipped or failed) can change the
+      // table's file/chunk counts; the manager debounces the actual reconcile.
+      try {
+        opts.onFileSettled?.();
+      } catch (e) {
+        console.error("[watcher] onFileSettled callback failed:", e);
+      }
     }
   };
 

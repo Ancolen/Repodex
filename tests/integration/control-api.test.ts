@@ -485,6 +485,45 @@ export function syncProbe(): string {
     );
   });
 
+  test("a watcher write reconciles the registry counters without a sync", async () => {
+    if (!daemon) throw new Error("daemon not started");
+    const before = await callApi<IndexView>(daemon.controlUrl, `/indexes/${PROJECT_NAME}`);
+    appendFileSync(
+      abs("src/app.ts"),
+      `/** A marker the watcher-reconcile scenario can see. */
+export function watchProbe(): string {
+  return "watch";
+}
+`,
+      "utf-8",
+    );
+    // The watcher (not a job) writes the table; prove the symbol is served…
+    await waitFor(
+      "the watcher to serve the edited symbol",
+      async () => {
+        const results = await callApi<ScopedSearchResult[]>(daemon.controlUrl, "/find", {
+          method: "POST",
+          body: { name: "watchProbe", project: PROJECT_NAME, limit: 20, fuzzy: false },
+        });
+        return results.length > 0 ? results : null;
+      },
+      { timeoutMs: 15_000 },
+    );
+    // …then that the debounced reconcile updated the registry counters (before
+    // the fix, `chunks` stayed at the pre-edit value until a manual sync).
+    await waitFor(
+      "the registry chunk counter to reconcile after the watcher write",
+      async () => {
+        const v = await callApi<IndexView>(daemon.controlUrl, `/indexes/${PROJECT_NAME}`);
+        return v.chunks > before.chunks ? v : null;
+      },
+      { timeoutMs: 15_000 },
+    );
+    const after = await callApi<IndexView>(daemon.controlUrl, `/indexes/${PROJECT_NAME}`);
+    expect(after.files).toBe(before.files);
+    expect(after.chunks).toBeGreaterThan(before.chunks);
+  }, 45_000);
+
   test("a sync prunes a deleted file (deleted-file cleanup)", async () => {
     if (!daemon) throw new Error("daemon not started");
     rmSync(abs("src/util.ts"));
