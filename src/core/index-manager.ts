@@ -3535,11 +3535,15 @@ export class IndexManager {
     const entries = compareSurfaces(baseSurface.symbols, headSymbols);
     result.counts = countDiff(entries);
     const visible = opts?.includeUnchanged === true ? entries : entries.filter((e) => e.kind !== "unchanged");
-    result.entries = (opts?.exportedOnly === true
-      ? visible.filter((e) => e.base?.exported === true || e.head?.exported === true)
-      : visible
-    ).slice(0, limit);
-    if (result.entries.length < visible.length) result.truncated = true;
+    // `exportedOnly` is a caller-requested FILTER, not a cap: it must not set
+    // `truncated` (the caller asked for exactly this subset). Only the `limit`
+    // slice means the list is partial; preserve any earlier maxFiles truncation.
+    const filtered =
+      opts?.exportedOnly === true
+        ? visible.filter((e) => e.base?.exported === true || e.head?.exported === true)
+        : visible;
+    result.entries = filtered.slice(0, limit);
+    if (filtered.length > limit) result.truncated = true;
     return result;
   }
 

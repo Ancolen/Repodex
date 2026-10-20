@@ -588,6 +588,14 @@ describe("getApiDiff — engine across two tags (head = a ref)", () => {
     expect(names.has("widened")).toBe(true); // exported at base → still visible
     expect(names.has("privateStable")).toBe(false); // private on both sides
     expect(names.has("renamedNew")).toBe(true);
+    // A caller-requested FILTER is not a cap: the report is complete.
+    expect(r.truncated).toBe(false);
+  });
+
+  test("exportedOnly + limit flags truncated only because of the cap", async () => {
+    const r = await manager.getApiDiff("fixture", "v1", { head: "v2", exportedOnly: true, limit: 1 });
+    expect(r.entries).toHaveLength(1);
+    expect(r.truncated).toBe(true);
   });
 
   test("a limit caps the entries and flags the report; counts stay complete", async () => {
