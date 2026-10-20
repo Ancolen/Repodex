@@ -868,14 +868,6 @@ export class Registry {
     return rows.map((r) => this.rowToJob(r));
   }
 
-  /** Fetches jobs left half-finished ('queued'/'running') when the daemon restarts. */
-  unfinishedJobs(): JobRow[] {
-    const rows = this.db
-      .query(`SELECT * FROM jobs WHERE status IN ('queued','running') ORDER BY created_at ASC`)
-      .all() as Record<string, unknown>[];
-    return rows.map((r) => this.rowToJob(r));
-  }
-
   /**
    * When the daemon restarts, marks queued/running job rows left over from the
    * previous run as 'failed' (since the in-memory queue is lost).
