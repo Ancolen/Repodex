@@ -152,7 +152,7 @@ export function startControlApi(
   });
 
   app.get("/ping", (_req, res) => {
-    res.json({ ok: true, version: "2.7.0", pid: process.pid });
+    res.json({ ok: true, version: "2.7.1", pid: process.pid });
   });
 
   app.get("/indexes", (_req, res) => {
