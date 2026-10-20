@@ -3661,19 +3661,26 @@ export class IndexManager {
           resolveFraming(pcfg?.framing ?? CONFIG.EMBEDDING_FRAMING, usedModel),
         );
         this.registry.setIndexStatus(t.indexName, "ready");
-        // Explain an empty table where the emptiness was decided: the
-        // filterStats describe which collector ate the candidates. Cleared as
-        // soon as the table is non-empty again — the note never outlives it.
-        this.registry.setIndexNote(
-          t.indexName,
-          fileCount === 0 ? `collected 0 files — ${describeFilterStats(result.filterStats)}` : null,
-        );
+        // Explain an empty table where the emptiness was decided (the
+        // filterStats describe which collector ate the candidates) and any
+        // per-file failures (an embedding-provider outage used to surface only
+        // as "0 chunks written"). Cleared on the next clean run — the note
+        // never outlives the condition.
+        const noteParts: string[] = [];
+        if (fileCount === 0) {
+          noteParts.push(`collected 0 files — ${describeFilterStats(result.filterStats)}`);
+        }
+        if (result.failed > 0) {
+          noteParts.push(`${result.failed} file(s) failed to index — see the daemon log (embedding provider?)`);
+        }
+        this.registry.setIndexNote(t.indexName, noteParts.length > 0 ? noteParts.join("; ") : null);
         const pruned = this.registry.pruneEmbeddingCache(CONFIG.EMBED_CACHE_MAX);
         console.error(
           `[index] '${t.indexName}' ready: ${fileCount} files, ${chunkCount} chunks in table` +
             ` (this run: ${result.files} processed, ${result.chunks} chunks written` +
             (result.deleted > 0 ? `, ${result.deleted} deleted cleaned up` : "") +
             (result.skippedOversized > 0 ? `, ${result.skippedOversized} oversized skipped` : "") +
+            (result.failed > 0 ? `, ${result.failed} failed` : "") +
             `) → ${t.tableName}` +
             (pruned > 0 ? ` (cache prune: ${pruned})` : ""),
         );

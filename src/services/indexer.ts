@@ -74,6 +74,13 @@ export interface IndexResult {
    */
   skippedOversized: number;
   /**
+   * Files that threw during indexing (embedding provider unreachable, parse
+   * failure, …). They keep their previous rows (if any) but a non-zero count
+   * means the run did not fully apply — surfaced on the ready log line and the
+   * registry note so provider outages are not silent.
+   */
+  failed: number;
+  /**
    * Why-candidates-were-skipped counters for the last `collectFiles` — carried
    * so a zero-processed run can explain itself (registry note + status).
    */
@@ -538,6 +545,7 @@ export async function indexDirectory(
   let chunks = 0;
   let dim: number | null = null;
   let skippedOversized = 0;
+  let failed = 0;
   for (const file of files) {
     if (opts.signal?.aborted) break;
     try {
@@ -546,6 +554,7 @@ export async function indexDirectory(
       if (dim === null && r.dim !== null) dim = r.dim;
       if (r.skippedOversized) skippedOversized++;
     } catch (err) {
+      failed++;
       console.error(`[indexer] failed to index '${file}':`, err);
     }
     processed++;
@@ -578,7 +587,7 @@ export async function indexDirectory(
     }
   }
 
-  return { files: processed, chunks, dim, deleted, skippedOversized, filterStats: stats };
+  return { files: processed, chunks, dim, deleted, skippedOversized, failed, filterStats: stats };
 }
 
 // ------------------------------------------------- O2: zero-downtime migration
