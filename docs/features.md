@@ -140,7 +140,7 @@ What the tool **does today** (version 2.6.1). For what's planned, see [`status.m
 
 - **Streamable HTTP** (`POST /mcp`, stateless) — recommended.
 - **SSE** (`GET /sse`) — legacy, backward compatibility.
-- **stdio bridge** (`cidx mcp`) — for clients that expect stdio (Claude Desktop); auto-starts the daemon.
+- **stdio bridge** (`cidx mcp`) — for clients that expect stdio (Claude Desktop); auto-starts the daemon when nothing is listening. A daemon that is **busy** (control port accepting, `/ping` temporarily silent because a synchronous report pass occupies the event loop) is left alone — tool calls queue until it answers — so the bridge can never spawn a duplicate against the live one's port.
 - All servers listen on **`127.0.0.1`** only.
 
 ## Distribution
@@ -152,7 +152,7 @@ What the tool **does today** (version 2.6.1). For what's planned, see [`status.m
 ## Ops & diagnostics
 
 - **`cidx doctor`** — one **read-only** diagnostic pass over the whole install: the support checklist (daemon up? Ollama reachable? model installed? schema current? config valid?) answered in a single command. Every check reports **`ok` / `warn` / `fail`** plus a one-line fix hint; exit 0 unless a check **fails** (warnings still exit 0), so it is scriptable. Nothing is ever mutated.
-  - **Daemon (CLI-side)** — reachable via `/ping`, and the CLI ↔ daemon **version match** (a mismatch is a `warn`: restart the daemon).
+  - **Daemon (CLI-side)** — reachable via `/ping`, and the CLI ↔ daemon **version match** (a mismatch is a `warn`: restart the daemon). Liveness is a three-way classification (`src/daemon-probe.ts`): `up` (ping answered), `busy` (the control port accepts TCP but ping stayed silent — a long synchronous report pass occupies the event loop), `down` (nothing listening). A `busy` daemon is a `warn` with a "retry when the task finishes / restart if it never answers" hint — never a `fail` "not running".
   - **Embedding backend** — resolved backend (Ollama → `/api/tags`, llama-server → `/v1/models`) reachable + the configured `ollama.model` served there; a bare name matches its `:latest`/tagged form, a llama-server by its `-a` alias. No backend reachable, unreachable, or missing model → `fail` (hints name both servers).
   - **Reranker** — the result of the same **cached** probe search uses (`IndexManager.ensureRerankAvailable`); a missing model is a `warn` (search falls back to RRF order).
   - **Per project** — table exists (`fail` if the registry row has no table), **schema freshness** (a pre-2.4.0 table without `doc`/`doc_vector` gets the *reindex to enable the docstring legs* hint), **ANN/FTS presence** (no ANN below `vectorIndexThreshold` is by design; a non-empty table without a `content` BM25 index is a `warn`), and registry ↔ table sanity (chunk-count drift, empty file cache over a non-empty table — skipped while a job runs). A project whose pinned `embedModel` is not served by the backend is a `fail`.

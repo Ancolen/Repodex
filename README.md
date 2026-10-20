@@ -140,7 +140,7 @@ For automatic startup at boot, user `linger` is enabled; manually if needed:
 sudo loginctl enable-linger "$USER"
 ```
 
-> **daemon service vs `cidx start`:** the systemd service runs and supervises `src/index.ts` (the daemon itself) in the foreground and restarts it if it crashes. `cidx start`, on the other hand, is a helper that starts the daemon in the background if it isn't running — if the service is already running it says "already running". If a process holds the daemon ports but does not answer `/ping` (a wedged daemon), `cidx start` reports that and points at `systemctl --user restart cidx.service` instead of spawning a second daemon that cannot bind. The two can be used together safely.
+> **daemon service vs `cidx start`:** the systemd service runs and supervises `src/index.ts` (the daemon itself) in the foreground and restarts it if it crashes. `cidx start`, on the other hand, is a helper that starts the daemon in the background if it isn't running — if the service is already running it says "already running". If the control port accepts connections but does not answer `/ping`, `cidx start` reports the daemon as **busy** (a long synchronous report pass occupies its event loop) instead of spawning a second daemon that cannot bind; only when no daemon port is answering *and* the MCP port is still held does it diagnose a wedged daemon and point at `systemctl --user restart cidx.service`. The two can be used together safely.
 
 ### Uninstall
 
@@ -210,6 +210,14 @@ The command **returns immediately**; indexing continues in the background. Meanw
 cidx list
 cidx status backend          # progress: 63% — 1200/1900
 ```
+
+`status`/`list` (and the other CLI commands) never mistake a **busy** daemon for a
+dead one. The daemon is single-threaded, and the report tools (`check_docs`,
+`find_dead_code`, `get_hotspots`, …) do a synchronous CPU pass that blocks its
+event loop for a few seconds — a `/ping` issued meanwhile simply queues. The
+CLI probes the control port to tell "listening but occupied" from "nothing
+listening", announces the busy wait on stderr, and prints the real status as
+soon as the pass finishes.
 
 ### 4) Search
 

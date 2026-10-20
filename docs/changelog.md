@@ -6,6 +6,30 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ---
 
+## Unreleased
+
+### Fixed
+
+- **`cidx status` said "Daemon is not running" while an MCP query was in
+  flight.** A `/ping` timeout is not proof of absence: the daemon is
+  single-threaded, and `check_docs` / `find_dead_code` / `get_hotspots` run
+  multi-second **synchronous CPU passes** that block its event loop, so every
+  request — `/ping` included — queues until the pass finishes. The CLI's
+  1-second preflight classified that as "down". The new `src/daemon-probe.ts`
+  classifies the daemon as `up` (ping answered), `busy` (the control port
+  **accepts TCP connections** but ping stayed silent) or `down` (nothing
+  listening). `requireDaemon` now proceeds on `busy` — printing one stderr
+  line — and lets the real request queue, so `cidx status` waits ~2.7 s for a
+  `check_docs` pass and then prints the correct project list. `cidx start`
+  reports "already running (busy)" instead of a wedged daemon, `cidx stop`
+  queues its shutdown, and `cidx doctor` renders a busy daemon as a **warn**
+  ("listening but not answering — busy with a long-running task, or wedged")
+  instead of a `fail` "not running". The stdio bridge uses the same probe, so
+  it no longer risks spawning a second daemon against the live one's port when
+  an MCP tool call is running.
+
+Test suite: **1088/1088** passing (3543 expectations); `bun run typecheck` clean.
+
 ## 2.7.1 (2026-10-20)
 
 ### Fixed
