@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { stat, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import ignore, { type Ignore } from "ignore";
@@ -87,7 +88,8 @@ export interface FileIndexResult {
   skippedOversized?: boolean | undefined;
 }
 
-function isAllowed(filePath: string): boolean {
+/** Would `indexFile` accept this path (same extension rule as `collectFiles`)? */
+export function isAllowedFile(filePath: string): boolean {
   return CONFIG.ALLOWED_EXTENSIONS.includes(path.extname(filePath));
 }
 
@@ -133,6 +135,28 @@ export async function buildIgnore(baseDir: string, extra?: string[] | undefined)
 }
 
 /**
+ * Synchronous twin of `buildIgnore`, for callers that need the matcher before
+ * an event loop can run — notably the watcher, whose chokidar `ignored`
+ * predicate must filter paths synchronously at startup (otherwise chokidar
+ * opens a watch per file in trees the indexer never reads, e.g. `.venv`).
+ * Same sources and precedence as `buildIgnore`; reads two small files once.
+ */
+export function buildIgnoreSync(baseDir: string, extra?: string[] | undefined): Ignore {
+  const ig = ignore().add(CONFIG.GLOBAL_IGNORED_DIRS);
+  const addFile = (name: string): void => {
+    try {
+      ig.add(readFileSync(path.join(baseDir, name), "utf-8"));
+    } catch {
+      // optional ignore file
+    }
+  };
+  if (CONFIG.RESPECT_GITIGNORE) addFile(".gitignore");
+  addFile(".cidxignore");
+  if (extra && extra.length > 0) ig.add(extra);
+  return ig;
+}
+
+/**
  * Recursively scans a directory and returns the list of files to index.
  * `langSet` (from a `.cidx.json` `languages` allowlist) keeps only files whose
  * extension produces a language label inside the set — unlabeled extensions are
@@ -169,7 +193,7 @@ export async function collectFiles(
       if (entry.isDirectory()) {
         await walk(full);
       } else if (entry.isFile()) {
-        if (!isAllowed(full)) {
+        if (!isAllowedFile(full)) {
           stats.disallowedExt++;
           continue;
         }
@@ -310,7 +334,7 @@ export async function indexFile(
   framing?: string | null | undefined,
   maxFileSizeBytes?: number | undefined,
 ): Promise<FileIndexResult> {
-  if (!isAllowed(filePath)) return { chunks: 0, dim: null };
+  if (!isAllowedFile(filePath)) return { chunks: 0, dim: null };
   if (signal?.aborted) return { chunks: 0, dim: null };
 
   const st = await stat(filePath);

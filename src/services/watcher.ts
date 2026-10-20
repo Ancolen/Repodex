@@ -1,7 +1,7 @@
 import chokidar, { type FSWatcher } from "chokidar";
 import path from "node:path";
 import { CONFIG } from "../config";
-import { buildIgnore, isPathIgnored, indexFile, removeFileIndex, effectiveMaxFileSizeBytes, type IndexTarget } from "./indexer";
+import { buildIgnoreSync, isAllowedFile, isPathIgnored, indexFile, removeFileIndex, effectiveMaxFileSizeBytes, type IndexTarget } from "./indexer";
 import { readProjectConfig, extToLanguage, languageAllowSet } from "../core/project-config";
 import { resolveFraming } from "../core/framing";
 import { tableNameFor } from "../core/registry";
@@ -18,8 +18,6 @@ export interface WatchOptions {
   isBusy?: (() => boolean) | undefined;
 }
 
-const IGNORE_RE = /(^|[/\\])(node_modules|\.git|\.lancedb|dist|build|out|target|\.godot)([/\\]|$)/;
-
 type PendingAction = "index" | "remove";
 
 /**
@@ -30,18 +28,29 @@ type PendingAction = "index" | "remove";
  *   concurrently.
  * - RESPECTS .gitignore/.cidxignore/global ignore rules: to stay consistent with
  *   full indexing, ignored files are not indexed (and are cleaned up if they were
- *   indexed before). Rules are read once at watcher startup; if they change, the
- *   next full reindex/sync reflects them.
+ *   indexed before). The chokidar-level `ignored` predicate applies the same
+ *   rules plus the extension allowlist, so ignored trees (`.venv`, `target`, …)
+ *   and unindexable files get no watch handle at all. Rules are read once at
+ *   watcher startup; if they change, the next full reindex/sync reflects them.
  */
 export function startWatcher(target: IndexTarget, opts: WatchOptions = {}): FSWatcher {
   const debounceMs = opts.debounceMs ?? CONFIG.WATCH_DEBOUNCE_MS;
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
-  // Set up the ignore matcher once (async). Since events are debounced, it is
-  // ready before the first trigger.
-  const igPromise = buildIgnore(target.baseDir);
+  // The ignore matcher must exist BEFORE chokidar's first traversal: chokidar
+  // opens a watch handle per accepted file, so filtering only at event time
+  // (the old behavior) still watched every file in ignored trees — e.g. a
+  // Python `.venv` with ~75k files held ~75k fds. Same sources/precedence as
+  // the full index (`buildIgnore`); rules are read once at startup, matching
+  // the `.cidxignore` semantics documented below.
+  const startupConfig = readProjectConfig(target.baseDir);
+  const ig = buildIgnoreSync(target.baseDir, startupConfig?.ignore);
 
   const watcher = chokidar.watch(target.baseDir, {
-    ignored: (p: string) => IGNORE_RE.test(p),
+    // Files the indexer would never read get no watch handle (the extension
+    // rule); directories stay traversable. `stats` is provided by chokidar's
+    // matcher (see chokidar's docs); when absent, only ignore rules apply.
+    ignored: (p: string, stats?: { isFile(): boolean }) =>
+      isPathIgnored(ig, target.baseDir, p) || (stats?.isFile() === true && !isAllowedFile(p)),
     persistent: true,
     ignoreInitial: true,
     // Properly handle editors' atomic saves (write to temp file then rename).
@@ -60,7 +69,6 @@ export function startWatcher(target: IndexTarget, opts: WatchOptions = {}): FSWa
 
   const fire = async (filePath: string, action: PendingAction): Promise<void> => {
     try {
-      const ig = await igPromise;
       // Per-project config is read fresh per event so watcher writes follow the
       // same rules as the next full index (`.cidx.json` `languages` allowlist +
       // `embedModel` override + `maxFileSizeBytes`; extra `ignore` patterns still

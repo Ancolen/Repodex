@@ -247,6 +247,11 @@ const DEFAULTS: IndexerConfig = {
       "node_modules", ".git", ".lancedb", "dist", "build",
       "out", ".cache", "target", ".claude", ".cidx",
       ".godot",
+      // Python environments/caches and JS bundler caches: generated trees that
+      // can dominate a project's file count (a `.venv` alone can hold 10^5
+      // files, and the watcher opens a handle per watched file).
+      ".venv", "__pycache__", ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+      ".next", ".nuxt", ".svelte-kit", ".turbo", ".parcel-cache", ".gradle", ".idea",
     ],
     maxFileSizeBytes: 0,
     vectorIndexThreshold: 50000,
