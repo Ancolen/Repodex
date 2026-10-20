@@ -1203,6 +1203,21 @@ export class IndexManager {
   }
 
   /**
+   * The self-healing ambiguity error for report tools that accept a BARE symbol
+   * name: with several indexed projects the name alone cannot pick a table.
+   * Single source for what used to be two hand-copied literals — one of which
+   * had an unclosed template literal that leaked `" +` into the user-visible
+   * message.
+   */
+  private ambiguousSymbolProjectError(symbol: string | undefined, all: IndexRecord[]): Error {
+    const names = all.map((p) => p.name).join(", ");
+    return new Error(
+      `'${symbol}' could belong to multiple projects (${names}) — ` +
+        "pass the 'project' (or 'path') argument to disambiguate.",
+    );
+  }
+
+  /**
    * Resolves an optional project anchor — an explicit `project` name, or a
    * `path` inside an indexed project (prefix match, most-specific wins) — to a
    * project NAME. The shared engine for every tool that accepts `project?`/
@@ -2465,10 +2480,7 @@ export class IndexManager {
       const all = this.registry.listIndexes();
       if (all.length === 0) throw new Error("No indexed project; index a directory first.");
       if (all.length > 1) {
-        throw new Error(
-          `'${symbol}' could belong to multiple projects (${all.map((p) => p.name).join(", ")}) — " +
-          "pass the 'project' (or 'path') argument to disambiguate.`,
-        );
+        throw this.ambiguousSymbolProjectError(symbol, all);
       }
       rec = all[0]!;
     }
@@ -2600,10 +2612,7 @@ export class IndexManager {
       const all = this.registry.listIndexes();
       if (all.length === 0) throw new Error("No indexed project; index a directory first.");
       if (all.length > 1) {
-        throw new Error(
-          `'${symbol}' could belong to multiple projects (${all.map((p) => p.name).join(", ")}) — " +
-          "pass the 'project' (or 'path') argument to disambiguate.`,
-        );
+        throw this.ambiguousSymbolProjectError(symbol, all);
       }
       rec = all[0]!;
     }

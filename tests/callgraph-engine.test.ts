@@ -50,7 +50,12 @@ describe("getCallGraph — anchor + project resolution (LanceDB-free)", () => {
       fileCount: 1, chunkCount: 1, embedModel: null, embedDim: null,
       lastIndexedAt: null, createdAt: 1, error: null,
     });
-    await expect(manager.getCallGraph({ symbol: "foo" })).rejects.toThrow(/could belong to multiple projects/);
+    const err = (await manager.getCallGraph({ symbol: "foo" }).catch((e: unknown) => e)) as Error;
+    expect(err.message).toContain("could belong to multiple projects");
+    // Regression: the two hand-copied message literals had an unclosed template
+    // literal, leaking the concatenation operator into the user-visible text.
+    expect(err.message).not.toContain('" +');
+    expect(err.message).toContain("— pass the 'project' (or 'path') argument to disambiguate.");
   });
 
   test("explicit --project that does not exist → not-found error", async () => {
