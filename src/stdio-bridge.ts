@@ -26,6 +26,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { CONFIG } from "./config";
 import { daemonCommand } from "./runtime";
+import { probeDaemon, pingControl } from "./daemon-probe";
 import { TOOL_DEFINITIONS } from "./server/tool-defs";
 import type { SearchEnvelope } from "./core/index-manager";
 import {
@@ -71,18 +72,19 @@ import {
 const BASE = `http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}`;
 
 // ----------------------------------------------------------- daemon management
-async function ping(timeoutMs = 1000): Promise<boolean> {
-  try {
-    const r = await fetch(`${BASE}/ping`, { signal: AbortSignal.timeout(timeoutMs) });
-    return r.ok;
-  } catch {
-    return false;
-  }
-}
+const DAEMON_TARGET = { base: BASE, host: CONFIG.HOST, port: CONFIG.CONTROL_PORT };
 
 /** Starts the daemon in the background if it's not running and waits until it's ready. */
 async function ensureDaemon(): Promise<void> {
-  if (await ping()) return;
+  const state = await probeDaemon(DAEMON_TARGET);
+  if (state === "up") return;
+  if (state === "busy") {
+    // Alive, with its event loop occupied by a long synchronous report pass.
+    // Spawning a second daemon would only fail to bind; tool calls will queue
+    // and be answered when the pass finishes.
+    console.error("[bridge] Daemon is busy with a long-running task; requests will queue until it answers.");
+    return;
+  }
   console.error("[bridge] Daemon not running, starting it...");
   mkdirSync(CONFIG.ROOT_DIR, { recursive: true });
   const logPath = path.join(CONFIG.ROOT_DIR, "daemon.log");
@@ -96,7 +98,7 @@ async function ensureDaemon(): Promise<void> {
   });
   proc.unref();
   for (let i = 0; i < 60; i++) {
-    if (await ping()) {
+    if (await pingControl(BASE)) {
       console.error(`[bridge] Daemon ready (pid ${proc.pid}).`);
       return;
     }

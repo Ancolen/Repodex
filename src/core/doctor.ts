@@ -125,6 +125,12 @@ export function formatBytes(n: number): string {
 
 export interface DaemonCheckState {
   reachable: boolean;
+  /**
+   * The control port accepts connections but `/ping` stayed silent — the
+   * process is alive with its event loop occupied by a long synchronous pass
+   * (or it is wedged). Distinct from "not running".
+   */
+  busy?: boolean;
   cliVersion: string;
   daemonVersion?: string;
   pid?: number;
@@ -136,6 +142,15 @@ export interface DaemonCheckState {
  */
 export function daemonCheck(s: DaemonCheckState): DoctorCheck {
   if (!s.reachable) {
+    if (s.busy) {
+      return check(
+        "daemon",
+        "daemon",
+        "warn",
+        "listening on the control port but not answering — busy with a long-running task, or wedged",
+        "retry once the current task finishes; if it never answers: systemctl --user restart cidx.service",
+      );
+    }
     return check(
       "daemon",
       "daemon",

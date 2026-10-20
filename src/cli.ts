@@ -2,9 +2,9 @@
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, openSync, statSync } from "node:fs";
-import { connect } from "node:net";
 import { CONFIG, RESOLVED, CONFIG_SOURCE, resolveConfigPath } from "./config";
 import { daemonCommand, bridgeCommand } from "./runtime";
+import { DAEMON_PING_TIMEOUT_MS, probeDaemon, portAccepts } from "./daemon-probe";
 import { daemonCheck, type DoctorCheck, type DoctorReport } from "./core/doctor";
 import { resolveEditor, buildEditorArgs } from "./utils/editor";
 import type { QueryLogStats, SearchEnvelope } from "./core/index-manager";
@@ -36,14 +36,7 @@ function parseArgs(argv: string[]): { positionals: string[]; flags: Record<strin
   return { positionals, flags };
 }
 
-async function ping(timeoutMs = 1000): Promise<boolean> {
-  try {
-    const r = await fetch(`${BASE}/ping`, { signal: AbortSignal.timeout(timeoutMs) });
-    return r.ok;
-  } catch {
-    return false;
-  }
-}
+const DAEMON_TARGET = { base: BASE, host: CONFIG.HOST, port: CONFIG.CONTROL_PORT };
 
 async function api<T = any>(method: string, pathname: string, body?: unknown): Promise<T> {
   const r = await fetch(`${BASE}${pathname}`, {
@@ -65,24 +58,24 @@ async function api<T = any>(method: string, pathname: string, body?: unknown): P
   return data as T;
 }
 
-/** TCP-level probe: is something accepting connections on host:port? */
-function portInUse(host: string, port: number, timeoutMs = 1000): Promise<boolean> {
-  return new Promise((resolve) => {
-    const sock = connect({ host, port });
-    const done = (inUse: boolean): void => {
-      sock.destroy();
-      resolve(inUse);
-    };
-    sock.setTimeout(timeoutMs, () => done(false));
-    sock.once("connect", () => done(true));
-    sock.once("error", () => done(false));
-  });
-}
-
+/**
+ * "Is there a daemon?" — WITHOUT treating a `/ping` timeout as absence.
+ * A listening control port means the process is alive; its event loop may
+ * just be occupied by a long synchronous report pass (see `daemon-probe.ts`).
+ * In that case we proceed and let the real request queue, rather than lying
+ * "not running" or spawning a second daemon.
+ */
 async function requireDaemon(): Promise<void> {
-  if (!(await ping())) {
+  const state = await probeDaemon(DAEMON_TARGET);
+  if (state === "down") {
     console.error("Daemon is not running. Start it first:  cidx start");
     process.exit(1);
+  }
+  if (state === "busy") {
+    console.error(
+      `Daemon is busy (listening on ${CONFIG.HOST}:${CONFIG.CONTROL_PORT}, but /ping did not answer ` +
+        `within ${DAEMON_PING_TIMEOUT_MS}ms) — waiting for the running task to finish...`,
+    );
   }
 }
 
@@ -101,18 +94,21 @@ function printIndex(ix: any): void {
 
 // ------------------------------------------------------------------ commands
 async function cmdStart(positionals: string[]): Promise<void> {
-  if (await ping()) {
+  const state = await probeDaemon(DAEMON_TARGET);
+  if (state === "up") {
     console.log("Daemon is already running.");
-  } else if (
-    (await portInUse(CONFIG.HOST, CONFIG.CONTROL_PORT)) ||
-    (await portInUse(CONFIG.HOST, CONFIG.MCP_PORT))
-  ) {
-    // The port is taken but /ping does not answer: most often a wedged daemon
-    // (event loop stuck, accept queue backing up). Spawning a second one only
-    // burns 30 s failing to bind — say what is actually wrong instead.
+  } else if (state === "busy") {
+    // Alive but occupied: a long synchronous pass (check_docs, find_dead_code,
+    // …) blocks the event loop. Spawning a second daemon would only fail to
+    // bind — and the existing one will answer as soon as the pass finishes.
+    console.log("Daemon is already running (busy with a long-running task — no need to start it).");
+  } else if (await portAccepts(CONFIG.HOST, CONFIG.MCP_PORT)) {
+    // The MCP port is taken but the control port answers nothing: most often a
+    // wedged daemon (event loop stuck, accept queue backing up). Spawning a
+    // second one only burns 30 s failing to bind — say what is actually wrong.
     console.error(
-      `A process is listening on ${CONFIG.HOST}:${CONFIG.CONTROL_PORT}/${CONFIG.MCP_PORT} ` +
-        "but does not answer the control API — the daemon looks hung or is shutting down.",
+      `A process is listening on ${CONFIG.HOST}:${CONFIG.MCP_PORT} ` +
+        "but the control API is down — the daemon looks hung or is shutting down.",
     );
     console.error(
       "If it runs as the systemd user service, restart it:  systemctl --user restart cidx.service",
@@ -134,7 +130,7 @@ async function cmdStart(positionals: string[]): Promise<void> {
     let up = false;
     for (let i = 0; i < 60; i++) {
       process.stdout.write(".");
-      if (await ping()) {
+      if (await probeDaemon(DAEMON_TARGET) === "up") {
         up = true;
         break;
       }
@@ -192,9 +188,9 @@ async function cmdList(): Promise<void> {
 }
 
 async function cmdStatus(positionals: string[]): Promise<void> {
-  await requireDaemon();
   const name = positionals[0];
   if (name) {
+    await requireDaemon();
     const ix = await api("GET", `/indexes/${encodeURIComponent(name)}`);
     printIndex(ix);
   } else {
@@ -1026,10 +1022,12 @@ async function cmdMcp(): Promise<void> {
 }
 
 async function cmdStop(): Promise<void> {
-  if (!(await ping())) {
+  if ((await probeDaemon(DAEMON_TARGET)) === "down") {
     console.log("Daemon is already not running.");
     return;
   }
+  // A busy daemon is still a daemon: the shutdown request queues behind the
+  // running pass and is served when it finishes.
   await api("POST", "/shutdown");
   console.log("Daemon stopped.");
 }
@@ -1044,7 +1042,7 @@ async function cmdConfig(positionals: string[]): Promise<void> {
   console.log(`\nEdit it and restart the daemon. For the path: indexer config path`);
 }
 
-const CLI_VERSION = "2.7.1";
+const CLI_VERSION = "2.7.2";
 
 /** Per-command detailed help catalog (`repodex help <command>` and `<command> --help`). */
 interface CmdDoc {
@@ -1663,22 +1661,32 @@ function printDoctor(checks: DoctorCheck[]): void {
 async function cmdDoctor(): Promise<void> {
   let daemonVersion: string | undefined;
   let pid: number | undefined;
-  let reachable = false;
-  try {
-    const r = await fetch(`${BASE}/ping`, { signal: AbortSignal.timeout(2000) });
-    if (r.ok) {
-      const data = (await r.json()) as { version?: string; pid?: number };
+  // A listening control port means the daemon exists even when /ping is slow
+  // (a report pass blocks the event loop); only "down" is "not running".
+  const state = await probeDaemon(DAEMON_TARGET, { pingTimeoutMs: 2000 });
+  let reachable = state !== "down";
+  if (state === "busy") {
+    console.error(
+      `The daemon is busy (control port listening, /ping silent for 2000ms) — ` +
+        "waiting for the running task to finish...",
+    );
+  }
+  if (reachable) {
+    try {
+      const data = await api<{ version?: string; pid?: number }>("GET", "/ping");
       daemonVersion = data.version;
       pid = data.pid;
-      reachable = true;
+    } catch {
+      // The port accepts connections but even a queued /ping failed — report
+      // it as unreachable rather than pretending the daemon is healthy.
+      reachable = false;
     }
-  } catch {
-    reachable = false;
   }
 
   const checks: DoctorCheck[] = [
     daemonCheck({
       reachable,
+      ...(state === "busy" && !reachable ? { busy: true } : {}),
       cliVersion: CLI_VERSION,
       ...(daemonVersion !== undefined ? { daemonVersion } : {}),
       ...(pid !== undefined ? { pid } : {}),
@@ -1700,7 +1708,12 @@ async function cmdDoctor(): Promise<void> {
   }
 
   const all = report ? checks.concat(report.checks) : checks;
-  console.log(`\ncidx doctor — daemon ${reachable ? `v${daemonVersion} (pid ${pid})` : "not running"} · data: ${report?.home ?? CONFIG.ROOT_DIR}\n`);
+  const daemonState = reachable
+    ? `v${daemonVersion} (pid ${pid})`
+    : state === "busy"
+      ? "busy (not answering)"
+      : "not running";
+  console.log(`\ncidx doctor — daemon ${daemonState} · data: ${report?.home ?? CONFIG.ROOT_DIR}\n`);
   printDoctor(all);
 
   const fails = all.filter((c) => c.status === "fail").length;

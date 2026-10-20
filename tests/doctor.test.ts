@@ -110,6 +110,13 @@ describe("doctor — daemonCheck", () => {
     expect(c.hint).toContain("cidx start");
   });
 
+  test("a listening-but-silent daemon is busy (warn), not 'not running' (fail)", () => {
+    const c = daemonCheck({ reachable: false, busy: true, cliVersion: "2.7.2" });
+    expect(c.status).toBe("warn");
+    expect(c.detail).toContain("busy");
+    expect(c.detail).not.toContain("not running");
+  });
+
   test("CLI ↔ daemon version mismatch is a warn with the restart hint", () => {
     const c = daemonCheck({ reachable: true, cliVersion: "2.5.0", daemonVersion: "2.4.0", pid: 42 });
     expect(c.status).toBe("warn");
