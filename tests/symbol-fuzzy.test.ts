@@ -64,6 +64,8 @@ const MAIN_TABLE = "idx_fuzzy_main";
 const LEGACY_TABLE = "idx_fuzzy_legacy";
 /** A second legacy-era table used to prove the enable-by-index-job path. */
 const UPGRADE_TABLE = "idx_fuzzy_upgrade";
+/** A table holding TWO chunks of one split symbol (find_symbol dedupe). */
+const SPLIT_TABLE = "idx_fuzzy_split";
 
 /** Legacy-era disjoint symbols: no trigram overlap with the typo queries below. */
 const LEGACY_SYMBOLS: [string, string][] = [
@@ -191,6 +193,33 @@ describe("find_symbol fuzzy fallback (IndexManager, two registered projects)", (
 
   beforeAll(async () => {
     registry = new Registry(DB_PATH);
+    await db.insertChunks(SPLIT_TABLE, [
+      {
+        ...row("bigSymbol", "split", 0),
+        content: "export function bigSymbol() {\n  const a = 1;",
+        startLine: 1,
+        endLine: 20,
+      },
+      {
+        ...row("bigSymbol", "split", 1),
+        content: "  return a;\n}",
+        startLine: 15,
+        endLine: 30,
+      },
+    ]);
+    registry.upsertIndex({
+      name: "fzsplit",
+      path: path.join(PROJECT, "split"),
+      tableName: SPLIT_TABLE,
+      status: "ready",
+      fileCount: 1,
+      chunkCount: 2,
+      embedModel: null,
+      embedDim: null,
+      lastIndexedAt: 1700000000000,
+      createdAt: 1,
+      error: null,
+    });
     registry.upsertIndex({
       name: "fzfix",
       path: PROJECT,
@@ -280,5 +309,14 @@ describe("find_symbol fuzzy fallback (IndexManager, two registered projects)", (
     const hits = await manager.findSymbol("getUserNme", "fzfix", 2);
     expect(hits.length).toBe(2);
     for (const r of hits) expect(r.fuzzy).toBe(true);
+  });
+
+  test("a split symbol reports ONE head chunk (no continuation duplicates)", async () => {
+    // Regression: both chunks carry symbolName "bigSymbol"; the continuation's
+    // derived signature was the middle of the body (`"} } // 2) MMR …"`).
+    const hits = await manager.findSymbol("bigSymbol", "fzsplit");
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.startLine).toBe(1);
+    expect(hits[0]!.signature).toBe("export function bigSymbol()");
   });
 });

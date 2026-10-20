@@ -1769,22 +1769,29 @@ export class IndexManager {
   ): Promise<ScopedSearchResult[]> {
     const where = buildWhere(filters);
     const allowFuzzy = opts?.fuzzy !== false;
+    // Fetch a small buffer past `limit`: a large symbol occupies several chunks
+    // (all sharing the same symbolName), so a raw limit could spend the whole
+    // budget on one symbol's continuations before dedupe. The buffer is bounded
+    // (≤ 3× limit, and never below limit+10) and the final slice restores the
+    // caller's limit.
+    const fetchLimit = Math.max(limit * 3, limit + 10);
     if (project) {
       const rec = this.registry.getIndex(project);
       if (!rec) throw this.indexNotFound(project);
-      let rows = await searchSymbol(rec.tableName, name, limit, where);
+      let rows = await searchSymbol(rec.tableName, name, fetchLimit, where);
       if (rows.length === 0 && allowFuzzy) {
-        rows = await this.fuzzyFallback(rec.tableName, name, limit, where);
+        rows = await this.fuzzyFallback(rec.tableName, name, fetchLimit, where);
       }
-      return this.stripEmbeddings(await this.enrich(rows.map((r) => this.scope(r, project, rec.lastIndexedAt)), 0));
+      const deduped = this.dedupeSymbolChunks(rows).slice(0, limit);
+      return this.stripEmbeddings(await this.enrich(deduped.map((r) => this.scope(r, project, rec.lastIndexedAt)), 0));
     }
     const indexes = this.registry.listIndexes();
     const perTable = await Promise.all(
       indexes.map(async (rec) => {
         try {
-          let rows = await searchSymbol(rec.tableName, name, limit, where);
+          let rows = await searchSymbol(rec.tableName, name, fetchLimit, where);
           if (rows.length === 0 && allowFuzzy) {
-            rows = await this.fuzzyFallback(rec.tableName, name, limit, where);
+            rows = await this.fuzzyFallback(rec.tableName, name, fetchLimit, where);
           }
           return rows.map((r) => this.scope(r, rec.name, rec.lastIndexedAt));
         } catch {
@@ -1792,7 +1799,44 @@ export class IndexManager {
         }
       }),
     );
-    return this.stripEmbeddings(await this.enrich(perTable.flat().slice(0, limit), 0));
+    const deduped = this.dedupeSymbolChunks(perTable.flat()).slice(0, limit);
+    return this.stripEmbeddings(await this.enrich(deduped, 0));
+  }
+
+  /**
+   * `find_symbol` returns chunks; a symbol larger than the chunk window is split
+   * into several chunks that all carry the same `symbolName`. For a symbol
+   * LOOKUP that is noise — the same symbol repeated N times, and a continuation
+   * chunk's derived signature is the middle of a body (`"} } // 2) MMR …"`).
+   * Keep the HEAD chunk (lowest startLine) per (file, symbol), preserving
+   * first-seen order; rows without a symbol name pass through untouched.
+   */
+  private dedupeSymbolChunks<T extends SearchResult>(rows: T[]): T[] {
+    const headIndex = new Map<string, number>();
+    const head = new Map<string, T>();
+    const out: T[] = [];
+    for (const r of rows) {
+      if (!r.symbolName) {
+        out.push(r);
+        continue;
+      }
+      const key = `${r.filePath}\0${r.symbolName}`;
+      const at = headIndex.get(key);
+      if (at === undefined) {
+        headIndex.set(key, out.length);
+        head.set(key, r);
+        out.push(r);
+        continue;
+      }
+      const prev = head.get(key)!;
+      const line = r.startLine ?? Number.MAX_SAFE_INTEGER;
+      const prevLine = prev.startLine ?? Number.MAX_SAFE_INTEGER;
+      if (line < prevLine) {
+        head.set(key, r);
+        out[at] = r;
+      }
+    }
+    return out;
   }
 
   /**
