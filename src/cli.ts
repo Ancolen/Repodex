@@ -2,6 +2,7 @@
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, openSync, statSync } from "node:fs";
+import { connect } from "node:net";
 import { CONFIG, RESOLVED, CONFIG_SOURCE, resolveConfigPath } from "./config";
 import { daemonCommand, bridgeCommand } from "./runtime";
 import { daemonCheck, type DoctorCheck, type DoctorReport } from "./core/doctor";
@@ -64,6 +65,20 @@ async function api<T = any>(method: string, pathname: string, body?: unknown): P
   return data as T;
 }
 
+/** TCP-level probe: is something accepting connections on host:port? */
+function portInUse(host: string, port: number, timeoutMs = 1000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = connect({ host, port });
+    const done = (inUse: boolean): void => {
+      sock.destroy();
+      resolve(inUse);
+    };
+    sock.setTimeout(timeoutMs, () => done(false));
+    sock.once("connect", () => done(true));
+    sock.once("error", () => done(false));
+  });
+}
+
 async function requireDaemon(): Promise<void> {
   if (!(await ping())) {
     console.error("Daemon is not running. Start it first:  cidx start");
@@ -88,6 +103,21 @@ function printIndex(ix: any): void {
 async function cmdStart(positionals: string[]): Promise<void> {
   if (await ping()) {
     console.log("Daemon is already running.");
+  } else if (
+    (await portInUse(CONFIG.HOST, CONFIG.CONTROL_PORT)) ||
+    (await portInUse(CONFIG.HOST, CONFIG.MCP_PORT))
+  ) {
+    // The port is taken but /ping does not answer: most often a wedged daemon
+    // (event loop stuck, accept queue backing up). Spawning a second one only
+    // burns 30 s failing to bind — say what is actually wrong instead.
+    console.error(
+      `A process is listening on ${CONFIG.HOST}:${CONFIG.CONTROL_PORT}/${CONFIG.MCP_PORT} ` +
+        "but does not answer the control API — the daemon looks hung or is shutting down.",
+    );
+    console.error(
+      "If it runs as the systemd user service, restart it:  systemctl --user restart cidx.service",
+    );
+    process.exit(1);
   } else {
     mkdirSync(CONFIG.ROOT_DIR, { recursive: true });
     const logPath = path.join(CONFIG.ROOT_DIR, "daemon.log");
@@ -108,10 +138,18 @@ async function cmdStart(positionals: string[]): Promise<void> {
         up = true;
         break;
       }
+      // A child that already exited (bind failure, config error) will never
+      // answer: stop dotting and report its exit code with the log path.
+      if (proc.exitCode !== null) break;
       await Bun.sleep(500);
     }
-    console.log(up ? `\nDaemon ready (pid ${proc.pid}). Logs: ${logPath}` : "\nFailed to start daemon, check the logs.");
-    if (!up) process.exit(1);
+    if (up) {
+      console.log(`\nDaemon ready (pid ${proc.pid}). Logs: ${logPath}`);
+    } else {
+      const code = proc.exitCode !== null ? ` (exited with code ${proc.exitCode})` : "";
+      console.log(`\nFailed to start daemon${code}, check the logs: ${logPath}`);
+      process.exit(1);
+    }
   }
   // optional initial indexing after start
   const dir = positionals[0];
