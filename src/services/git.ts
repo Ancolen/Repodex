@@ -236,11 +236,17 @@ export async function gitShowFile(baseDir: string, ref: string, relPath: string)
  * Commit time of `<ref>` as epoch milliseconds (`git show -s --format=%at`).
  * `ref` is guarded by `safeGitRef` and passed as a literal argv element. Returns
  * null when the ref does not resolve or git fails — never throws.
+ *
+ * The ref is dereferenced to its COMMIT (`<ref>^{commit}`): `git show` on an
+ * annotated tag object prints the tag header ("tag v2.7.2", Tagger, message)
+ * and `%at` formats the tagger date only after dereferencing — without the
+ * suffix the first output line is prose, not a timestamp, and every annotated
+ * tag would be reported as unresolvable (lightweight tags and SHAs were fine).
  */
 export async function gitCommitTimeAt(baseDir: string, ref: string): Promise<number | null> {
   if (!safeGitRef(ref)) return null;
   try {
-    const { stdout } = await execFileAsync("git", ["-C", baseDir, "show", "-s", "--format=%at", ref], {
+    const { stdout } = await execFileAsync("git", ["-C", baseDir, "show", "-s", "--format=%at", `${ref}^{commit}`], {
       timeout: 10000,
       encoding: "utf8",
     });
