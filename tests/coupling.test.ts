@@ -17,7 +17,7 @@ import { mkdirSync, mkdtempSync, writeFileSync, rmSync, statSync } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { computeCoupling } from "../src/core/coupling";
+import { computeCoupling, distinctNeighborCount } from "../src/core/coupling";
 import type { CouplingBand, CouplingReport, FileCoupling } from "../src/core/coupling";
 import { Registry } from "../src/core/registry";
 import { JobQueue } from "../src/core/job-queue";
@@ -33,6 +33,15 @@ function byRel(band: CouplingBand, rel: string): FileCoupling {
 }
 
 const rels = (band: CouplingBand): string[] => band.items.map((f) => f.relativeFile);
+
+describe("distinctNeighborCount — shared fan definition", () => {
+  test("collapses duplicate targets and ignores self-edges", () => {
+    expect(distinctNeighborCount(undefined, "/a")).toBe(0);
+    expect(distinctNeighborCount([], "/a")).toBe(0);
+    expect(distinctNeighborCount(["/b", "/b", "/c"], "/a")).toBe(2);
+    expect(distinctNeighborCount(["/a", "/b"], "/a")).toBe(1);
+  });
+});
 
 // ---------------------------------------------------- 1. computeCoupling (pure)
 

@@ -97,7 +97,7 @@ export type { ChangeImpactReport, ImpactAnchor } from "./impact";
 import type { CommitHit, CommitQueryOpts } from "./commits";
 export type { CommitHit, CommitQueryOpts } from "./commits";
 // Proposal C5 — project-level coupling metrics.
-import { computeCoupling } from "./coupling";
+import { computeCoupling, distinctNeighborCount } from "./coupling";
 import type { CouplingReport } from "./coupling";
 export type { CouplingReport, CouplingBand, FileCoupling } from "./coupling";
 // Proposal O3 — table maintenance: the shared busy-table refusal wording.
@@ -2277,8 +2277,12 @@ export class IndexManager {
     const graph = await this.buildImportGraph(rec);
     const coupling = new Map<string, { fanIn: number; fanOut: number }>();
     for (const size of feed.sizes) {
-      const fanIn = graph.reverse.get(size.file)?.length ?? 0;
-      const fanOut = graph.forward.get(size.file)?.length ?? 0;
+      // Same definition as `get_coupling`: DISTINCT neighbors, self-edges
+      // ignored. `forward` may repeat a target (two specifiers importing the
+      // same module) — counting raw edges made hotspots report fan-out 47
+      // where coupling reported 40 for the same file.
+      const fanIn = distinctNeighborCount(graph.reverse.get(size.file), size.file);
+      const fanOut = distinctNeighborCount(graph.forward.get(size.file), size.file);
       if (fanIn > 0 || fanOut > 0) coupling.set(size.file, { fanIn, fanOut });
     }
 

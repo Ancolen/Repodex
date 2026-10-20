@@ -122,6 +122,24 @@ function round3(x: number): number {
   return Math.round(x * 1000) / 1000;
 }
 
+/**
+ * Distinct fan count for one file over a raw edge list: duplicate targets
+ * collapse and a self-edge is ignored — the same discipline `computeCoupling`
+ * applies to `forward` (which may repeat a target when two specifiers import
+ * the same module). `get_hotspots` shares the dependency-graph cache with
+ * `get_coupling`, so it must use the same definition or the two reports
+ * disagree on fan-out (observed: 47 raw edges vs 40 distinct files).
+ */
+export function distinctNeighborCount(edges: readonly string[] | undefined, self: string): number {
+  if (!edges || edges.length === 0) return 0;
+  const seen = new Set<string>();
+  for (const e of edges) {
+    if (e === self) continue;
+    seen.add(e);
+  }
+  return seen.size;
+}
+
 /** Deterministic tiebreak: project-relative path ascending. */
 function byRelativePath(a: FileCoupling, b: FileCoupling): number {
   return a.relativeFile < b.relativeFile ? -1 : a.relativeFile > b.relativeFile ? 1 : 0;
