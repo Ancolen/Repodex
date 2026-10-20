@@ -4,7 +4,14 @@
  * (depth bounding, cycle safety, node-budget truncation). No Ollama, no LanceDB.
  */
 import { test, expect, describe } from "bun:test";
-import { buildCallEdges, traverseCallGraph, matchRootSymbols, type CallSymbol, type CallChunk } from "../src/core/callgraph";
+import {
+  buildCallEdges,
+  buildCallEdgesCooperative,
+  traverseCallGraph,
+  matchRootSymbols,
+  type CallSymbol,
+  type CallChunk,
+} from "../src/core/callgraph";
 import { matchNamesFor } from "../src/core/deadcode";
 
 const ROOT = "/repo";
@@ -96,6 +103,20 @@ describe("buildCallEdges — caller→callee adjacency", () => {
     const { forward, reverse } = buildCallEdges([], []);
     expect(forward.size).toBe(0);
     expect(reverse.size).toBe(0);
+  });
+
+  test("the cooperative variant yields but builds the identical adjacency", async () => {
+    const symbols = [sym("a", "/x.ts", 1), sym("b", "/x.ts", 10), sym("c", "/x.ts", 20)];
+    const chunks = [
+      body("a", "/x.ts", 1, "function a() {\n  b();\n}"),
+      body("b", "/x.ts", 10, "function b() {\n  c();\n}"),
+      body("c", "/x.ts", 20, "function c() {}"),
+    ];
+    const sync = buildCallEdges(symbols, chunks);
+    // sliceMs 0 forces a yield between every chunk, exercising the sliced path.
+    const cooperative = await buildCallEdgesCooperative(symbols, chunks, { sliceMs: 0 });
+    expect([...cooperative.forward.entries()]).toEqual([...sync.forward.entries()]);
+    expect([...cooperative.reverse.entries()]).toEqual([...sync.reverse.entries()]);
   });
 });
 

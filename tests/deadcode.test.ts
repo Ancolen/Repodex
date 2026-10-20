@@ -12,6 +12,7 @@ import {
   detectExported,
   scoreDeadCode,
   countReferences,
+  countReferencesCooperative,
   matchNamesFor,
   buildNameRegex,
   type CountSymbol,
@@ -253,5 +254,22 @@ describe("countReferences — definition rule", () => {
     const symbols = [sym("x@/a.ts:1", ["x"], "/a.ts", 1)];
     expect(countReferences(symbols, []).get("x@/a.ts:1")).toBe(0);
     expect(countReferences([], [chunk("/a.ts", 1, "x")]).size).toBe(0);
+  });
+
+  test("the cooperative variant yields but returns the identical counts", async () => {
+    const symbols = [
+      sym("foo@/a.ts:1", ["foo"], "/a.ts", 1),
+      sym("Bar.baz@/a.ts:2", ["Bar.baz", "baz"], "/a.ts", 2),
+      sym("unused@/c.ts:1", ["unused"], "/c.ts", 1),
+    ];
+    const chunks = [
+      chunk("/a.ts", 1, "function foo() {}"),
+      chunk("/b.ts", 1, "foo();\nconst b = new Bar();\nb.baz();"),
+      chunk("/c.ts", 1, "function unused() {}"),
+    ];
+    const sync = [...countReferences(symbols, chunks).entries()].sort();
+    // sliceMs 0 forces a yield between every chunk, exercising the sliced path.
+    const cooperative = [...(await countReferencesCooperative(symbols, chunks, { sliceMs: 0 })).entries()].sort();
+    expect(cooperative).toEqual(sync);
   });
 });

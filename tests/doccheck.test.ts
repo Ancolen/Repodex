@@ -7,6 +7,7 @@ import {
   extractDocSpans,
   buildDocCheckIndex,
   scanDocTokens,
+  scanDocTokensCooperative,
   checkSpan,
   demoteByIntent,
   collectUndocumented,
@@ -266,6 +267,27 @@ describe("scanDocTokens", () => {
     for (let i = 0; i < total; i++) tokens.push(`zzToken${i}`);
     const hits = scanDocTokens([chunk("src/a.ts", tokens.join(" "))], tokens, "ident");
     expect(hits.size).toBe(total);
+  });
+
+  test("the cooperative variant yields but returns the identical hits", async () => {
+    const chunks = [
+      chunk("src/a.ts", "export function getUserName() {}\ngetUser();\ndocs/status.md"),
+      chunk("README.md", "getUser is documented here too"),
+      chunk("src/b.ts", "const m = 'qwen3-reranker:q8'; // --last"),
+    ];
+    const idents = ["getUser", "getUserName"];
+    const literals = ["docs/status.md", "qwen3-reranker:q8", "--last"];
+    for (const [style, tokens] of [
+      ["ident", idents],
+      ["literal", literals],
+    ] as const) {
+      const sync = [...scanDocTokens(chunks, tokens, style).entries()].sort();
+      // sliceMs 0 forces a yield between every chunk, exercising the sliced path.
+      const cooperative = [
+        ...(await scanDocTokensCooperative(chunks, tokens, style, { sliceMs: 0 })).entries(),
+      ].sort();
+      expect(cooperative).toEqual(sync);
+    }
   });
 });
 

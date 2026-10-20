@@ -31,6 +31,7 @@ import { DYNAMIC_HOOK_NAMES, NAME_REGEX_CAP } from "./deadcode";
 import { DEAD_CANDIDATE_TYPES, isTestFile, isEntryPointFile } from "./filekinds";
 import { applyBudgetBySize } from "../utils/budget";
 import { mapWithConcurrency } from "../utils/concurrency";
+import { COOPERATIVE_SLICE_MS, sliceClock, yieldIfExpired } from "../utils/cooperative";
 
 // ------------------------------------------------------------------ types
 
@@ -707,40 +708,83 @@ export function scanDocTokens(
   style: "ident" | "literal",
 ): Map<string, DocEvidence[]> {
   const result = new Map<string, DocEvidence[]>();
-  const uniq = [...new Set(tokens)].filter((t) => t.length > 0);
-  if (uniq.length === 0) return result;
-  const sorted = uniq.sort((a, b) => b.length - a.length).filter((t) => t.length <= 200);
-  const left = style === "ident" ? "(?<![A-Za-z0-9_$])" : "(?<![\\w$.@/-])";
-  const right = style === "ident" ? "(?![A-Za-z0-9_$])" : "(?![\\w$-])";
+  const scan = prepareDocTokenScan(tokens, style);
+  if (!scan) return result;
+  for (let gi = 0; gi < scan.sorted.length; gi += NAME_REGEX_CAP) {
+    const re = docTokenRegex(scan, gi);
+    for (const chunk of chunks) scanChunkTokens(re, chunk, result);
+  }
+  return result;
+}
 
-  for (let gi = 0; gi < sorted.length; gi += NAME_REGEX_CAP) {
-    const batch = sorted.slice(gi, gi + NAME_REGEX_CAP);
-    const re = new RegExp(`${left}(${batch.map(escapeRegExp).join("|")})${right}`, "g");
+/**
+ * `scanDocTokens`, cooperatively scheduled: the daemon's report pass must not
+ * own the event loop for seconds. Identical hits; the scan yields between
+ * ~15 ms slices (this is the hottest phase of `runDocCheck`: ~2.2 s of a 2.9 s
+ * `check_docs` on the maintainer's index).
+ */
+export async function scanDocTokensCooperative(
+  chunks: readonly DocCheckChunk[],
+  tokens: readonly string[],
+  style: "ident" | "literal",
+  opts: { sliceMs?: number } = {},
+): Promise<Map<string, DocEvidence[]>> {
+  const result = new Map<string, DocEvidence[]>();
+  const scan = prepareDocTokenScan(tokens, style);
+  if (!scan) return result;
+  const clock = sliceClock();
+  for (let gi = 0; gi < scan.sorted.length; gi += NAME_REGEX_CAP) {
+    const re = docTokenRegex(scan, gi);
     for (const chunk of chunks) {
-      if (isDocPath(chunk.filePath)) continue;
-      if (!chunk.content) continue;
-      const lines = chunk.content.split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i]!;
-        if (line.length === 0) continue;
-        re.lastIndex = 0;
-        let m: RegExpExecArray | null;
-        while ((m = re.exec(line)) !== null) {
-          const matched = m[1]!;
-          let list = result.get(matched);
-          if (!list) {
-            list = [];
-            result.set(matched, list);
-          }
-          if (list.length < MAX_EVIDENCE && !list.some((e) => e.path === chunk.filePath && e.line === chunk.startLine + i)) {
-            list.push({ path: chunk.filePath, line: chunk.startLine + i });
-          }
-          if (m.index === re.lastIndex) re.lastIndex++;
-        }
-      }
+      scanChunkTokens(re, chunk, result);
+      await yieldIfExpired(clock, opts.sliceMs ?? COOPERATIVE_SLICE_MS);
     }
   }
   return result;
+}
+
+interface DocTokenScan {
+  sorted: string[];
+  left: string;
+  right: string;
+}
+
+function prepareDocTokenScan(tokens: readonly string[], style: "ident" | "literal"): DocTokenScan | null {
+  const uniq = [...new Set(tokens)].filter((t) => t.length > 0);
+  if (uniq.length === 0) return null;
+  const sorted = uniq.sort((a, b) => b.length - a.length).filter((t) => t.length <= 200);
+  const left = style === "ident" ? "(?<![A-Za-z0-9_$])" : "(?<![\\w$.@/-])";
+  const right = style === "ident" ? "(?![A-Za-z0-9_$])" : "(?![\\w$-])";
+  return { sorted, left, right };
+}
+
+function docTokenRegex(scan: DocTokenScan, groupStart: number): RegExp {
+  const batch = scan.sorted.slice(groupStart, groupStart + NAME_REGEX_CAP);
+  return new RegExp(`${scan.left}(${batch.map(escapeRegExp).join("|")})${scan.right}`, "g");
+}
+
+function scanChunkTokens(re: RegExp, chunk: DocCheckChunk, result: Map<string, DocEvidence[]>): void {
+  if (isDocPath(chunk.filePath)) return;
+  if (!chunk.content) return;
+  const lines = chunk.content.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (line.length === 0) continue;
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(line)) !== null) {
+      const matched = m[1]!;
+      let list = result.get(matched);
+      if (!list) {
+        list = [];
+        result.set(matched, list);
+      }
+      if (list.length < MAX_EVIDENCE && !list.some((e) => e.path === chunk.filePath && e.line === chunk.startLine + i)) {
+        list.push({ path: chunk.filePath, line: chunk.startLine + i });
+      }
+      if (m.index === re.lastIndex) re.lastIndex++;
+    }
+  }
 }
 
 // ------------------------------------------------------- span classification
@@ -1677,8 +1721,8 @@ export async function runDocCheck(state: DocCheckState, opts: DocCheckOpts = {})
   const identTokens = new Set<string>();
   const literalTokens = new Set<string>();
   collectScanTokens(allSpans, identTokens, literalTokens);
-  const identHits = scanDocTokens(state.chunks, [...identTokens], "ident");
-  const literalHits = scanDocTokens(state.chunks, [...literalTokens], "literal");
+  const identHits = await scanDocTokensCooperative(state.chunks, [...identTokens], "ident");
+  const literalHits = await scanDocTokensCooperative(state.chunks, [...literalTokens], "literal");
 
   const ctx: ResolveCtx = { state, idx, allPaths, identHits, literalHits, scriptNames };
 

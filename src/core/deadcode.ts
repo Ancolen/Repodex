@@ -20,6 +20,7 @@
  * The engine (`IndexManager.findDeadCode`) composes these.
  */
 import { escapeRegExp } from "../utils/text";
+import { COOPERATIVE_SLICE_MS, sliceClock, yieldIfExpired } from "../utils/cooperative";
 import { detectExported } from "./exported";
 
 // `detectExported` lives in `src/core/exported.ts` so the API-diff comparator can
@@ -174,14 +175,15 @@ export function buildNameRegex(names: string[]): RegExp | null {
   return new RegExp(pattern, "g");
 }
 
-/**
- * Count whole-identifier references for every symbol in one pass over all chunk
- * content. Returns a Map<symbolKey, referenceCount> (0 for symbols never referenced).
- * The definition rule: an occurrence on a symbol's exact declaration line in its
- * own file is the definition and is skipped; everything else (incl. recursion in
- * the body) counts.
- */
-export function countReferences(symbols: CountSymbol[], chunks: CountChunk[]): Map<string, number> {
+/** The shared lookup state: name → symbol keys and name → file → declaration lines. */
+interface ReferenceScan {
+  nameToKeys: Map<string, Set<string>>;
+  defLookup: Map<string, Map<string, Set<number>>>;
+  refCount: Map<string, number>;
+  allNames: string[];
+}
+
+function prepareReferenceScan(symbols: CountSymbol[]): ReferenceScan {
   const nameToKeys = new Map<string, Set<string>>();
   const defLookup = new Map<string, Map<string, Set<number>>>(); // name → file → declaration lines
   const refCount = new Map<string, number>();
@@ -208,41 +210,86 @@ export function countReferences(symbols: CountSymbol[], chunks: CountChunk[]): M
       lines.add(s.declarationLine);
     }
   }
+  return { nameToKeys, defLookup, refCount, allNames: [...nameToKeys.keys()] };
+}
 
-  const allNames = [...nameToKeys.keys()];
-  if (allNames.length === 0) return refCount;
+/** Scans one chunk with one name-group regex, updating `refCount` in place. */
+function scanChunkReferences(
+  re: RegExp,
+  chunk: CountChunk,
+  scan: Pick<ReferenceScan, "nameToKeys" | "defLookup" | "refCount">,
+): void {
+  if (typeof chunk.content !== "string" || chunk.content.length === 0) return;
+  const lines = chunk.content.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(line)) !== null) {
+      const matched = m[1]!;
+      const absLine = chunk.startLine + i;
+      const defLines = scan.defLookup.get(matched)?.get(chunk.filePath);
+      if (defLines && defLines.has(absLine)) {
+        // Declaration line for this name in this file → it's a definition, not a reference.
+        if (m.index === re.lastIndex) re.lastIndex++;
+        continue;
+      }
+      const keys = scan.nameToKeys.get(matched);
+      if (keys) {
+        for (const key of keys) scan.refCount.set(key, (scan.refCount.get(key) ?? 0) + 1);
+      }
+      if (m.index === re.lastIndex) re.lastIndex++;
+    }
+  }
+}
+
+/**
+ * Count whole-identifier references for every symbol in one pass over all chunk
+ * content. Returns a Map<symbolKey, referenceCount> (0 for symbols never referenced).
+ * The definition rule: an occurrence on a symbol's exact declaration line in its
+ * own file is the definition and is skipped; everything else (incl. recursion in
+ * the body) counts.
+ *
+ * Synchronous by design (pure, unit-testable). The daemon calls
+ * `countReferencesCooperative`, which computes the identical result but yields
+ * the event loop between chunks.
+ */
+export function countReferences(symbols: CountSymbol[], chunks: CountChunk[]): Map<string, number> {
+  const scan = prepareReferenceScan(symbols);
+  if (scan.allNames.length === 0) return scan.refCount;
 
   // Scan in name-GROUPS so no single combined regex exceeds NAME_REGEX_CAP. The
   // def-index (defLookup / nameToKeys) is GLOBAL — built from every symbol — so the
   // declaration-line exclusion stays correct across groups, and each name is scanned
   // exactly once (no silent drop of symbols past a regex cap).
-  for (let gi = 0; gi < allNames.length; gi += NAME_REGEX_CAP) {
-    const re = buildNameRegex(allNames.slice(gi, gi + NAME_REGEX_CAP));
+  for (let gi = 0; gi < scan.allNames.length; gi += NAME_REGEX_CAP) {
+    const re = buildNameRegex(scan.allNames.slice(gi, gi + NAME_REGEX_CAP));
+    if (!re) continue;
+    for (const chunk of chunks) scanChunkReferences(re, chunk, scan);
+  }
+  return scan.refCount;
+}
+
+/**
+ * `countReferences`, cooperatively scheduled: identical output, but the loop
+ * hands the event loop back between ~15 ms slices so `/ping` and other
+ * requests are served while the scan runs. Used by the daemon's report tools.
+ */
+export async function countReferencesCooperative(
+  symbols: CountSymbol[],
+  chunks: CountChunk[],
+  opts: { sliceMs?: number } = {},
+): Promise<Map<string, number>> {
+  const scan = prepareReferenceScan(symbols);
+  if (scan.allNames.length === 0) return scan.refCount;
+  const clock = sliceClock();
+  for (let gi = 0; gi < scan.allNames.length; gi += NAME_REGEX_CAP) {
+    const re = buildNameRegex(scan.allNames.slice(gi, gi + NAME_REGEX_CAP));
     if (!re) continue;
     for (const chunk of chunks) {
-      if (typeof chunk.content !== "string" || chunk.content.length === 0) continue;
-      const lines = chunk.content.split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i]!;
-        re.lastIndex = 0;
-        let m: RegExpExecArray | null;
-        while ((m = re.exec(line)) !== null) {
-          const matched = m[1]!;
-          const absLine = chunk.startLine + i;
-          const defLines = defLookup.get(matched)?.get(chunk.filePath);
-          if (defLines && defLines.has(absLine)) {
-            // Declaration line for this name in this file → it's a definition, not a reference.
-            if (m.index === re.lastIndex) re.lastIndex++;
-            continue;
-          }
-          const keys = nameToKeys.get(matched);
-          if (keys) {
-            for (const key of keys) refCount.set(key, (refCount.get(key) ?? 0) + 1);
-          }
-          if (m.index === re.lastIndex) re.lastIndex++;
-        }
-      }
+      scanChunkReferences(re, chunk, scan);
+      await yieldIfExpired(clock, opts.sliceMs ?? COOPERATIVE_SLICE_MS);
     }
   }
-  return refCount;
+  return scan.refCount;
 }

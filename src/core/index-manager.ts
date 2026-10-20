@@ -75,14 +75,14 @@ import { deriveSignature, matchIdentifierLines } from "../utils/text";
 import { extractImports } from "../chunking/imports";
 import { resolveImports, buildFileIndex, type ResolvedDep, type FileIndex } from "./resolve";
 import {
-  countReferences,
+  countReferencesCooperative,
   scoreDeadCode,
   matchNamesFor,
   type CountSymbol,
   type CountChunk,
   type DeadSignal,
 } from "./deadcode";
-import { buildCallEdges, traverseCallGraph, matchRootSymbols } from "./callgraph";
+import { buildCallEdgesCooperative, traverseCallGraph, matchRootSymbols } from "./callgraph";
 import type { CallSymbol, CallChunk, CallGraphNode } from "./callgraph";
 export type { CallGraphNode } from "./callgraph";
 // C1 — change impact: the pure join over the three cached adjacency sources.
@@ -2363,7 +2363,7 @@ export class IndexManager {
         startLine: typeof r.startLine === "number" ? r.startLine : 1,
         content: r.content ?? "",
       }));
-    const refCounts = countReferences(countSymbols, countChunks);
+    const refCounts = await countReferencesCooperative(countSymbols, countChunks);
 
     // Per (file, symbol) reference totals — the owner-class lookup input, as in
     // `findDeadCode`.
@@ -2744,7 +2744,7 @@ export class IndexManager {
       });
     }
 
-    const { forward, reverse } = buildCallEdges(symbols, chunks);
+    const { forward, reverse } = await buildCallEdgesCooperative(symbols, chunks);
 
     const nameToSymbols = new Map<string, CallSymbol[]>();
     for (const s of symbols) {
@@ -2863,7 +2863,7 @@ export class IndexManager {
         content: r.content ?? "",
       }));
 
-    const refCounts = countReferences(countSymbols, countChunks);
+    const refCounts = await countReferencesCooperative(countSymbols, countChunks);
 
     // Per (file, symbol-name) reference totals — used for owner-class lookups.
     const refsByNameFile = new Map<string, number>();

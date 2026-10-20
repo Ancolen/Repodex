@@ -20,6 +20,7 @@
 import path from "node:path";
 import { buildNameRegex, matchNamesFor, NAME_REGEX_CAP } from "./deadcode";
 import { deriveSignature } from "../utils/text";
+import { COOPERATIVE_SLICE_MS, sliceClock, yieldIfExpired } from "../utils/cooperative";
 
 /** A callable symbol in the inventory (deduped per name+file). */
 export interface CallSymbol {
@@ -79,6 +80,42 @@ export interface CallEdges {
  * keeps declarations from becoming self-edges while preserving recursion.
  */
 export function buildCallEdges(symbols: CallSymbol[], chunks: CallChunk[]): CallEdges {
+  const scan = prepareCallScan(symbols);
+  scanGroups(scan, chunks, (re, chunk) => scanChunkCalls(re, chunk, scan.nameToKeys, scan.defLookup, scan.forward));
+  return finishCallEdges(scan.forward);
+}
+
+/**
+ * `buildCallEdges`, cooperatively scheduled: identical adjacency, but the scan
+ * yields the event loop between ~15 ms slices so `/ping` and other requests are
+ * served while a large call graph is built.
+ */
+export async function buildCallEdgesCooperative(
+  symbols: CallSymbol[],
+  chunks: CallChunk[],
+  opts: { sliceMs?: number } = {},
+): Promise<CallEdges> {
+  const scan = prepareCallScan(symbols);
+  const clock = sliceClock();
+  for (let gi = 0; gi < scan.allNames.length; gi += NAME_REGEX_CAP) {
+    const re = buildNameRegex(scan.allNames.slice(gi, gi + NAME_REGEX_CAP));
+    if (!re) continue;
+    for (const chunk of chunks) {
+      scanChunkCalls(re, chunk, scan.nameToKeys, scan.defLookup, scan.forward);
+      await yieldIfExpired(clock, opts.sliceMs ?? COOPERATIVE_SLICE_MS);
+    }
+  }
+  return finishCallEdges(scan.forward);
+}
+
+interface CallScan {
+  nameToKeys: Map<string, Set<string>>;
+  defLookup: Map<string, Map<string, Set<number>>>;
+  forward: CallEdges["forward"];
+  allNames: string[];
+}
+
+function prepareCallScan(symbols: CallSymbol[]): CallScan {
   const forward = new Map<string, Set<string>>();
   const nameToKeys = new Map<string, Set<string>>(); // identifier → callee keys
   const defLookup = new Map<string, Map<string, Set<number>>>(); // name → file → decl lines
@@ -104,45 +141,58 @@ export function buildCallEdges(symbols: CallSymbol[], chunks: CallChunk[]): Call
       lines.add(s.declarationLine);
     }
   }
+  return { nameToKeys, defLookup, forward, allNames: [...nameToKeys.keys()] };
+}
 
+/** The synchronous group loop shared by both entry points. */
+function scanGroups(scan: CallScan, chunks: CallChunk[], visit: (re: RegExp, chunk: CallChunk) => void): void {
   // Scan in name-GROUPS so no single combined regex exceeds NAME_REGEX_CAP. The
   // def-index is GLOBAL (built from every symbol), so the declaration-line
   // exclusion stays correct across groups.
-  const allNames = [...nameToKeys.keys()];
-  for (let gi = 0; gi < allNames.length; gi += NAME_REGEX_CAP) {
-    const re = buildNameRegex(allNames.slice(gi, gi + NAME_REGEX_CAP));
+  for (let gi = 0; gi < scan.allNames.length; gi += NAME_REGEX_CAP) {
+    const re = buildNameRegex(scan.allNames.slice(gi, gi + NAME_REGEX_CAP));
     if (!re) continue;
-    for (const chunk of chunks) {
-      if (!chunk.content) continue;
-      const lines = chunk.content.split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i]!;
-        re.lastIndex = 0;
-        let m: RegExpExecArray | null;
-        while ((m = re.exec(line)) !== null) {
-          const matched = m[1]!;
-          const absLine = chunk.startLine + i;
-          const defLines = defLookup.get(matched)?.get(chunk.filePath);
-          if (defLines && defLines.has(absLine)) {
-            // Declaration line for this name in this file → not a call.
-            if (m.index === re.lastIndex) re.lastIndex++;
-            continue;
-          }
-          const keys = nameToKeys.get(matched);
-          if (keys) {
-            let out = forward.get(chunk.callerKey);
-            if (!out) {
-              out = new Set();
-              forward.set(chunk.callerKey, out);
-            }
-            for (const k of keys) out.add(k);
-          }
-          if (m.index === re.lastIndex) re.lastIndex++;
-        }
+    for (const chunk of chunks) visit(re, chunk);
+  }
+}
+
+function scanChunkCalls(
+  re: RegExp,
+  chunk: CallChunk,
+  nameToKeys: Map<string, Set<string>>,
+  defLookup: Map<string, Map<string, Set<number>>>,
+  forward: CallEdges["forward"],
+): void {
+  if (!chunk.content) return;
+  const lines = chunk.content.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(line)) !== null) {
+      const matched = m[1]!;
+      const absLine = chunk.startLine + i;
+      const defLines = defLookup.get(matched)?.get(chunk.filePath);
+      if (defLines && defLines.has(absLine)) {
+        // Declaration line for this name in this file → not a call.
+        if (m.index === re.lastIndex) re.lastIndex++;
+        continue;
       }
+      const keys = nameToKeys.get(matched);
+      if (keys) {
+        let out = forward.get(chunk.callerKey);
+        if (!out) {
+          out = new Set();
+          forward.set(chunk.callerKey, out);
+        }
+        for (const k of keys) out.add(k);
+      }
+      if (m.index === re.lastIndex) re.lastIndex++;
     }
   }
+}
 
+function finishCallEdges(forward: CallEdges["forward"]): CallEdges {
   const reverse = new Map<string, Set<string>>();
   for (const [caller, callees] of forward) {
     for (const callee of callees) {
