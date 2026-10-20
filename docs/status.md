@@ -2,7 +2,7 @@
 
 > The living tracker. **When you finish, start, or decide on something, edit this file.** Pair each change with an entry in [`changelog.md`](./changelog.md) and (for behavior) [`features.md`](./features.md); a proposal that earns a real design gets fleshed out in [`proposals.md`](./proposals.md) and referenced from here by ID.
 >
-> Current release: **2.6.1** (chunker cut-safety fix: astral characters can no longer be split at chunk-window cut edges, plus a lone-surrogate guard at the backend wire — files with an emoji at the boundary had silently failed to index since the llama.cpp backend). Prior: **2.6.0** (the whole proposals backlog: search quality S2/S3/S4 + framing, code intelligence C3/C4/C5, agent UX A2/A3, ops O2/O3/O4 + job priority, doccheck D1b/D1c, the `maxFileSizeBytes` guard, and a persistent integration battery); **2.5.0** (pluggable embedding backends: Ollama | llama.cpp llama-server). Test suite: **1066/1066** passing (3471 expectations).
+> Current release: **2.7.0** (agent-UX and observability wave: zero-file transparency, pick-one overview, `wait` on index, `requestedDocs`, doccheck improvements — see [changelog](./changelog.md)). Prior: **2.6.1** (chunker cut-safety fix: astral characters can no longer be split at chunk-window cut edges, plus a lone-surrogate guard at the backend wire — files with an emoji at the boundary had silently failed to index since the llama.cpp backend); **2.6.0** (the whole proposals backlog: search quality S2/S3/S4 + framing, code intelligence C3/C4/C5, agent UX A2/A3, ops O2/O3/O4 + job priority, doccheck D1b/D1c, the `maxFileSizeBytes` guard, and a persistent integration battery); **2.5.0** (pluggable embedding backends: Ollama | llama.cpp llama-server). Test suite: **1083/1083** passing (3536 expectations).
 
 ## Legend
 
@@ -65,7 +65,7 @@
 - ✅ Incremental sync (changed / new + deleted cleanup).
 - ✅ Deleted-file cleanup on restore (offline removals pruned).
 - ✅ Live watcher with debounce + atomic / awaitWriteFinish rename handling.
-- ✅ `.gitignore` / `.cidxignore` / global ignore (full-index **and** watcher paths).
+- ✅ `.gitignore` / `.cidxignore` / global ignore (full-index **and** watcher paths) — and the watcher applies them at the **chokidar level** together with the extension allowlist, so ignored trees (`.venv`, `node_modules`, …) and unindexable files get no watch handle at all (fd usage is bounded by indexable files).
 - ✅ `gitTrackedOnly` (full-index).
 - ✅ Auto sync on branch change (`.git/HEAD` watcher).
 

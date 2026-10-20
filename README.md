@@ -140,7 +140,7 @@ For automatic startup at boot, user `linger` is enabled; manually if needed:
 sudo loginctl enable-linger "$USER"
 ```
 
-> **daemon service vs `cidx start`:** the systemd service runs and supervises `src/index.ts` (the daemon itself) in the foreground and restarts it if it crashes. `cidx start`, on the other hand, is a helper that starts the daemon in the background if it isn't running — if the service is already running it says "already running". The two can be used together safely.
+> **daemon service vs `cidx start`:** the systemd service runs and supervises `src/index.ts` (the daemon itself) in the foreground and restarts it if it crashes. `cidx start`, on the other hand, is a helper that starts the daemon in the background if it isn't running — if the service is already running it says "already running". If a process holds the daemon ports but does not answer `/ping` (a wedged daemon), `cidx start` reports that and points at `systemctl --user restart cidx.service` instead of spawning a second daemon that cannot bind. The two can be used together safely.
 
 ### Uninstall
 
@@ -469,7 +469,10 @@ daemon:
 # NOTE: the YAML list REPLACES the in-code default wholesale — an existing
 # config.yml written before Godot support does not pick up the new extensions
 # automatically. Add "- .gd", "- .gdshader", "- .tscn", "- .tres", "- .godot"
-# (and ".godot" to ignoredDirs) by hand, then reindex.
+# (and ".godot" to ignoredDirs) by hand, then reindex. The same applies to
+# ignoredDirs: the in-code default also covers common generated trees
+# (.venv, __pycache__, .next, .nuxt, .svelte-kit, .turbo, .parcel-cache, …),
+# which older explicit lists won't inherit — add the ones your projects need.
 
 watcher:
   debounceMs: 300

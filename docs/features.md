@@ -131,10 +131,10 @@ What the tool **does today** (version 2.6.1). For what's planned, see [`status.m
   }
   ```
 - **`languages`** — an allowlist of language labels (the same labels as the `language` search filter: `typescript`, `python`, `gdscript`, `markdown`, …). Files whose extension produces no label are dropped while the filter is active. Filtered-out files are absent from the file list, so the **deleted-file cleanup prunes them on the next sync**; the watcher removes them live on file events.
-- **`ignore`** — extra ignore patterns layered on top of `.gitignore` + `.cidxignore` (same `ignore`-package semantics).
+- **`ignore`** — extra ignore patterns layered on top of `.gitignore` + `.cidxignore` (same `ignore`-package semantics). The watcher builds the same matcher at startup, so these patterns also decide which paths get a watch handle at all (ignored trees are never watched, not merely skipped on events).
 - **`embedModel`** — a per-project embedding model. The record's `embedModel` is pinned at `createIndex`, a **`sync` escalates to a full reindex** when the project config's model differs (vectors from two models can't share a table), and the **watcher skips writes** for a project whose model changed until it is reindexed. Queries are embedded with the model the table was built with, so search stays self-consistent. (Caveat: `searchAll` across projects using different models mixes distances from different embedding spaces.)
 - **`doccheck`** — `{ files: string[], ignore: string[] }` tuning for `check_docs` / `cidx doccheck`: `files` replaces the default doc set (`*.md` + `docs/**/*.md`, root-anchored globs), `ignore` skips extra doc files/globs on top of `.gitignore`/`.cidxignore`. Read fresh on every check, same as the rest of the file.
-- Read **fresh on every index job and watcher event** — editing `.cidx.json` takes effect on the next sync/reindex (or immediately for watcher events), no daemon restart.
+- Read **fresh on every index job and watcher event** — editing `.cidx.json` takes effect on the next sync/reindex (or immediately for watcher events), no daemon restart. One exception: the `ignore` array is baked into the watcher's **startup** matcher (it decides which paths chokidar watches at all), so pattern changes apply on the next watcher start and the next index job.
 
 ## Transports
 

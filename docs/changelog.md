@@ -6,6 +6,46 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ---
 
+## Unreleased
+
+### Fixed
+
+- **The watcher watched trees the indexer never reads.** chokidar opens a
+  watch handle per accepted file, but the watcher applied `.gitignore` /
+  `.cidxignore` / `ignoredDirs` only inside its event handler — so startup
+  still walked and watched everything (a Python `.venv` with ~76k files in one
+  project). `startWatcher` now builds the ignore matcher synchronously
+  (`buildIgnoreSync`; same sources and precedence as `buildIgnore`, including
+  the `.cidx.json` `ignore` array, which the watcher previously ignored
+  entirely) and passes it to chokidar's `ignored` predicate together with the
+  extension allowlist: files the indexer would reject get no handle, while
+  directories stay traversable. Observed on the maintainer's install after a
+  daemon restart: **97,872 → 8,175 open file descriptors** (the `.venv` under
+  one project alone: 82,936 → 424). The default `indexing.ignoredDirs` also
+  gained the usual generated trees (`.venv`, `__pycache__`, `.tox`,
+  `.mypy_cache`, `.pytest_cache`, `.ruff_cache`, `.next`, `.nuxt`,
+  `.svelte-kit`, `.turbo`, `.parcel-cache`, `.gradle`, `.idea`).
+
+- **`cidx start` no longer spawns a doomed second daemon.** A wedged daemon
+  keeps its ports listening while answering nothing — `cidx start` could not
+  tell that apart from "not running", spawned a child that could not bind, and
+  printed dots for 30 s before failing. It now probes the control/MCP ports
+  after the ping failure: if something accepts connections but `/ping` does
+  not answer, it reports the hung daemon and points at
+  `systemctl --user restart cidx.service` without spawning anything. A child
+  that exits during the wait loop also ends the loop immediately (printing its
+  exit code and the log path).
+
+- **Embedding-provider outages are no longer silent.** Per-file index failures
+  were logged, but the run still reported `ready` with `0 chunks written`
+  (observed while `llamacpp-eg2.service` had been down for three days).
+  `IndexResult` now carries `failed`; the ready line appends `, N failed`, and
+  a non-zero count persists in the registry note (`indexes.note`) — visible in
+  `cidx status` / `list_indexes` — with the likely cause. The note clears on
+  the next clean run.
+
+Test suite: **1083/1083** passing (3536 expectations); `bun run typecheck` clean.
+
 ## 2.7.0 (2026-10-14)
 
 Agent-UX and observability wave driven by a week of real MCP-usage review.
