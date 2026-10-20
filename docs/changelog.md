@@ -2,9 +2,67 @@
 
 Version-by-version implementation history, **newest first**. For the current done / proposed picture, see [`status.md`](./status.md); for what the tools do, [`features.md`](./features.md).
 
-> **How this repo versions:** the design uses informal "waves" (v1 → v4); the **release version** in `package.json` is bumped per wave (currently `2.7.3`). The version string lives in **five** places that must be bumped together on release: `package.json`, `src/server/mcp.ts` (`Server` info), `src/server/control-api.ts` (`/ping`), `src/stdio-bridge.ts`, and `src/cli.ts` (`CLI_VERSION`). The `web-install.sh` / Release workflow fires on a pushed `v*` git tag.
+> **How this repo versions:** the design uses informal "waves" (v1 → v4); the **release version** in `package.json` is bumped per wave (currently `2.7.4`). The version string lives in **five** places that must be bumped together on release: `package.json`, `src/server/mcp.ts` (`Server` info), `src/server/control-api.ts` (`/ping`), `src/stdio-bridge.ts`, and `src/cli.ts` (`CLI_VERSION`). The `web-install.sh` / Release workflow fires on a pushed `v*` git tag.
 
 ---
+
+## 2.7.4 (2026-10-20)
+
+A full self-audit of every MCP tool against the daemon's own index — each
+result independently checked against the source / git history. Nine defects
+fixed, each with a regression test where the seam is unit-testable.
+
+### Fixed
+
+- **`check_docs since <annotated-tag>` degraded to a full scan.**
+  `gitCommitTimeAt` ran `git show -s --format=%at <ref>`; on an annotated tag
+  git prints the tag object rather than dereferencing to its commit, so the
+  timestamp was not the commit's and the drift window silently fell back to a
+  full scan ("did not resolve to a commit"). It now queries `${ref}^{commit}`
+  (`src/services/git.ts`), with a temp-repo test covering lightweight and
+  annotated tags (`tests/git-ref.test.ts`).
+- **Doccheck false positive on systemd unit names.** `cidx.service` in prose
+  was classified as a command/path claim and reported as drift; a unit name is
+  an external artifact, like a CI label. `SYSTEMD_UNIT_RE`
+  (`.service|.socket|.timer|.target|…`) now routes those spans to the artifact
+  vocabulary (`src/core/doccheck.ts`).
+- **Doccheck duplicate findings.** The same claim repeated on several lines
+  (a `NOTICE` block) produced one finding per occurrence. Findings are now
+  deduped on the full claim identity (doc/line/class/token/verdict/confidence/
+  message) and IDs stay contiguous (`src/core/doccheck.ts`).
+- **Ambiguous-project error leaked source text.** `get_change_impact` /
+  `get_call_graph` on a symbol present in several projects rendered a message
+  containing a literal `" +` (two unclosed template literals). A shared
+  `ambiguousSymbolProjectError` now builds the message, and the test asserts
+  the exact agent-facing wording ("pass the 'project' (or 'path') argument").
+- **`get_hotspots` fanOut disagreed with `get_coupling`.** Hotspot coupling
+  counted raw forward edges (duplicates + self-edge), 47 vs coupling's 40.
+  Both now use `distinctNeighborCount` (`src/core/coupling.ts`).
+- **`get_api_diff` reported `truncated: true` without a limit hit.** The
+  `exportedOnly` filter was conflated with the limit; they are separated so
+  only a real entry-cap overflow sets `truncated` (`src/core/index-manager.ts`).
+- **`find_symbol` returned every chunk of a split symbol**, including
+  continuation chunks with meaningless signatures. It now fetches a small
+  buffer (`max(limit*3, limit+10)`) and returns one **head chunk** per
+  `filePath`+`symbolName` (`dedupeSymbolChunks`), preserving rank order.
+- **Registry counters went stale after watcher writes.** Per-file watcher
+  writes bypass `setIndexStats`, so `doctor` could warn "3 files indexed, table
+  has 2" until the next sync. The watcher now fires `onFileSettled` after every
+  settled event; `IndexManager` debounces a per-project `reconcileStats` (1 s,
+  unref'd) that recomputes counts and writes them via the new
+  `Registry.setIndexCounts` — which deliberately does **not** touch
+  `lastIndexedAt`, so report caches keyed on it are not invalidated. Covered by
+  a registry unit test and a 20th integration scenario (watcher edit → counts
+  follow).
+- **Removed dead `Registry.unfinishedJobs()`** (no references).
+
+### Changed
+
+- Docs updated for the new/changed semantics: annotated-tag drift windows,
+  systemd units as artifacts, finding dedupe, head-chunk `find_symbol`, churn's
+  merge-commit rule, and watcher counter reconciliation.
+
+Test suite: **1100/1100** passing (3579 expectations); `bun run typecheck` clean.
 
 ## 2.7.3 (2026-10-20)
 
