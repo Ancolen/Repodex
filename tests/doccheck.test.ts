@@ -420,6 +420,23 @@ describe("checkSpan — env, endpoint, cmd", () => {
     expect(ghost.confidence).toBe(92);
     expect(checkOne(state, span("bun run src/cli.ts", "cmd", { parts: ["bun", "run", "src/cli.ts"] })).status).toBe("ok");
   });
+
+  test("cmd: systemd unit names are external artifacts, not identifiers", () => {
+    // Regression: `systemctl --user restart cidx.service` was flagged as a hard
+    // drift because `cidx.service` is never a whole identifier (it only occurs
+    // inside longer message strings in cli.ts / doctor.ts).
+    const state = baseState({
+      chunks: [chunk("src/cli.ts", "function restart() {} export function doccheckCmd() {}")],
+    });
+    const v = checkOne(
+      state,
+      span("systemctl --user restart cidx.service", "cmd", {
+        parts: ["systemctl", "--user", "restart", "cidx.service"],
+      }),
+    );
+    expect(v.status).toBe("ok");
+    expect(v.confidence).toBe(90);
+  });
 });
 
 describe("checkSpan — flag, dep, kv, model-tag, composite", () => {
