@@ -130,8 +130,18 @@ export interface DocCheckState {
   manifest: DocManifest;
   /** Candidate symbols for reverse coverage (already (name,file)-deduped by the caller). */
   exportedSymbols: DocSymbol[];
-  /** `IndexRecord.lastIndexedAt` (epoch ms), surfaced as `checked.indexFreshness`. */
-  lastIndexedAt: number | null;
+  /**
+   * Epoch ms of the NEWEST indexed data in the snapshot (epoch ms), surfaced as
+   * `checked.indexFreshness`. This is the last table write — watcher writes
+   * included — not the last full index job: report caches key on the data
+   * revision, so a fresh snapshot can be newer than `lastIndexedAt`.
+   */
+  lastDataChangeAt: number | null;
+  /**
+   * Epoch ms of the last full index/sync job (informational). Surfaced as
+   * `checked.lastFullIndexAt` when known; it does NOT describe snapshot age.
+   */
+  lastFullIndexAt?: number | null;
 }
 
 /** Options for the pure engine run (the caller fills daemon-side defaults). */
@@ -268,8 +278,14 @@ export interface DocCheckReport {
     spans: number;
     /** Spans actually resolved against the index (ok or missing). */
     claims: number;
-    /** Epoch ms of the index the evidence came from (null = never indexed). */
+    /**
+     * Epoch ms of the newest table write the evidence includes (null = never
+     * indexed). Watcher writes count, so this is the data freshness — NOT the
+     * last full-index time (see `lastFullIndexAt`).
+     */
     indexFreshness: number | null;
+    /** Epoch ms of the last full index/sync job (informational; absent = never). */
+    lastFullIndexAt?: number;
     /** True when the doc set was capped (DOC_MAX_FILES) or rows hit the scan cap. */
     truncated: boolean;
     /** Present when a drift window was applied (set by the caller post-filter). */
@@ -1850,10 +1866,11 @@ export async function runDocCheck(state: DocCheckState, opts: DocCheckOpts = {})
     docsUnreadable: 0,
     spans: allSpans.length,
     claims,
-    indexFreshness: state.lastIndexedAt,
+    indexFreshness: state.lastDataChangeAt,
     truncated: false,
     skipped,
   };
+  if (state.lastFullIndexAt != null) checked.lastFullIndexAt = state.lastFullIndexAt;
   if (opts.judge !== undefined || judgeModel.length > 0) {
     checked.judge = {
       model: judgeModel,

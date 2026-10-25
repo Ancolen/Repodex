@@ -30,6 +30,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { DependencyResult, ScopedSearchResult, SearchEnvelope } from "../../src/core/index-manager";
+import type { DocCheckReport } from "../../src/core/doccheck";
 import type { OutlineEntry } from "../../src/chunking/chunker";
 import type { CouplingReport } from "../../src/core/coupling";
 import type { DaemonEventPage } from "../../src/core/events";
@@ -118,6 +119,11 @@ def py_probe(value: int) -> int:
 `,
   },
 ];
+
+/** The doc created by the report-freshness scenario (indexed like any other .md). */
+const WATCH_DOC_REL = "docs/watcher-freshness.md";
+/** Every indexed file after the doccheck scenario: the fixture sources + that doc. */
+const INDEXED_FILE_COUNT = FIXTURE_FILES.length + 1;
 
 describe("db + control-api integration battery", () => {
   let backend: FakeEmbedBackend | undefined;
@@ -524,6 +530,66 @@ export function watchProbe(): string {
     expect(after.chunks).toBeGreaterThan(before.chunks);
   }, 45_000);
 
+  test("a watcher write invalidates the doccheck snapshot without a sync", async () => {
+    if (!daemon) throw new Error("daemon not started");
+    mkdirSync(path.join(projectRoot!, "docs"), { recursive: true });
+    writeFileSync(
+      abs(WATCH_DOC_REL),
+      "# Watch freshness\n\nThe `greet` symbol is documented here.\n",
+      "utf-8",
+    );
+    // Populate the doccheck snapshot cache at the current data revision.
+    const first = await callApi<DocCheckReport>(daemon.controlUrl, "/doccheck", {
+      method: "POST",
+      body: { project: PROJECT_NAME, noUndocumented: true },
+    });
+    expect(first.checked.indexFreshness).not.toBeNull();
+    expect(first.findings.some((f) => f.message.includes("greet"))).toBe(false);
+
+    appendFileSync(
+      abs("src/app.ts"),
+      `/** Added AFTER the doccheck snapshot was cached. */
+export function watcherFreshProbe(): string {
+  return "fresh";
+}
+`,
+      "utf-8",
+    );
+    // The watcher (not a job) writes the new symbol into the table.
+    await waitFor(
+      "the watcher to serve watcherFreshProbe",
+      async () => {
+        const results = await callApi<ScopedSearchResult[]>(daemon.controlUrl, "/find", {
+          method: "POST",
+          body: { name: "watcherFreshProbe", project: PROJECT_NAME, limit: 20, fuzzy: false },
+        });
+        return results.length > 0 ? results : null;
+      },
+      { timeoutMs: 15_000 },
+    );
+    writeFileSync(
+      abs(WATCH_DOC_REL),
+      "# Watch freshness\n\nThe `greet` and `watcherFreshProbe` symbols are documented here.\n",
+      "utf-8",
+    );
+
+    // Before the data-revision fix the snapshot stayed keyed to the first
+    // call's index version: check_docs reported watcherFreshProbe as drift even
+    // though /find served it, and the only way to refresh was a full reindex.
+    const second = await waitFor(
+      "the watcher write to refresh the doccheck snapshot",
+      async () => {
+        const report = await callApi<DocCheckReport>(daemon.controlUrl, "/doccheck", {
+          method: "POST",
+          body: { project: PROJECT_NAME, noUndocumented: true },
+        });
+        return report.checked.indexFreshness! > first.checked.indexFreshness! ? report : null;
+      },
+      { timeoutMs: 15_000 },
+    );
+    expect(second.findings.some((f) => f.message.includes("watcherFreshProbe"))).toBe(false);
+  }, 45_000);
+
   test("a sync prunes a deleted file (deleted-file cleanup)", async () => {
     if (!daemon) throw new Error("daemon not started");
     rmSync(abs("src/util.ts"));
@@ -541,7 +607,7 @@ export function watchProbe(): string {
       { timeoutMs: 45_000 },
     );
     expect((await callApi<IndexView>(daemon.controlUrl, `/indexes/${PROJECT_NAME}`)).files).toBe(
-      FIXTURE_FILES.length - 1,
+      INDEXED_FILE_COUNT - 1,
     );
     // Both of util.ts's symbols are gone from the table — strict, fuzzy-off.
     for (const gone of ["helperValue", "syncProbe"]) {
@@ -568,7 +634,7 @@ export function watchProbe(): string {
       body: { project: PROJECT_NAME },
     });
     expect(report.project).toBe(PROJECT_NAME);
-    expect(report.scannedFiles).toBe(FIXTURE_FILES.length - 1);
+    expect(report.scannedFiles).toBe(INDEXED_FILE_COUNT - 1);
     for (const band of [report.topFanIn, report.changeMagnets, report.unstableLeaves]) {
       expect(Array.isArray(band.items)).toBe(true);
       expect(band.total).toBeGreaterThanOrEqual(0);

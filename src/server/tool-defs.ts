@@ -380,8 +380,9 @@ export const TOOL_DEFINITIONS: Tool[] = [
       "whole-identifier matches over indexed chunk content (same pragmatic approach as find_references — " +
       "not full LSP, so treat it as a navigation aid). Provide a 'symbol' (function/method name), a 'path' " +
       "(all callables in that file), or both (disambiguate a name within one file). At least one of " +
-      "'symbol'/'path' is required. The per-project adjacency is cached and rebuilt only when the project " +
-      "is reindexed. No schema change, no reindex.",
+      "'symbol'/'path' is required. The per-project adjacency is cached and rebuilt when the project's " +
+      "table changes — a watcher write invalidates it, so fresh edits are visible on the next call " +
+      "without a reindex. No schema change, no reindex.",
     inputSchema: {
       type: "object",
       properties: {
@@ -640,9 +641,11 @@ export const TOOL_DEFINITIONS: Tool[] = [
       "disable with noUndocumented). Optional drift window: `since` (a git ref) or `window: true` " +
       "(changes since the docs' last commit) keeps only findings whose doc or code side actually " +
       "changed — with a degradation note instead of a silent full scan when the anchor does not " +
-      "resolve. FRESHNESS: evidence comes from the index, which lags edits by ~1-2s — a symbol " +
-      "renamed moments ago may read as drift until the watcher syncs; `checked.indexFreshness` shows " +
-      "what the report was built from. No schema change, no reindex. Optional semantic judge (D1b, " +
+      "resolve. FRESHNESS: the code snapshot is keyed on the project's data revision, so a watcher " +
+      "write invalidates it on the next call (no sync/reindex needed); `checked.indexFreshness` is the " +
+      "newest table write the snapshot includes and `checked.lastFullIndexAt` the last full index job. " +
+      "A symbol written moments ago may still read as drift until the watcher settles (~1-2s). " +
+      "No schema change, no reindex. Optional semantic judge (D1b, " +
       "off by default): with `doccheck.judgeModel` in config, a local instruct model re-judges the " +
       "uncertain claims via yes/no completion logprobs — a high-confidence consistent verdict drops " +
       "the claim out of `needsReview` (`checked.judge` surfaces model/available/judged/resolved); the " +
@@ -717,10 +720,10 @@ export const TOOL_DEFINITIONS: Tool[] = [
       "(default 20) with honest totals + truncated flags; files that score 0 with no debt signal " +
       "are counted ('notListed'), not listed. Churn window: 'since' (git date syntax, default " +
       "'90 days ago'); a non-repo is REPORTED (notARepo) — churn degrades to empty. FRESHNESS: the " +
-      "table-derived feeds (size, dead-code density) come from a snapshot cached on the last index " +
-      "(stale by design until a reindex; surfaced via snapshotTruncated when the table row cap hit), " +
-      "while churn runs git log LIVE on every call and coupling rides the dependency-graph cache — " +
-      "so a file edited moments ago already shows its churn but not its new size.",
+      "table-derived feeds (size, dead-code density) are cached on the project's data revision, so a " +
+      "watcher write invalidates them on the next call (no reindex needed; surfaced via " +
+      "snapshotTruncated when the table row cap hit), while churn runs git log LIVE on every call " +
+      "and coupling rides the dependency-graph cache.",
     inputSchema: {
       type: "object",
       properties: {

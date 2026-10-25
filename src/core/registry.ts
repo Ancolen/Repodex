@@ -447,10 +447,10 @@ export class Registry {
 
   /**
    * Refresh ONLY the file/chunk counters — the watcher's reconcile path.
-   * Deliberately leaves `last_indexed_at` untouched: a per-file watcher write is
-   * not a full index run, and bumping it would invalidate every
-   * `lastIndexedAt`-keyed report cache (`docChunkCache`, `hotspotFeedCache`,
-   * `callGraphCache`, …) on each editor save.
+   * Deliberately leaves `last_indexed_at` untouched: it means "last full index
+   * job", not "last write". Report-cache invalidation does NOT ride this field
+   * anymore — `IndexManager` bumps an in-memory data revision on every watcher
+   * settle, so a cheap counter refresh never has to fake a full-index time.
    */
   setIndexCounts(name: string, fileCount: number, chunkCount: number): void {
     this.db

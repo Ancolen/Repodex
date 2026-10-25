@@ -66,7 +66,7 @@ function baseState(overrides: Partial<DocCheckState> = {}): DocCheckState {
     rootNames: new Set<string>(),
     manifest: { deps: {}, devDeps: {}, scripts: {} },
     exportedSymbols: [],
-    lastIndexedAt: 1700000000000,
+    lastDataChangeAt: 1700000000000,
     ...overrides,
   };
 }
@@ -605,6 +605,19 @@ describe("runDocCheck", () => {
     expect(report.checked.claims).toBe(2);
     expect(report.checked.skipped.external).toBe(1);
     expect(report.checked.indexFreshness).toBe(1700000000000);
+  });
+
+  test("lastFullIndexAt is surfaced separately from the data freshness", async () => {
+    const state = baseState({
+      chunks: codeChunks,
+      docs: [docFile("docs/a.md", "`realEngine`")],
+      lastDataChangeAt: 1700000001000,
+      lastFullIndexAt: 1700000000000,
+    });
+    const report = await runDocCheck(state, { noUndocumented: true });
+    // The snapshot includes a watcher write after the last full job.
+    expect(report.checked.indexFreshness).toBe(1700000001000);
+    expect(report.checked.lastFullIndexAt).toBe(1700000000000);
   });
 });
 

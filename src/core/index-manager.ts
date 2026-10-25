@@ -708,8 +708,8 @@ interface DepGraphCacheEntry {
 
 /** A cached call-graph adjacency for one project (rebuilt when the index changes). */
 interface CallGraphCacheEntry {
-  /** `IndexRecord.lastIndexedAt`; a change invalidates the cache (data lives in LanceDB, not on disk). */
-  lastIndexedAt: number | null;
+  /** Project data revision; ANY table write (job or watcher) invalidates the cache. */
+  dataVersion: number;
   forward: Map<string, Set<string>>;
   reverse: Map<string, Set<string>>;
   /** key → symbol metadata (node rendering). */
@@ -722,8 +722,8 @@ interface CallGraphCacheEntry {
 
 /** A cached doc-check snapshot for one project (rebuilt when the index changes). */
 interface DocChunkCacheEntry {
-  /** `IndexRecord.lastIndexedAt`; a change invalidates the cache. */
-  lastIndexedAt: number | null;
+  /** Project data revision; ANY table write (job or watcher) invalidates the cache. */
+  dataVersion: number;
   /** Code chunks with project-relative posix paths (doc artifacts excluded). */
   chunks: DocCheckChunk[];
   /** Reverse-coverage candidate symbols, deduped by (name, file). */
@@ -732,16 +732,30 @@ interface DocChunkCacheEntry {
   truncated: boolean;
 }
 
-/** A cached hotspot feed for one project (sizes + dead-code density), keyed on lastIndexedAt. */
+/** A cached hotspot feed for one project (sizes + dead-code density), keyed on the data revision. */
 interface HotspotFeedCacheEntry {
-  /** `IndexRecord.lastIndexedAt`; a change invalidates the cache (LanceDB data, not disk). */
-  lastIndexedAt: number | null;
+  /** Project data revision; ANY table write (job or watcher) invalidates the cache. */
+  dataVersion: number;
   /** Per indexed file: chunk count + DISTINCT symbol count (the size feed). */
   sizes: HotspotSizeFeed[];
   /** Per indexed file: candidate symbols + the "uncertain-or-better" dead count. */
   dead: Map<string, HotspotDeadFeed>;
   /** True when the snapshot hit its row cap — the feeds are partial. */
   truncated: boolean;
+}
+
+/**
+ * A project's monotonic data revision + the wall-clock time of its newest table
+ * write. Report caches key on `version` (not `lastIndexedAt`): the watcher
+ * writes the table without running a full index job, and those writes must
+ * invalidate the cached report snapshots too — otherwise `check_docs` (and the
+ * call-graph/hotspot feeds) keep serving evidence from before the edit.
+ */
+interface DataState {
+  /** Incremented on EVERY table write (index/sync/migrate completion + watcher settle). */
+  version: number;
+  /** When the newest table write finished (epoch ms) — report freshness. */
+  lastChangeAt: number;
 }
 
 /** Converts a ResolvedDep into the edge shape we return. */
@@ -880,15 +894,17 @@ export class IndexManager {
   private jobByIndex = new Map<string, string>();
   /** On-demand, mtime-keyed reverse-dependency graph, one entry per project. */
   private depGraphCache = new Map<string, DepGraphCacheEntry>();
-  /** On-demand call-graph adjacency, one entry per project (keyed on lastIndexedAt). */
+  /** On-demand call-graph adjacency, one entry per project (keyed on the data revision). */
   private callGraphCache = new Map<string, CallGraphCacheEntry>();
-  /** On-demand doc-check snapshot (chunks + symbols), keyed on lastIndexedAt. */
+  /** On-demand doc-check snapshot (chunks + symbols), keyed on the data revision. */
   private docChunkCache = new Map<string, DocChunkCacheEntry>();
   /** A2 — subscribers of lifecycle events (the daemon forwards them to its event ring). */
   private indexEventListeners = new Set<(ev: DaemonEventInput) => void>();
 
-  /** On-demand hotspot feeds (sizes + dead density), keyed on lastIndexedAt. */
+  /** On-demand hotspot feeds (sizes + dead density), keyed on the data revision. */
   private hotspotFeedCache = new Map<string, HotspotFeedCacheEntry>();
+  /** Monotonic per-project data revisions — the cache key for table-derived reports. */
+  private dataState = new Map<string, DataState>();
 
   constructor(
     private registry: Registry,
@@ -945,6 +961,47 @@ export class IndexManager {
         console.error("[manager] doccheck watch enqueue failed:", err);
       }
     });
+  }
+
+  // ------------------------------------------------- data revision (report caches)
+
+  /**
+   * The project's data state. Initialized from the persisted `lastIndexedAt`
+   * so a report built right after a daemon restart still starts from the last
+   * known write time; every table write afterwards bumps `version` and
+   * `lastChangeAt`. The map is in-memory on purpose: the caches it keys are
+   * in-memory too, so a restart starts both from zero together.
+   */
+  private dataStateOf(rec: IndexRecord): DataState {
+    let st = this.dataState.get(rec.name);
+    if (!st) {
+      st = { version: 0, lastChangeAt: rec.lastIndexedAt ?? 0 };
+      this.dataState.set(rec.name, st);
+    }
+    return st;
+  }
+
+  /**
+   * Records a table write. Called on every index/sync/migrate completion AND on
+   * every settled watcher event, so all table-derived report caches
+   * (`docChunkCache`, `callGraphCache`, `hotspotFeedCache`) rebuild on their
+   * next call instead of serving evidence from before the write — the root
+   * cause of the repeated manual reindexes (report tools said a symbol was
+   * missing while `find_references` served it from the live table).
+   */
+  private bumpDataRevision(name: string): void {
+    const rec = this.registry.getIndex(name);
+    if (!rec) return;
+    const st = this.dataStateOf(rec);
+    st.version += 1;
+    st.lastChangeAt = Date.now();
+  }
+
+  /** The newest table-write time for a project (report freshness; null = never). */
+  private dataFreshnessOf(rec: IndexRecord): number | null {
+    const st = this.dataState.get(rec.name);
+    const at = st ? st.lastChangeAt : rec.lastIndexedAt;
+    return at && at > 0 ? at : null;
   }
 
   // ------------------------------------------------------- A2: event stream
@@ -1173,6 +1230,7 @@ export class IndexManager {
     this.callGraphCache.delete(name);
     this.docChunkCache.delete(name);
     this.hotspotFeedCache.delete(name);
+    this.dataState.delete(name);
     // A2: the project is fully gone — notify subscribers (the resource list changed).
     this.emitIndexEvent({ type: "index-removed", project: name });
     return true;
@@ -2280,7 +2338,8 @@ export class IndexManager {
    *
    * Feed freshness, on purpose different per feed:
    *   - sizes + dead density: the cached table snapshot (`buildHotspotFeed`,
-   *     keyed on `lastIndexedAt` — the call-graph precedent),
+   *     keyed on the data revision — the call-graph precedent; watcher writes
+   *     invalidate it),
    *   - churn: `git log` LIVE on every call (a repo-local walk, cheap, and the
    *     one feed staleness would quietly corrupt),
    *   - coupling: fans from the mtime-keyed dependency-graph cache (`get_coupling`
@@ -2355,8 +2414,9 @@ export class IndexManager {
 
   /**
    * The table-derived hotspot feeds from ONE `tableSymbolsWithContent` pass,
-   * cached on `lastIndexedAt` (the `buildCallGraph` precedent: the data lives in
-   * LanceDB, so file mtimes are not a correct freshness signal).
+   * cached on the project's DATA REVISION (the `buildCallGraph` precedent: the
+   * data lives in LanceDB, so file mtimes are not a correct freshness signal;
+   * and `lastIndexedAt` misses watcher writes, which also change the table).
    *
    * The dead-code leg mirrors `findDeadCode`'s recipe (candidate inventory → one
    * whole-identifier reference pass → conservative `scoreDeadCode` scoring) but
@@ -2366,8 +2426,9 @@ export class IndexManager {
    * per file even when nothing is dead there.
    */
   private async buildHotspotFeed(rec: IndexRecord): Promise<HotspotFeedCacheEntry> {
+    const revision = this.dataStateOf(rec).version;
     const cached = this.hotspotFeedCache.get(rec.name);
-    if (cached && cached.lastIndexedAt === rec.lastIndexedAt) return cached;
+    if (cached && cached.dataVersion === revision) return cached;
 
     const allRows = await tableSymbolsWithContent(rec.tableName);
 
@@ -2482,7 +2543,7 @@ export class IndexManager {
     }
 
     const entry: HotspotFeedCacheEntry = {
-      lastIndexedAt: rec.lastIndexedAt,
+      dataVersion: revision,
       sizes,
       dead,
       truncated: allRows.length >= 200000,
@@ -2497,10 +2558,11 @@ export class IndexManager {
    * matching over chunk content (same discipline as `find_references` /
    * `find_dead_code`), so this is additive — no schema change, no reindex.
    *
-   * The per-project adjacency is cached and keyed on `lastIndexedAt` (not file
-   * mtimes): it is built from LanceDB rows, which can change on a re-chunk even
-   * when source mtimes do not. The first call per project pays the scan; later
-   * calls are instant until the project is reindexed.
+   * The per-project adjacency is cached and keyed on the data revision (not
+   * file mtimes): it is built from LanceDB rows, which can change on a re-chunk
+   * even when source mtimes do not, and watcher writes must invalidate it too.
+   * The first call per project pays the scan; later calls are instant until the
+   * next table write.
    */
   async getCallGraph(opts: {
     symbol?: string;
@@ -2747,13 +2809,15 @@ export class IndexManager {
 
   /**
    * Builds (and caches) the project's caller→callee adjacency from one
-   * `tableSymbolsWithContent` pass. The cache is keyed on `lastIndexedAt`: the
-   * data lives in LanceDB, so file mtimes are not a correct freshness signal (a
-   * chunker bump or embedding-only reindex rewrites rows without moving mtimes).
+   * `tableSymbolsWithContent` pass. The cache is keyed on the project's DATA
+   * REVISION: the data lives in LanceDB, so file mtimes are not a correct
+   * freshness signal (a chunker bump or embedding-only reindex rewrites rows
+   * without moving mtimes), and `lastIndexedAt` does not move on watcher writes.
    */
   private async buildCallGraph(rec: IndexRecord): Promise<CallGraphCacheEntry> {
+    const revision = this.dataStateOf(rec).version;
     const cached = this.callGraphCache.get(rec.name);
-    if (cached && cached.lastIndexedAt === rec.lastIndexedAt) return cached;
+    if (cached && cached.dataVersion === revision) return cached;
 
     const allRows = await tableSymbolsWithContent(rec.tableName);
     const truncated = allRows.length >= 200000;
@@ -2823,7 +2887,7 @@ export class IndexManager {
     for (const s of symbols) symbolsByKey.set(s.key, s);
 
     const entry: CallGraphCacheEntry = {
-      lastIndexedAt: rec.lastIndexedAt,
+      dataVersion: revision,
       forward,
       reverse,
       symbolsByKey,
@@ -3101,16 +3165,18 @@ export class IndexManager {
   }
 
   /**
-   * D1 — the doc-check snapshot for one project, cached on `lastIndexedAt`
+   * D1 — the doc-check snapshot for one project, cached on the DATA REVISION
    * (same discipline as `buildCallGraph`): one `tableSymbolsWithContent` pass
-   * per index version. Chunks keep project-relative posix paths; doc artifacts
+   * per version, where a watcher write bumps the version just like a job.
+   * Chunks keep project-relative posix paths; doc artifacts
    * (.md/.json/.xml/.rst) are dropped — a documentation claim must be proven by
    * code, never by another document. Also collects the reverse-coverage
    * inventory: real candidate symbols, deduped by (name, file), min start line.
    */
   private async docChunks(rec: IndexRecord): Promise<DocChunkCacheEntry> {
+    const revision = this.dataStateOf(rec).version;
     const cached = this.docChunkCache.get(rec.name);
-    if (cached && cached.lastIndexedAt === rec.lastIndexedAt) return cached;
+    if (cached && cached.dataVersion === revision) return cached;
 
     const rows = await tableSymbolsWithContent(rec.tableName);
     const truncated = rows.length >= 200000;
@@ -3157,7 +3223,7 @@ export class IndexManager {
       }
     }
     const entry: DocChunkCacheEntry = {
-      lastIndexedAt: rec.lastIndexedAt,
+      dataVersion: revision,
       chunks,
       symbols: [...symbols.values()],
       truncated,
@@ -3744,6 +3810,9 @@ export class IndexManager {
           noteParts.push(`${result.failed} file(s) failed to index — see the daemon log (embedding provider?)`);
         }
         this.registry.setIndexNote(t.indexName, noteParts.length > 0 ? noteParts.join("; ") : null);
+        // A finished job wrote the table (even a full mtime-skip run may have
+        // pruned/reset it): invalidate every table-derived report cache.
+        this.bumpDataRevision(t.indexName);
         const pruned = this.registry.pruneEmbeddingCache(CONFIG.EMBED_CACHE_MAX);
         console.error(
           `[index] '${t.indexName}' ready: ${fileCount} files, ${chunkCount} chunks in table` +
@@ -3857,6 +3926,9 @@ export class IndexManager {
         this.registry.setIndexStatus(rec.name, "ready");
         console.error(`[migrate] '${rec.name}' cancelled before the swap; original index intact.`);
       } else if (result.kind === "swapped") {
+        // The table pointer moved and every row was re-embedded: report caches
+        // keyed on the old data are invalid.
+        this.bumpDataRevision(rec.name);
         console.error(
           `[migrate] '${rec.name}' now serves '${result.toTable}' (model '${payload.targetModel}', framing ` +
             `${result.framing ?? "none"}, ${result.rows} rows re-embedded)` +
@@ -3992,7 +4064,10 @@ export class IndexManager {
       rootNames: new Set(listRootFiles(rec.path)),
       manifest,
       exportedSymbols: snapshot.symbols,
-      lastIndexedAt: rec.lastIndexedAt,
+      // The snapshot is built from the live table at the current data revision,
+      // so its freshness is the newest table write (watcher writes included).
+      lastDataChangeAt: this.dataFreshnessOf(rec),
+      lastFullIndexAt: rec.lastIndexedAt,
     };
 
     // Semantic judge (D1b): config-on + per-call opt-out + a one-time
@@ -4230,9 +4305,14 @@ export class IndexManager {
       registry: this.registry,
       // While a full index/sync is running, the watcher should not write individual files (race avoidance).
       isBusy: () => this.isIndexing(target.indexName),
-      // Per-file writes bypass the job's setIndexStats; refresh the counters
-      // (debounced) so `cidx status` / doctor see the true shape.
-      onFileSettled: () => this.scheduleStatsReconcile(target.indexName),
+      // Per-file writes bypass the job's setIndexStats. Bump the data revision
+      // immediately (so a report tool called right after the save rebuilds its
+      // snapshot) and reconcile the counters (debounced) so `cidx status` /
+      // doctor see the true shape.
+      onFileSettled: () => {
+        this.bumpDataRevision(target.indexName);
+        this.scheduleStatsReconcile(target.indexName);
+      },
     });
     this.watchers.set(target.indexName, w);
     this.ensureBranchWatcher(target);
@@ -4243,8 +4323,9 @@ export class IndexManager {
    * updates the table directly and does not know the resulting counts; without
    * this, `cidx status` kept reporting the pre-edit numbers (doctor flagged the
    * mismatch and only a sync repaired it). One pending timer per project; only
-   * the counters are written (Registry.setIndexCounts), so report caches keyed
-   * on lastIndexedAt are not invalidated on every save.
+   * the counters are written (Registry.setIndexCounts) — report-cache
+   * invalidation is the separate `bumpDataRevision` call on the same settle
+   * path, so it happens immediately rather than after this debounce.
    */
   private scheduleStatsReconcile(name: string): void {
     if (this.statsReconcileTimers.has(name)) return;
