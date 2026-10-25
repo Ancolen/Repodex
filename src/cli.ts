@@ -210,16 +210,22 @@ async function cmdReindex(positionals: string[]): Promise<void> {
   printIndex(ix);
 }
 
-async function cmdSync(positionals: string[]): Promise<void> {
+async function cmdSync(positionals: string[], flags: Record<string, string | boolean>): Promise<void> {
   await requireDaemon();
   const name = positionals[0];
   if (!name) {
-    console.error("Usage: cidx sync <name>");
+    console.error("Usage: cidx sync <name> [--wait]");
     process.exit(1);
   }
-  const ix = await api("POST", "/sync", { name });
-  console.log("Incremental sync started (changed + deleted files):");
+  const ix = await api<any>("POST", "/sync", { name, wait: flags.wait === true });
+  console.log(
+    flags.wait === true
+      ? "Incremental sync (waited for the final status):"
+      : "Incremental sync started (changed + deleted files):",
+  );
   printIndex(ix);
+  if (ix.timedOut) console.log("    (wait budget elapsed — still indexing; poll with `cidx status`.)");
+  if (flags.wait !== true) console.log(`\nTo see progress:  cidx status ${ix.name}`);
 }
 
 async function cmdRemove(positionals: string[]): Promise<void> {
@@ -1069,7 +1075,8 @@ const COMMANDS: Record<string, CmdDoc> = {
     summary: "Sends a new indexing job to the running daemon (returns immediately, processes in the background).",
     flags: [["--name <name>", "Project name (if not given, the folder name is used)."]],
     details: [
-      "If the same path is already registered, it is reindexed.",
+      "If the same path is already registered, it is REINDEXED FROM SCRATCH (table + file cache are dropped and rebuilt).",
+      "For an incremental refresh after edits, use `cidx sync <name>` instead — unchanged files are skipped and the table is never dropped.",
       "If the same name is used for a different path, a unique name is generated (e.g. backend-2).",
       "Searching in other projects continues uninterrupted during indexing.",
     ],
@@ -1094,12 +1101,15 @@ const COMMANDS: Record<string, CmdDoc> = {
     ],
   },
   sync: {
-    usage: "sync <name>",
+    usage: "sync <name> [--wait]",
     summary: "Incremental sync: indexes only changed/new files, cleans up deleted ones.",
     details: [
       "With the mtime cache, unchanged files are skipped → much faster than a full reindex.",
-      "Ideal for catching up on changes that happened while the daemon was down.",
+      "Does NOT drop the table, so search keeps serving throughout (unlike reindex).",
+      "Ideal for catching up on changes that happened while the daemon was down, and for retrying files that failed while the embedding backend was starting.",
+      "--wait blocks until the job settles (the response carries timedOut when the budget elapses).",
     ],
+    flags: [["--wait", "Wait for the sync to finish and print the final status."]],
   },
   remove: {
     usage: "remove <name>",
@@ -1808,7 +1818,7 @@ async function main(): Promise<void> {
     case "list": case "ls": await cmdList(); break;
     case "status": await cmdStatus(positionals); break;
     case "reindex": await cmdReindex(positionals); break;
-    case "sync": await cmdSync(positionals); break;
+    case "sync": await cmdSync(positionals, flags); break;
     case "remove": case "rm": await cmdRemove(positionals); break;
     case "search": await cmdSearch(positionals, flags); break;
     case "open": await cmdOpen(positionals, flags); break;

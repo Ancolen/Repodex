@@ -491,6 +491,30 @@ export function syncProbe(): string {
     );
   });
 
+  test("/sync resolves a project anchor and honors wait: true", async () => {
+    if (!daemon) throw new Error("daemon not started");
+    appendFileSync(
+      abs("src/util.ts"),
+      `/** A marker the anchored-sync scenario can see. */
+export function syncAnchorProbe(): string {
+  return "anchor";
+}
+`,
+      "utf-8",
+    );
+    const view = await callApi<IndexView>(daemon.controlUrl, "/sync", {
+      method: "POST",
+      // The MCP tool's anchor shape (project/path), not the CLI's `name` shape.
+      body: { project: PROJECT_NAME, wait: true },
+    });
+    expect(view.status).toBe("ready");
+    const results = await callApi<ScopedSearchResult[]>(daemon.controlUrl, "/find", {
+      method: "POST",
+      body: { name: "syncAnchorProbe", project: PROJECT_NAME, limit: 20, fuzzy: false },
+    });
+    expect(results.length).toBeGreaterThan(0);
+  });
+
   test("a watcher write reconciles the registry counters without a sync", async () => {
     if (!daemon) throw new Error("daemon not started");
     const before = await callApi<IndexView>(daemon.controlUrl, `/indexes/${PROJECT_NAME}`);

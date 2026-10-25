@@ -311,6 +311,18 @@ describe("buildServer — resources over the MCP SDK (in-memory transport)", () 
     }
   }
 
+  test("tools/list exposes the incremental sync_project tool", async () => {
+    await withServer(async (client) => {
+      const { tools } = await client.listTools();
+      const sync = tools.find((t) => t.name === "sync_project");
+      expect(sync).toBeDefined();
+      expect(sync!.description).toContain("Incrementally refreshes an EXISTING project");
+      // The reindex semantics of index_project are stated honestly.
+      const index = tools.find((t) => t.name === "index_project");
+      expect(index!.description).toContain("REINDEXED FROM SCRATCH");
+    });
+  });
+
   test("announces the resources capability with listChanged", async () => {
     await withServer(async (client) => {
       const caps = client.getServerCapabilities();

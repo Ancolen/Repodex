@@ -390,6 +390,30 @@ export function buildServer(deps: McpDeps): Server {
       }
     }
 
+    if (name === "sync_project") {
+      const args = rawArgs as { project?: string; path?: string; wait?: boolean };
+      try {
+        // Neither given → the single indexed project, or an error that names
+        // them (the report-tool rule; a mutation must land on exactly one).
+        const project = deps.manager.resolveProjectScope(args.project, args.path, false)!;
+        const ix = deps.manager.syncIndex(project);
+        const settled = await deps.manager.waitForIndexSettle(ix.name, args.wait);
+        const statusLine = `Sync ${settled.timedOut ? "still running" : "started"}: '${ix.name}' [${settled.rec.status}] → ${ix.path}`;
+        const lines = [statusLine];
+        if (settled.timedOut) {
+          lines.push(`(wait: timed out after a budget — poll get_index_status("${ix.name}") for the final state.)`);
+        } else if (settled.rec.status === "indexing") {
+          lines.push(`For progress: get_index_status("${ix.name}").`);
+        } else {
+          lines.push(`Incremental sync complete: ${settled.rec.fileCount} files, ${settled.rec.chunkCount} chunks.`);
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text", text: `Failed to start sync: ${msg}` }], isError: true };
+      }
+    }
+
     if (name === "get_file_outline") {
       const args = rawArgs as { path: string };
       if (!args.path || !existsSync(args.path) || !statSync(args.path).isFile()) {

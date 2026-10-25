@@ -460,6 +460,21 @@ async function main(): Promise<void> {
           if (ix.warning) lines.push(`⚠ ${ix.warning}`);
           return ok(lines.join("\n"));
         }
+        case "sync_project": {
+          const ix = await api<IndexView & { timedOut?: boolean }>("POST", "/sync", {
+            project: args.project,
+            path: args.path,
+            wait: args.wait === true,
+          });
+          const lines = [
+            ix.timedOut
+              ? `Sync still running: '${ix.name}' [${ix.status}] → ${ix.path}\n(wait: timed out after a budget — poll get_index_status("${ix.name}") for the final state.)`
+              : ix.status === "indexing"
+                ? `Sync started (in the background): '${ix.name}' [${ix.status}] → ${ix.path}\nFor progress: get_index_status("${ix.name}").`
+                : `Sync done: '${ix.name}' [${ix.status}] → ${ix.path}\n  ${ix.files} files, ${ix.chunks} chunks`,
+          ];
+          return ok(lines.join("\n"));
+        }
         case "get_file_outline": {
           const outline = await api<Parameters<typeof formatOutline>[0]>("POST", "/outline", {
             path: args.path,

@@ -210,13 +210,18 @@ export function startControlApi(
   });
 
   app.post("/sync", async (req, res) => {
-    const { name, wait } = (req.body ?? {}) as { name?: string; wait?: boolean };
-    if (!name) {
-      res.status(400).json({ error: "'name' is required" });
-      return;
-    }
+    const { name, project, path: projectPath, wait } = (req.body ?? {}) as {
+      name?: string;
+      project?: string;
+      path?: string;
+      wait?: boolean;
+    };
     try {
-      const rec = deps.manager.syncIndex(name);
+      // `name` is the pre-existing CLI shape; `project`/`path` are the MCP tool's
+      // anchor. Neither given → the single indexed project (or a self-healing
+      // ambiguity error naming the projects).
+      const scope = deps.manager.resolveProjectScope(project ?? name, projectPath, false)!;
+      const rec = deps.manager.syncIndex(scope);
       const settled = await deps.manager.waitForIndexSettle(rec.name, wait);
       const view = viewIndex(deps.manager, settled.rec);
       res.json({ ...view, ...(settled.timedOut ? { timedOut: true } : {}) });

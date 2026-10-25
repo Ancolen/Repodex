@@ -260,7 +260,10 @@ export const TOOL_DEFINITIONS: Tool[] = [
   {
     name: "index_project",
     description:
-      "Starts indexing a local directory as a new project. If the same path already exists, it is reindexed. " +
+      "Starts indexing a local directory as a new project. If the same path already exists, it is REINDEXED " +
+      "FROM SCRATCH: the project's table + file cache are dropped and rebuilt (an expensive full pass; " +
+      "concurrent searches can see partial results during the rebuild). For an incremental refresh after " +
+      "edits, use sync_project instead. " +
       "Without 'wait' it returns immediately (indexing continues in the background; poll get_index_status). " +
       "With 'wait: true' it blocks up to a budget and returns the FINAL status in this reply — preferred, " +
       "since HTTP-attached agents cannot receive completion notifications. Warns when an already-indexed " +
@@ -277,6 +280,29 @@ export const TOOL_DEFINITIONS: Tool[] = [
         },
       },
       required: ["path"],
+    },
+  },
+  {
+    name: "sync_project",
+    description:
+      "Incrementally refreshes an EXISTING project: unchanged files (mtime cache) are skipped, changed/new " +
+      "files are re-indexed and deleted files are pruned. It does NOT drop the table, so search keeps serving " +
+      "throughout and the run is much cheaper than reindexing. Use this after edits when search or report " +
+      "tools look stale — a watcher write is normally enough, but this forces a complete catch-up (and retries " +
+      "files that failed while the embedding backend was starting). Pick the project with 'project' or 'path'; " +
+      "with neither, the single indexed project is used. 'wait: true' blocks up to a budget and returns the " +
+      "final status in the reply.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "Project name to sync." },
+        path: { type: "string", description: "A file/dir inside the project (the owning project is inferred)." },
+        wait: {
+          type: "boolean",
+          description:
+            "Block until the sync finishes (up to a budget) and include the final status. Default false = return immediately.",
+        },
+      },
     },
   },
   {
