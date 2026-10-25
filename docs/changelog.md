@@ -2,9 +2,95 @@
 
 Version-by-version implementation history, **newest first**. For the current done / proposed picture, see [`status.md`](./status.md); for what the tools do, [`features.md`](./features.md).
 
-> **How this repo versions:** the design uses informal "waves" (v1 → v4); the **release version** in `package.json` is bumped per wave (currently `2.7.4`). The version string lives in **five** places that must be bumped together on release: `package.json`, `src/server/mcp.ts` (`Server` info), `src/server/control-api.ts` (`/ping`), `src/stdio-bridge.ts`, and `src/cli.ts` (`CLI_VERSION`). The `web-install.sh` / Release workflow fires on a pushed `v*` git tag.
+> **How this repo versions:** the design uses informal "waves" (v1 → v4); the **release version** in `package.json` is bumped per wave (currently `2.8.0`). The version string lives in **five** places that must be bumped together on release: `package.json`, `src/server/mcp.ts` (`Server` info), `src/server/control-api.ts` (`/ping`), `src/stdio-bridge.ts`, and `src/cli.ts` (`CLI_VERSION`). The `web-install.sh` / Release workflow fires on a pushed `v*` git tag.
 
 ---
+
+## 2.8.0 (2026-10-25)
+
+### Why: a report-cache staleness loop forced manual reindexes
+
+An audit of the last two weeks of agent transcripts found six full
+`index_project` reindexes in one session, each triggered by the same pattern:
+`check_docs` reported drift for a symbol that `find_references` served from the
+live table. The root cause was **not** a stale index — the watcher had already
+written the new rows. It was a stale **report snapshot**:
+
+- `docChunkCache` / `callGraphCache` / `hotspotFeedCache` were keyed on
+  `IndexRecord.lastIndexedAt`, and watcher writes deliberately left that field
+  untouched (2.7.4's counter reconcile). Content was fresh; the cached report
+  evidence stayed frozen at the last full job, so a careful agent saw
+  "the index is hours old" (its `checked.indexFreshness`) and refreshed with
+  the only tool MCP exposed — a full reindex that drops the table.
+- MCP had no incremental refresh tool at all (`/sync` and `cidx sync` existed,
+  but agents connected over MCP could not reach them).
+- A second, independent staleness source: at login, `cidx.service` and
+  `llamacpp-eg2.service` start together and the startup sync began before
+  llama-server finished loading; the first ~124 files per project failed with
+  `ConnectionRefused` / `HTTP 503 Loading model`, kept no mtime cache entry and
+  were never retried — the registry note advertised "124 file(s) failed to
+  index" for days, and only a full reindex cleared it.
+
+### Fixed
+
+- **Report caches now key on a data revision, not `lastIndexedAt`.**
+  `IndexManager` keeps a monotonic per-project `{ version, lastChangeAt }`
+  (`dataStateOf` / `bumpDataRevision`); the version is bumped on every
+  index/sync/migrate completion **and on every settled watcher event**, so the
+  doccheck snapshot, call-graph adjacency and hotspot feeds rebuild on their
+  next call after an edit. Invalidation is O(1) — the expensive rescan only
+  happens when a report tool is actually called. `lastIndexedAt` keeps its real
+  meaning: the last full index job, used for display (`indexedAt`) and the
+  `lastFullIndexAt` report field.
+- **`checked.indexFreshness` is now honest.** It reports the newest table write
+  the snapshot includes (watcher writes count); the new
+  `checked.lastFullIndexAt` carries the last full index/sync time. Before this,
+  the field reported the last full job, which is why agents legitimately read a
+  perfectly fresh table as hours stale.
+- **Embedding-backend readiness + one retry pass.** `indexDirectory` waits
+  (bounded by `embedding.readyTimeoutMs`, env `EMBED_READY_TIMEOUT_MS`, default
+  20000 ms) for the backend before its first embed; llama-server readiness is
+  `GET /health` (200 ready / 503 loading, unknown endpoints count as usable),
+  Ollama uses `/api/tags`. Per-file failures are collected and retried once at
+  the end of the job after another readiness check; a recovered file decrements
+  `failed` and contributes its chunks. Every embed call also gets one
+  transparent retry for a "Loading model" 503 (search queries included), while
+  connection-level failures still fail fast — recovery at that layer belongs to
+  the job pass, not a per-file sleep.
+- **`auto` backend discovery is no longer poisoned by its first failure.**
+  `resolveEmbedBackend` memoized a rejected promise for the process lifetime;
+  a boot-time probe that ran before either server was up disabled every later
+  embed until a daemon restart. The memo now clears on rejection so the next
+  call re-probes.
+
+### Added
+
+- **`sync_project` MCP tool (20th tool).** Incremental refresh of an existing
+  project: mtime-skipped unchanged files, changed/new files re-indexed, deleted
+  files pruned, **no table drop** — search keeps serving throughout. Accepts
+  `project` or `path` (neither → the single indexed project) and `wait: true`.
+  Wired through every layer: tool-defs → MCP server → Control API → stdio
+  bridge → CLI. `POST /sync` now accepts `project`/`path` in addition to the
+  pre-existing `name`, and `cidx sync <name> --wait` blocks for the final
+  status.
+- **`index_project` states its real semantics.** The tool description and CLI
+  help now say that re-indexing an existing path is a FULL rebuild (table +
+  file cache dropped and rebuilt, partial search results during the rebuild)
+  and point at `sync_project` / `cidx sync` for incremental refreshes.
+
+### Tests
+
+- New integration scenarios (22 total): a watcher write refreshes the
+  doccheck snapshot without a sync (`checked.indexFreshness` advances and the
+  new symbol is not drift), and `/sync` resolves a `project` anchor and honors
+  `wait: true`.
+- Unit coverage: readiness probe (200/503/404/throw), zero-timeout probe,
+  503 retry after health, connection-refused non-retry, auto-discovery
+  re-probe after a failed first resolution, mid-job recovery of failed files
+  (2 failures → 2 recoveries), and the new config key
+  (`EMBED_READY_TIMEOUT_MS`, default 20000).
+
+Test suite: **1112/1112** passing (3616 expectations); `bun run typecheck` clean.
 
 ## 2.7.4 (2026-10-20)
 

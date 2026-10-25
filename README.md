@@ -362,7 +362,8 @@ Every tool that takes a `project` also takes a **`path`** — a file/dir inside 
 - `get_repo_overview(project?, path?)` — structural onboarding summary (languages, symbol types, top directories, entry points, largest files).
 - `list_indexes()` — lists indexed projects and their statuses.
 - `get_index_status(project?)` — indexing status and live progress (% / file).
-- `index_project(path, name?)` — the agent itself starts indexing a new directory (in the background).
+- `index_project(path, name?, wait?)` — the agent itself starts indexing a new directory (in the background, or `wait: true` for the final status). Re-indexing an existing path is a **full rebuild** (table + file cache dropped); use `sync_project` for an incremental refresh.
+- `sync_project(project?, path?, wait?)` — incremental refresh of an existing project over MCP: unchanged files are skipped, changed/new files re-indexed, deleted files pruned, and the table is never dropped (search keeps serving). `wait: true` returns the final status. CLI: `cidx sync <name> --wait`.
 - `get_file_outline(path)` — the symbol map of a file (function/class/method + line ranges).
 - `get_dependencies(path, project?, limit?)` — a file's import graph: what it imports (resolved against the index) + which indexed files import it (reverse). `project` is inferred from the path; import edges are parsed from the file's AST.
 - `get_call_graph(symbol?, path?, project?, direction?, depth?, limit?)` — who calls a symbol and what it calls, as bounded, cycle-safe trees; centers on a symbol name and/or every callable in a file.
@@ -385,6 +386,8 @@ Practical consequences — what AI agents need to know:
 - **`edit → search` in the same turn**: the new content is most likely not in the index yet; the search may return the old version of the file. To confirm a change you just made, **read the file directly**.
 - **Search across turns** (after the user has intervened): since the elapsed time is longer than the indexing delay, the results are up to date.
 - If you really need to see an edit reflected in the index, **wait ~2 sec** before searching.
+- **Report tools** (`check_docs`, `get_call_graph`, `get_hotspots`, `find_dead_code`) read the live table and invalidate their cached evidence on every watcher write, so no sync or reindex is needed after an edit. `check_docs`'s `checked.indexFreshness` is the newest table write the evidence includes (watcher writes count) and `checked.lastFullIndexAt` the last full index/sync job — an old `lastFullIndexAt` alone does NOT mean the report is stale.
+- If you need a complete catch-up on demand, use **`sync_project`** (MCP) / **`cidx sync <name>`** — incremental and non-destructive. `index_project` on an existing path is a full rebuild; don't use it just to refresh after edits.
 
 ## Configuration
 
@@ -426,6 +429,7 @@ embedding:
   provider: auto              # auto | ollama | llamacpp; auto = an Ollama that serves the model wins, else a live llama-server
   llamacppUrl: http://127.0.0.1:8080  # llama-server base URL; start with -m <model.gguf> -a <model> --ctx-size 2048 --ubatch-size 2048 --embedding (ubatch ≥ tokens per chunk — char-estimated chunks can tokenize larger than maxChunkTokens)
   framing: none               # none | auto; auto = per-model task prefixes (EmbeddingGemma 2 docs/queries, qwen3 query instruction) — measured +0.06–0.08 MRR; unknown models stay unframed; a change re-embeds via migration
+  readyTimeoutMs: 20000       # how long an index job waits for the backend to load (llama-server /health) before its first embed; 0 = probe once, never wait. Failed files are retried once at the end of the job
 
 search:
   queryLogSize: 10000         # max rows kept in the local query log (search analytics via 'cidx stats'); 0 = off
