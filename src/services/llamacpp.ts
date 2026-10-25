@@ -14,6 +14,27 @@ export interface LlamaServerModels {
   models: string[];
 }
 
+/**
+ * Readiness probe for a loading llama-server. `/health` answers 200 once the
+ * model is ready and 503 while it loads; a missing `/health` (older server or a
+ * proxy) returns `null` = unknown, and callers must treat unknown as usable
+ * rather than block forever. Never throws.
+ */
+export async function probeLlamaHealth(
+  url: string,
+  timeoutMs = 3000,
+  fetchFn: typeof fetch = fetch,
+): Promise<boolean | null> {
+  try {
+    const resp = await fetchFn(`${url}/health`, { signal: AbortSignal.timeout(timeoutMs) });
+    if (resp.status === 200) return true;
+    if (resp.status === 503) return false;
+    return null;
+  } catch {
+    return false;
+  }
+}
+
 /** Probes the OpenAI-compatible `/v1/models` endpoint (never throws). */
 export async function probeLlamaServer(
   url: string,

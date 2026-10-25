@@ -165,8 +165,10 @@ beforeAll(async () => {
   const real = globalThis.fetch;
   realFetch = real;
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
-    wireCalls++;
     const url = String(input);
+    // Count EMBED calls only: the indexer's readiness probe (/api/tags) is
+    // deliberately not an embed and must not affect the cache-hit assertion.
+    if (url.endsWith("/api/embed") || url.endsWith("/api/embeddings")) wireCalls++;
     const body =
       typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {};
     const model = typeof body.model === "string" ? body.model : "";

@@ -1,6 +1,14 @@
 import { test, expect, describe } from "bun:test";
-import { pickProvider, resolveEmbedBackend, setEmbedBackend, resetEmbedBackend, getEmbedding } from "../src/services/embed";
-import { llamaEmbeddings, llamaRerankTopLogprobs } from "../src/services/llamacpp";
+import {
+  pickProvider,
+  resolveEmbedBackend,
+  setEmbedBackend,
+  resetEmbedBackend,
+  getEmbedding,
+  isTransientEmbedError,
+  waitForEmbedBackend,
+} from "../src/services/embed";
+import { probeLlamaHealth, llamaEmbeddings, llamaRerankTopLogprobs } from "../src/services/llamacpp";
 import { modelTagPresent } from "../src/utils/model-tag";
 
 describe("pickProvider — auto backend selection", () => {
@@ -164,6 +172,137 @@ describe("llamaRerankTopLogprobs — response shape tolerance", () => {
       await expect(llamaRerankTopLogprobs("prompt", "http://mock:5", "m")).rejects.toThrow("HTTP 503");
     } finally {
       globalThis.fetch = realFetch;
+    }
+  });
+});
+// ------------------------------------------------ readiness + transient retry
+
+describe("embedding backend readiness and 503 retry", () => {
+  test("isTransientEmbedError: only 'up but loading' errors qualify", () => {
+    expect(isTransientEmbedError(new Error('llama-server /v1/embeddings HTTP 503: {"error":{"message":"Loading model"}}'))).toBe(true);
+    expect(isTransientEmbedError(new Error("Loading model"))).toBe(true);
+    expect(isTransientEmbedError(new Error("Unable to connect. Is the computer able to access the url?"))).toBe(false);
+    expect(isTransientEmbedError(new Error("llama-server /v1/embeddings HTTP 400"))).toBe(false);
+    expect(isTransientEmbedError("boom")).toBe(false);
+  });
+
+  test("probeLlamaHealth: 200 ready, 503 loading, unknown status does not block", async () => {
+    const realFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async () => new Response("{}", { status: 200 })) as typeof fetch;
+      expect(await probeLlamaHealth("http://mock:health")).toBe(true);
+      globalThis.fetch = (async () => new Response("{}", { status: 503 })) as typeof fetch;
+      expect(await probeLlamaHealth("http://mock:health")).toBe(false);
+      // A server/proxy without /health: unknown, treated as usable by callers.
+      globalThis.fetch = (async () => new Response("{}", { status: 404 })) as typeof fetch;
+      expect(await probeLlamaHealth("http://mock:health")).toBeNull();
+      globalThis.fetch = (async () => {
+        throw new Error("Unable to connect");
+      }) as typeof fetch;
+      expect(await probeLlamaHealth("http://mock:health")).toBe(false);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test("waitForEmbedBackend with a zero timeout probes once and reports the outage", async () => {
+    const realFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      throw new Error("Unable to connect");
+    }) as typeof fetch;
+    setEmbedBackend({ provider: "llamacpp", url: "http://mock:down", reason: "explicit" });
+    try {
+      const started = Date.now();
+      await expect(waitForEmbedBackend(0)).resolves.toBe(false);
+      expect(Date.now() - started).toBeLessThan(1000);
+      expect(calls).toBe(1);
+    } finally {
+      globalThis.fetch = realFetch;
+      resetEmbedBackend();
+    }
+  });
+
+  test("a 503 'Loading model' is retried after the health probe succeeds", async () => {
+    const realFetch = globalThis.fetch;
+    const calls: string[] = [];
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.endsWith("/health")) return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+      if (url.endsWith("/v1/embeddings")) {
+        // First attempt: the server is up but still loading the model.
+        if (calls.filter((u) => u.endsWith("/v1/embeddings")).length === 1) {
+          return new Response(JSON.stringify({ error: { message: "Loading model", code: 503 } }), { status: 503 });
+        }
+        return new Response(JSON.stringify({ data: [{ index: 0, embedding: [4, 5, 6] }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("{}", { status: 404 });
+    }) as typeof fetch;
+    setEmbedBackend({ provider: "llamacpp", url: "http://mock:loading", reason: "explicit" });
+    try {
+      await expect(getEmbedding("hello", "m")).resolves.toEqual([4, 5, 6]);
+      expect(calls.filter((u) => u.endsWith("/v1/embeddings"))).toHaveLength(2);
+      expect(calls.some((u) => u.endsWith("/health"))).toBe(true);
+    } finally {
+      globalThis.fetch = realFetch;
+      resetEmbedBackend();
+    }
+  });
+
+  test("a connection failure is NOT retried per call (the index job owns recovery)", async () => {
+    const realFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      throw new Error("Unable to connect. Is the computer able to access the url?");
+    }) as typeof fetch;
+    setEmbedBackend({ provider: "llamacpp", url: "http://mock:down", reason: "explicit" });
+    try {
+      await expect(getEmbedding("hello", "m")).rejects.toThrow("Unable to connect");
+      expect(calls).toBe(1);
+    } finally {
+      globalThis.fetch = realFetch;
+      resetEmbedBackend();
+    }
+  });
+
+  test("a rejected auto discovery is not memoized forever", async () => {
+    const realFetch = globalThis.fetch;
+    // First resolution: nothing is reachable → resolveAuto throws.
+    globalThis.fetch = (async () => {
+      throw new Error("Unable to connect");
+    }) as typeof fetch;
+    try {
+      resetEmbedBackend();
+      await expect(resolveEmbedBackend()).rejects.toThrow("no embedding backend reachable");
+      // The backend comes up (e.g. llama-server finished loading); the next
+      // resolution must re-probe instead of returning the poisoned rejection.
+      globalThis.fetch = (async (input: unknown) => {
+        const url = String(input);
+        if (url.endsWith("/api/tags")) {
+          return new Response(JSON.stringify({ models: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (url.endsWith("/v1/models")) {
+          return new Response(JSON.stringify({ data: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response("{}", { status: 404 });
+      }) as typeof fetch;
+      const resolved = await resolveEmbedBackend();
+      expect(["ollama", "llamacpp"]).toContain(resolved.provider);
+    } finally {
+      globalThis.fetch = realFetch;
+      resetEmbedBackend();
     }
   });
 });

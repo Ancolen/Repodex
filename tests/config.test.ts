@@ -85,6 +85,9 @@ describe("config — defaults and environment variable overrides", () => {
     // beats the in-code default), so a typo there would stick permanently.
     expect(DEFAULT_CONFIG_YAML.match(/numCtx:/g)?.length).toBe(2); // ollama + search.rerank
     expect(DEFAULT_CONFIG_YAML).toContain("numCtx: 1024");
+    // The backend-readiness wait ships in the template too (an existing
+    // install pins whatever the template says).
+    expect(DEFAULT_CONFIG_YAML).toContain("readyTimeoutMs: 20000");
   });
 
   test("CIDX_HOME expands '~' and derived paths are located under home", async () => {
@@ -123,6 +126,15 @@ describe("config — defaults and environment variable overrides", () => {
     expect(def.CONFIG.MAX_CHUNK_TOKENS).toBe(512);
     const ovr = await runConfig({ MAX_CHUNK_TOKENS: "128" });
     expect(ovr.CONFIG.MAX_CHUNK_TOKENS).toBe(128);
+  });
+
+  test("embedding readyTimeoutMs defaults to 20 s; overridden with EMBED_READY_TIMEOUT_MS", async () => {
+    const def = await runConfig({});
+    expect(def.CONFIG.EMBED_READY_TIMEOUT_MS).toBe(20000);
+    const ovr = await runConfig({ EMBED_READY_TIMEOUT_MS: "0" });
+    expect(ovr.CONFIG.EMBED_READY_TIMEOUT_MS).toBe(0);
+    const invalid = await runConfig({ EMBED_READY_TIMEOUT_MS: "soon" });
+    expect(invalid.CONFIG.EMBED_READY_TIMEOUT_MS).toBe(20000);
   });
 
   test("boost defaults: on, with the S3 weights and the conventional source roots", async () => {

@@ -57,6 +57,15 @@ export interface IndexerConfig {
      * pinned per record and a framing change escalates like a model change.
      */
     framing: FramingSetting;
+    /**
+     * How long an index job waits for the embedding backend to become ready
+     * before its first embed (llama-server answers `/health` with 503 while it
+     * loads the model; a service started in the same login session is often
+     * still loading when the startup sync begins). 0 = probe once, never wait.
+     * After the wait, per-file failures are collected and retried once at the
+     * end of the job (again after a readiness check).
+     */
+    readyTimeoutMs: number;
   };
   indexing: {
     maxChunkSize: number;
@@ -222,7 +231,13 @@ const DEFAULTS: IndexerConfig = {
     numCtx: 1024,
   },
   // framing stays "none": existing installs embed byte-identically; "auto" is opt-in.
-  embedding: { cacheMax: 50000, provider: "auto", llamacppUrl: "http://127.0.0.1:8080", framing: "none" },
+  embedding: {
+    cacheMax: 50000,
+    provider: "auto",
+    llamacppUrl: "http://127.0.0.1:8080",
+    framing: "none",
+    readyTimeoutMs: 20000,
+  },
   indexing: {
     maxChunkSize: 1500,
     overlapSize: 200,
@@ -303,6 +318,7 @@ embedding:
   provider: ${DEFAULTS.embedding.provider}       # auto | ollama | llamacpp; auto = an Ollama that has the model wins, else a live llama-server
   llamacppUrl: ${DEFAULTS.embedding.llamacppUrl}  # base URL of llama-server; start it: llama-server -m <model.gguf> -a <model> --ctx-size <numCtx> --embedding
   framing: ${DEFAULTS.embedding.framing}               # none | auto; auto = per-model task prefixes (EmbeddingGemma 2 docs/queries, qwen3 query instruction); unknown models stay unframed; a change re-embeds via migration
+  readyTimeoutMs: ${DEFAULTS.embedding.readyTimeoutMs}          # how long an index job waits for the embedding backend to load (llama-server /health) before its first embed; 0 = probe once, never wait. Failed files are retried once at the end of the job
 
 indexing:
   maxChunkSize: ${DEFAULTS.indexing.maxChunkSize}
@@ -478,6 +494,10 @@ export const RESOLVED: IndexerConfig = {
       return "auto" as const;
     })(),
     llamacppUrl: process.env.LLAMACPP_URL ?? y.embedding?.llamacppUrl ?? DEFAULTS.embedding.llamacppUrl,
+    readyTimeoutMs:
+      num(process.env.EMBED_READY_TIMEOUT_MS) ??
+      y.embedding?.readyTimeoutMs ??
+      DEFAULTS.embedding.readyTimeoutMs,
     framing: (() => {
       const raw = process.env.EMBEDDING_FRAMING ?? y.embedding?.framing ?? DEFAULTS.embedding.framing;
       if (raw === "none" || raw === "auto") return raw;
@@ -616,6 +636,7 @@ export const CONFIG = {
   EMBED_CACHE_MAX: RESOLVED.embedding.cacheMax,
   EMBED_PROVIDER: RESOLVED.embedding.provider,
   LLAMACPP_URL: RESOLVED.embedding.llamacppUrl,
+  EMBED_READY_TIMEOUT_MS: RESOLVED.embedding.readyTimeoutMs,
   EMBEDDING_FRAMING: RESOLVED.embedding.framing,
 
   ALLOWED_EXTENSIONS: RESOLVED.indexing.allowedExtensions,

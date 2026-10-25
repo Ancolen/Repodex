@@ -7,7 +7,7 @@ import { readProjectConfig, extToLanguage, languageAllowSet, type ProjectConfig 
 import { resolveFraming, frameDoc } from "../core/framing";
 import { chunkCode } from "../chunking/chunker";
 import { extractIdTerms } from "../core/idterms";
-import { getEmbeddings } from "./embed";
+import { getEmbeddings, waitForEmbedBackend } from "./embed";
 import {
   insertChunks,
   deleteFileRecords,
@@ -40,6 +40,12 @@ export interface IndexOptions {
   signal?: AbortSignal | undefined;
   onProgress?: ((processed: number, total: number, currentFile?: string) => void) | undefined;
   registry?: Registry | undefined;
+  /**
+   * How long the job waits for the embedding backend to become ready before
+   * its first embed (default `CONFIG.EMBED_READY_TIMEOUT_MS`). `0` probes once
+   * and never waits. Injected so unit tests against a dead backend stay fast.
+   */
+  embedReadyTimeoutMs?: number | undefined;
 }
 
 /**
@@ -446,6 +452,29 @@ export async function removeFileIndex(
 }
 
 /**
+ * True when at least one collected file would actually be embedded: its mtime
+ * differs from the file cache, or it was never indexed. Gates the upfront
+ * readiness wait — a no-op sync must not block on a backend it will never call.
+ * Stat errors count as pending so the per-file path reports the real failure.
+ */
+async function hasFilesToEmbed(
+  files: string[],
+  target: IndexTarget,
+  registry?: Registry,
+): Promise<boolean> {
+  if (!registry) return files.length > 0;
+  for (const file of files) {
+    try {
+      const st = await stat(file);
+      if (registry.getFileMtime(target.indexName, file) !== st.mtimeMs) return true;
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Indexes a directory from scratch.
  * - Progress is reported via onProgress (0..total).
  * - Can be cancelled via AbortSignal.
@@ -541,11 +570,37 @@ export async function indexDirectory(
 
   opts.onProgress?.(0, total);
 
+  // BACKEND READINESS: a login-time startup sync regularly begins while
+  // llama-server is still loading the model — its first files failed with
+  // ConnectionRefused/503, kept no mtime cache entry, and stayed stale until a
+  // manual reindex (the "124 files failed to index" note). Wait (bounded) for
+  // the backend before the first embed; with the default 20 s a cold BF16 load
+  // finishes in time on the maintainer's install.
+  const readyTimeoutMs = opts.embedReadyTimeoutMs ?? CONFIG.EMBED_READY_TIMEOUT_MS;
+  if (total > 0 && !opts.signal?.aborted) {
+    // A ready backend answers the first probe, so the pending-work scan below
+    // only runs during an actual outage. The gate matters: a no-op sync (the
+    // startup restore re-enqueues EVERY ready project) must not block for the
+    // readiness budget when it has nothing to embed.
+    const initiallyReady = await waitForEmbedBackend(0);
+    if (!initiallyReady && (await hasFilesToEmbed(files, target, opts.registry))) {
+      const ready = await waitForEmbedBackend(readyTimeoutMs);
+      if (!ready) {
+        console.error(
+          `[indexer] '${target.indexName}' embedding backend not ready after ${readyTimeoutMs} ms — ` +
+            "attempting the files anyway (failures are retried once at the end of the job).",
+        );
+      }
+    }
+  }
+
   let processed = 0;
   let chunks = 0;
   let dim: number | null = null;
   let skippedOversized = 0;
   let failed = 0;
+  /** Files whose embed/write threw; retried ONCE after the main loop. */
+  const failedFiles: string[] = [];
   for (const file of files) {
     if (opts.signal?.aborted) break;
     try {
@@ -555,10 +610,53 @@ export async function indexDirectory(
       if (r.skippedOversized) skippedOversized++;
     } catch (err) {
       failed++;
+      failedFiles.push(file);
       console.error(`[indexer] failed to index '${file}':`, err);
     }
     processed++;
     opts.onProgress?.(processed, total, file);
+  }
+
+  // RETRY PASS (once): a backend that was down/loading for part of the run is
+  // usually ready by the end. Re-check readiness before spending another round
+  // of embed calls; recovered files decrement `failed` and add their chunks.
+  if (failedFiles.length > 0 && !opts.signal?.aborted) {
+    const ready = await waitForEmbedBackend(readyTimeoutMs);
+    if (ready) {
+      console.error(
+        `[indexer] '${target.indexName}' retrying ${failedFiles.length} failed file(s) after a readiness check...`,
+      );
+      let recovered = 0;
+      for (const file of failedFiles) {
+        if (opts.signal?.aborted) break;
+        try {
+          const r = await indexFile(
+            target,
+            file,
+            opts.registry,
+            opts.signal,
+            pcfg?.embedModel,
+            framing,
+            maxFileBytes,
+          );
+          chunks += r.chunks;
+          if (dim === null && r.dim !== null) dim = r.dim;
+          if (r.skippedOversized) skippedOversized++;
+          failed--;
+          recovered++;
+        } catch (err) {
+          console.error(`[indexer] retry failed for '${file}':`, err);
+        }
+      }
+      if (recovered > 0) {
+        console.error(`[indexer] '${target.indexName}' recovered ${recovered} file(s) on retry.`);
+      }
+    } else {
+      console.error(
+        `[indexer] '${target.indexName}' embedding backend still not ready — ` +
+          `not retrying ${failedFiles.length} failed file(s).`,
+      );
+    }
   }
 
   // --- Indexes: ANN vector (instead of brute-force) + BM25/FTS (hybrid search) ---

@@ -2,7 +2,7 @@ import { CONFIG } from "../config";
 import { hashContent } from "../utils/hash";
 import { modelTagPresent } from "../utils/model-tag";
 import { ollamaEmbedding, ollamaEmbeddings, type EmbedCache } from "./ollama";
-import { llamaEmbedding, llamaEmbeddings, probeLlamaServer } from "./llamacpp";
+import { llamaEmbedding, llamaEmbeddings, probeLlamaHealth, probeLlamaServer } from "./llamacpp";
 
 /**
  * Pluggable embedding-backend dispatch.
@@ -135,6 +135,13 @@ export async function resolveEmbedBackend(): Promise<ResolvedBackend> {
       );
       return resolved;
     })();
+    // A failed first resolution must not poison the memo for the process's
+    // lifetime: under `auto`, the usual reason is that both servers are still
+    // starting (e.g. a boot-time index job racing llama-server's model load).
+    // Clearing it lets the next embed/readiness probe retry the discovery.
+    void resolvePromise.catch(() => {
+      resolvePromise = null;
+    });
   }
   return resolvePromise;
 }
@@ -149,13 +156,78 @@ export function setEmbedBackend(backend: ResolvedBackend | null): void {
   resolvePromise = backend === null ? null : Promise.resolve(backend);
 }
 
+// ---------------------------------------------------- readiness + retry
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * True for an error that means "the backend is up but not ready yet" —
+ * llama-server answers `/v1/embeddings` with HTTP 503 while it loads the model.
+ * Connection-level failures are deliberately NOT in this class: they are
+ * handled once per index job (a readiness wait before the first embed and a
+ * single retry pass at the end), so a dead backend fails fast instead of
+ * sleeping per file.
+ */
+export function isTransientEmbedError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /\bHTTP 503\b|Loading model/i.test(msg);
+}
+
+/**
+ * Waits until the resolved embedding backend answers a readiness probe.
+ * llama.cpp: `/health` (200 ready, 503 loading; an unknown endpoint counts as
+ * usable). Ollama: `/api/tags` (the server is up; model loading happens on the
+ * embed call itself). `auto` re-runs its discovery when the memoized resolution
+ * failed. Returns false at the deadline — the caller proceeds and lets the
+ * per-file error path report the outage.
+ */
+export async function waitForEmbedBackend(timeoutMs = CONFIG.EMBED_READY_TIMEOUT_MS): Promise<boolean> {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  let delay = 250;
+  for (;;) {
+    let ready = false;
+    try {
+      const backend = await resolveEmbedBackend();
+      ready =
+        backend.provider === "llamacpp"
+          ? (await probeLlamaHealth(backend.url)) !== false
+          : (await probeOllama(backend.url)).up;
+    } catch {
+      // No backend reachable yet (auto discovery) — keep polling.
+      ready = false;
+    }
+    if (ready) return true;
+    if (Date.now() >= deadline) return false;
+    await sleep(Math.min(delay, Math.max(1, deadline - Date.now())));
+    delay = Math.min(delay * 2, 2000);
+  }
+}
+
+/** A single 503 retry waits at most this long for the model to finish loading. */
+const EMBED_RETRY_MAX_WAIT_MS = 10_000;
+
+/**
+ * One transparent retry for a "loading" 503: wait for readiness, then repeat
+ * the request. Used by every embed call (indexing and query paths alike), so a
+ * search issued while llama-server is loading recovers instead of failing.
+ */
+async function embedWithRetry<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (!isTransientEmbedError(err)) throw err;
+    const ready = await waitForEmbedBackend(Math.min(CONFIG.EMBED_READY_TIMEOUT_MS, EMBED_RETRY_MAX_WAIT_MS));
+    if (!ready) throw err;
+    return fn();
+  }
+}
+
 /** Generates an embedding for a single text (model defaults to the global config). */
 export async function getEmbedding(text: string, model: string = CONFIG.OLLAMA_MODEL): Promise<number[]> {
   const backend = await resolveEmbedBackend();
-  if (backend.provider === "llamacpp") {
-    return llamaEmbedding(text, backend.url, model);
-  }
-  return ollamaEmbedding(text, model);
+  return embedWithRetry(() =>
+    backend.provider === "llamacpp" ? llamaEmbedding(text, backend.url, model) : ollamaEmbedding(text, model),
+  );
 }
 
 /**
@@ -165,10 +237,9 @@ export async function getEmbedding(text: string, model: string = CONFIG.OLLAMA_M
  */
 export async function getEmbeddings(texts: string[], model: string = CONFIG.OLLAMA_MODEL): Promise<number[][]> {
   const backend = await resolveEmbedBackend();
-  if (backend.provider === "llamacpp") {
-    return llamaEmbeddings(texts, backend.url, model);
-  }
-  return ollamaEmbeddings(texts, model);
+  return embedWithRetry(() =>
+    backend.provider === "llamacpp" ? llamaEmbeddings(texts, backend.url, model) : ollamaEmbeddings(texts, model),
+  );
 }
 
 /**

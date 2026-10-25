@@ -45,14 +45,63 @@ afterAll(() => {
 
 describe("indexDirectory — failed embeds are counted, not hidden", () => {
   test("a dead embedding provider makes every file fail and writes no chunks", async () => {
-    const result = await indexDirectory({
-      indexName: "failure-fixture",
-      tableName: "idx_failure_fixture",
-      baseDir: root,
-    });
+    const result = await indexDirectory(
+      {
+        indexName: "failure-fixture",
+        tableName: "idx_failure_fixture",
+        baseDir: root,
+      },
+      // Probe once, never wait: the test's backend is unreachable on purpose.
+      { embedReadyTimeoutMs: 0 },
+    );
     expect(result.files).toBe(2);
     expect(result.failed).toBe(2);
     expect(result.chunks).toBe(0);
     expect(result.dim).toBeNull();
+  });
+
+  test("a backend that recovers mid-job is retried once and its files are recovered", async () => {
+    let embedCalls = 0;
+    const prev = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/tags")) {
+        return new Response(JSON.stringify({ models: [{ name: CONFIG.OLLAMA_MODEL }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.endsWith("/api/embed")) {
+        embedCalls++;
+        // The first pass fails for both files (backend went down mid-job); the
+        // end-of-job retry pass sees a recovered backend.
+        if (embedCalls <= 2) {
+          throw new Error("Unable to connect. Is the computer able to access the url?");
+        }
+        const body = JSON.parse(String(init?.body ?? "{}")) as { input?: string[] };
+        const inputs = Array.isArray(body.input) ? body.input : [];
+        return new Response(JSON.stringify({ embeddings: inputs.map(() => [0.1, 0.2, 0.3]) }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      const result = await indexDirectory(
+        {
+          indexName: "recovery-fixture",
+          tableName: "idx_recovery_fixture",
+          baseDir: root,
+        },
+        { embedReadyTimeoutMs: 0 },
+      );
+      expect(result.failed).toBe(0);
+      expect(result.chunks).toBeGreaterThan(0);
+      expect(result.dim).toBe(3);
+      expect(embedCalls).toBe(4); // 2 failures + 2 recovered on the retry pass
+    } finally {
+      globalThis.fetch = prev;
+    }
   });
 });
