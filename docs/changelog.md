@@ -6,6 +6,56 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ---
 
+## Unreleased
+
+### Why: `check_docs` took two minutes on a real index, and a wedged loop went unnoticed for a day
+
+`check_docs` on a 25k-chunk project took **125 s** — almost all of it in the two
+token scans, not in the resolution logic. The scanner built a regex alternation
+of every token (`(?<!…)(t1|t2|…|t4000)(?!…)`, one pattern per 5,000-token group)
+and ran it against **every line** of every chunk. That is native-regex work
+proportional to `lines × tokens`; on the maintainer's index the ident scan alone
+was 88 s and the literal scan 17 s. A second, unrelated failure came out of the
+same session: the daemon wedged for **27 hours** — process alive, both ports
+still `LISTEN`, TCP accepting, no response and not one log line — so
+`Restart=on-failure` never fired and every client simply timed out.
+
+### Fixed
+
+- **`check_docs` token scans are now a single linear pass** (`src/core/doccheck.ts`).
+  The same matching contract is reproduced directly instead of by a giant
+  alternation: candidate match starts are the style's left-class runs
+  (`[A-Za-z0-9_$]+` for `ident`, `[\w$.@/-]+` for `literal`) plus any token that
+  begins with a character outside that class; at a candidate a token **trie**
+  returns the longest token whose right boundary holds — exactly what a
+  longest-first alternation with a trailing lookahead resolved to — and the
+  cursor resumes at the match end, like `lastIndex`. For `ident`, whole-run
+  tokens use a `Set` lookup on the run (an impure token such as `foo=bar`
+  necessarily extends past the run it starts in, so the trie only has to hold
+  those). Result on the same index: **125 s → 2 s**, with the report (43 drift,
+  39 needsReview, 25 undocumented, 16,532 claims) **byte-for-byte identical**.
+  `tests/doccheck.test.ts` gains differential tests that run the retired regex
+  scanner as an in-test reference over adversarial and randomized corpora — they
+  caught a real divergence during development (`[\w$-]` contains an explicit
+  `$`, which the first port had missed).
+- **`splitLarge` counts lines incrementally** (`src/chunking/chunker.ts`). It
+  recomputed `countLines(text.slice(0, offset))` for every window, i.e. it
+  re-scanned the whole symbol once per chunk — O(text × windows). A CPU profile
+  of one sync put 9.7 s of self time on `countLines`. A monotonic cursor makes
+  it a single pass: the 8.7 MB generated translation unit in `horizon-deps`
+  chunks in **22.0 s → 1.1 s**, with an identical chunk digest (same chunks,
+  same `startLine`/`endLine`).
+- **Event-loop watchdog** (`daemon.watchdogMinutes`, default 5, `0` = off;
+  `src/core/watchdog.ts` + `watchdog-thread.ts`). Nothing inside the loop can
+  detect a wedge — a timer cannot fire while the loop is stuck — so the
+  heartbeat is bumped by the main thread on a timer and checked by a **worker
+  thread** on its own OS thread; when it has not moved for the threshold, the
+  thread logs the stall and `SIGKILL`s the process, leaving the supervisor to
+  restart it with a clean state (`SIGTERM` would change nothing: a wedged loop
+  cannot run a signal handler either). The threshold is minutes on purpose — a
+  legitimately long synchronous native pass must not be mistaken for a wedge.
+  The kill rule is a pure function (`watchdogDecision`) with unit tests.
+
 ## 2.8.0 (2026-10-25)
 
 ### Why: a report-cache staleness loop forced manual reindexes
