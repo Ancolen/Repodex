@@ -118,8 +118,13 @@ const MAX = effectiveChunkChars(CONFIG.MAX_CHUNK_SIZE, CONFIG.MAX_CHUNK_TOKENS, 
 const STEP = Math.max(1, MAX - CONFIG.OVERLAP_SIZE);
 
 function countLines(s: string): number {
+  return countLinesBetween(s, 0, s.length);
+}
+
+/** Newlines in `s[from, to)` — lets `splitLarge` advance its line cursor incrementally. */
+function countLinesBetween(s: string, from: number, to: number): number {
   let n = 0;
-  for (let i = 0; i < s.length; i++) if (s.charCodeAt(i) === 10) n++;
+  for (let i = from; i < to; i++) if (s.charCodeAt(i) === 10) n++;
   return n;
 }
 
@@ -211,6 +216,12 @@ function buildMeta(language?: string, symbolName?: string, symbolType?: string):
 /** Splits a large text into overlapping chunks; approximates line numbers. */
 function splitLarge(text: string, baseLine: number, meta: Meta): Chunk[] {
   const out: Chunk[] = [];
+  // Line numbers advance with the window cursor instead of re-scanning
+  // `text[0, offset)` per window: a single huge symbol (a generated 8.7 MB
+  // translation unit, ~7k windows) made that O(text × windows) — 9.7 s of CPU
+  // in a CPU profile of one sync, all of it in `countLines`.
+  let lineCursor = 0;
+  let newlinesBefore = 0;
   for (let raw = 0; raw < text.length; raw += STEP) {
     // Never cut inside an astral character: a chunk that ends (or starts) on
     // a surrogate half serializes to a \uD83x escape in the embed request, and
@@ -222,7 +233,13 @@ function splitLarge(text: string, baseLine: number, meta: Meta): Chunk[] {
     const end = alignEndToCodePoint(text, offset + MAX);
     const slice = text.slice(offset, end);
     if (slice.trim().length === 0) continue;
-    const startLine = baseLine + countLines(text.slice(0, offset));
+    // Offsets only grow, so the cursor advances monotonically; skipped
+    // (blank) windows simply leave it behind for the next one to catch up.
+    if (offset > lineCursor) {
+      newlinesBefore += countLinesBetween(text, lineCursor, offset);
+      lineCursor = offset;
+    }
+    const startLine = baseLine + newlinesBefore;
     out.push({ content: slice, startLine, endLine: startLine + countLines(slice), ...meta });
   }
   return out;
