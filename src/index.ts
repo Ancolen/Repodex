@@ -6,11 +6,16 @@ import { IndexManager } from "./core/index-manager";
 import { BridgeSessionRegistry } from "./core/bridgesessions";
 import { DaemonEventRing } from "./core/events";
 import { shouldIdleShutdown, IDLE_TICK_MS } from "./core/idle";
+import { startLoopWatchdog } from "./core/watchdog";
 import { startMcpServer } from "./server/mcp";
 import { startControlApi } from "./server/control-api";
 
 async function main(): Promise<void> {
   await initDB();
+  // Event-loop watchdog (proposal O5): a wedged loop keeps the sockets open and
+  // every client timing out, so nothing inside the loop can notice it. Armed
+  // before any traffic; `daemon.watchdogMinutes` 0 turns it off.
+  const watchdog = startLoopWatchdog(CONFIG.WATCHDOG_MINUTES);
   console.error(`[init] Configuration: ${CONFIG_SOURCE ?? "(defaults)"}`);
   const registry = new Registry();
   const jobQueue = new JobQueue({ registry, concurrency: CONFIG.JOB_CONCURRENCY });
@@ -59,6 +64,7 @@ async function main(): Promise<void> {
     } catch {
       // it's fine if it's already closed
     }
+    watchdog?.stop();
     process.exit(0);
   };
 

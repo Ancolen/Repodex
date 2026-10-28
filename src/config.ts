@@ -213,6 +213,15 @@ export interface IndexerConfig {
      * 0 disables idle shutdown (the default — behavior is unchanged).
      */
     idleTimeoutMinutes: number;
+    /**
+     * Watchdog threshold in minutes (proposal O5): when the event loop has not
+     * beaten for this long, a watchdog THREAD kills the process so the
+     * supervisor restarts it — a wedged loop cannot be rescued from inside.
+     * 0 disables the watchdog. The default is deliberately minutes, not
+     * seconds: a legitimately long synchronous pass (a multi-minute ANN build
+     * on a huge table) must not be mistaken for a wedge.
+     */
+    watchdogMinutes: number;
   };
 }
 
@@ -291,7 +300,7 @@ const DEFAULTS: IndexerConfig = {
     },
   },
   doccheck: { maxChars: 12000, undocumentedLimit: 25, judgeModel: "", judgeUrl: "", watch: false },
-  daemon: { idleTimeoutMinutes: 0 },
+  daemon: { idleTimeoutMinutes: 0, watchdogMinutes: 5 },
 };
 
 /** Editable default YAML template (written if the file does not exist). */
@@ -374,6 +383,7 @@ watcher:
 
 daemon:
   idleTimeoutMinutes: ${DEFAULTS.daemon.idleTimeoutMinutes}        # exit the daemon after N minutes without activity (requests, index jobs, open MCP sessions); 0 = off. Every cidx command / MCP entry point restarts it on demand.
+  watchdogMinutes: ${DEFAULTS.daemon.watchdogMinutes}           # if the event loop stops beating for this many minutes, a watchdog thread exits the process so the supervisor restarts it; 0 = off
 `;
 
 // ---- helpers ----
@@ -616,6 +626,11 @@ export const RESOLVED: IndexerConfig = {
       num(process.env.DAEMON_IDLE_TIMEOUT_MINUTES) ??
       y.daemon?.idleTimeoutMinutes ??
       DEFAULTS.daemon.idleTimeoutMinutes,
+    // Same pass-through rule: anything <= 0 disables the watchdog.
+    watchdogMinutes:
+      num(process.env.DAEMON_WATCHDOG_MINUTES) ??
+      y.daemon?.watchdogMinutes ??
+      DEFAULTS.daemon.watchdogMinutes,
   },
 };
 
@@ -689,6 +704,7 @@ export const CONFIG = {
   CONTROL_PORT: RESOLVED.server.controlPort,
 
   IDLE_TIMEOUT_MINUTES: RESOLVED.daemon.idleTimeoutMinutes,
+  WATCHDOG_MINUTES: RESOLVED.daemon.watchdogMinutes,
 } as const;
 
 export type Config = typeof CONFIG;
