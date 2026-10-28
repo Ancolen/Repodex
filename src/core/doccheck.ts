@@ -27,7 +27,7 @@
  */
 import { escapeRegExp } from "../utils/text";
 import { detectExported } from "./exported";
-import { DYNAMIC_HOOK_NAMES, NAME_REGEX_CAP } from "./deadcode";
+import { DYNAMIC_HOOK_NAMES } from "./deadcode";
 import { DEAD_CANDIDATE_TYPES, isTestFile, isEntryPointFile } from "./filekinds";
 import { applyBudgetBySize } from "../utils/budget";
 import { mapWithConcurrency } from "../utils/concurrency";
@@ -726,7 +726,12 @@ export function buildDocCheckIndex(chunks: readonly DocCheckChunk[]): DocCheckIn
  * `ident` = whole-identifier lookaround (the `countReferences` recipe), so
  * `getUser` never matches inside `getUserName`; `literal` = looser boundaries
  * for tokens that contain `. / @ : -` (dotted names, flags, deps, model tags).
- * Batches tokens in NAME_REGEX_CAP-sized groups so nothing is silently dropped.
+ *
+ * Both styles are a single cursor pass over every line: a match is taken at a
+ * position where the style's left boundary holds, longest token first, and the
+ * cursor then resumes after the match — exactly what the previous
+ * `(?<!…)(t1|t2|…)(?!…)` alternation did, but without paying a native-regex
+ * alternation of every token against every line.
  */
 export function scanDocTokens(
   chunks: readonly DocCheckChunk[],
@@ -734,20 +739,16 @@ export function scanDocTokens(
   style: "ident" | "literal",
 ): Map<string, DocEvidence[]> {
   const result = new Map<string, DocEvidence[]>();
-  const scan = prepareDocTokenScan(tokens, style);
-  if (!scan) return result;
-  for (let gi = 0; gi < scan.sorted.length; gi += NAME_REGEX_CAP) {
-    const re = docTokenRegex(scan, gi);
-    for (const chunk of chunks) scanChunkTokens(re, chunk, result);
-  }
+  const plan = buildTokenScanPlan(tokens, style);
+  if (!plan) return result;
+  for (const chunk of chunks) scanChunkTokens(plan, chunk, result);
   return result;
 }
 
 /**
  * `scanDocTokens`, cooperatively scheduled: the daemon's report pass must not
  * own the event loop for seconds. Identical hits; the scan yields between
- * ~15 ms slices (this is the hottest phase of `runDocCheck`: ~2.2 s of a 2.9 s
- * `check_docs` on the maintainer's index).
+ * ~15 ms slices.
  */
 export async function scanDocTokensCooperative(
   chunks: readonly DocCheckChunk[],
@@ -756,60 +757,239 @@ export async function scanDocTokensCooperative(
   opts: { sliceMs?: number } = {},
 ): Promise<Map<string, DocEvidence[]>> {
   const result = new Map<string, DocEvidence[]>();
-  const scan = prepareDocTokenScan(tokens, style);
-  if (!scan) return result;
+  const plan = buildTokenScanPlan(tokens, style);
+  if (!plan) return result;
   const clock = sliceClock();
-  for (let gi = 0; gi < scan.sorted.length; gi += NAME_REGEX_CAP) {
-    const re = docTokenRegex(scan, gi);
-    for (const chunk of chunks) {
-      scanChunkTokens(re, chunk, result);
-      await yieldIfExpired(clock, opts.sliceMs ?? COOPERATIVE_SLICE_MS);
-    }
+  for (const chunk of chunks) {
+    scanChunkTokens(plan, chunk, result);
+    await yieldIfExpired(clock, opts.sliceMs ?? COOPERATIVE_SLICE_MS);
   }
   return result;
 }
 
-interface DocTokenScan {
-  sorted: string[];
-  left: string;
-  right: string;
+/**
+ * One prepared scan: what to look for, and where in a line a match may start.
+ *
+ * The matching contract is the regex version's, exactly:
+ * `(?<left)(tok1|tok2|…)(right)` with the alternatives tried longest-first and
+ * the cursor resuming after each accepted match. Both halves of that contract
+ * are cheap to reproduce by hand:
+ *
+ * - **Where a match may start** — only where the left lookbehind holds, i.e.
+ *   at the start of a run of the style's left-class characters (`[A-Za-z0-9_$]`
+ *   for `ident`, `[\w$.@/-]` for `literal`), or on a character outside that
+ *   class that some token actually begins with (`specials`).
+ * - **Which token is taken** — the longest token whose right boundary holds.
+ *   That is what a longest-first alternation with a trailing lookahead
+ *   resolves to (a longer alternative whose lookahead fails backtracks to the
+ *   next one).
+ */
+interface TokenScanPlan {
+  /**
+   * `ident` only: tokens that are whole identifier runs. Such a token can only
+   * match by consuming an entire run (both boundaries are identifier-class), so
+   * a Set lookup on the run is exact. `literal` fills the trie instead, since a
+   * literal token may end inside a run (`serde_json` in `serde_json.1`).
+   */
+  runs: Set<string> | null;
+  /**
+   * Longest-first token trie. `ident` holds only the tokens that are NOT whole
+   * identifier runs ("impure": `foo=bar`, `a:b`) — those necessarily extend
+   * past the run they start in, so they always outrank the run they overlap.
+   */
+  trie: TrieNode | null;
+  /** Candidate match starts: left-class runs, plus any `specials` character. */
+  candidates: RegExp;
+  /** Left-class test for the resume rule (skip positions the lookbehind rejects). */
+  leftChar: (code: number) => boolean;
+  /** Right-boundary test for a match ending at `end` (exclusive). */
+  rightOk: (line: string, end: number) => boolean;
 }
 
-function prepareDocTokenScan(tokens: readonly string[], style: "ident" | "literal"): DocTokenScan | null {
-  const uniq = [...new Set(tokens)].filter((t) => t.length > 0);
+interface TrieNode {
+  next: Map<string, TrieNode>;
+  terminal: boolean;
+}
+
+/** Same cap the regex version applied before compiling tokens into a pattern. */
+const MAX_TOKEN_CHARS = 200;
+
+/**
+ * Identifier class shared by both boundaries of `ident` (`[A-Za-z0-9_$]`).
+ * `$` is included deliberately: it is not a `\w` character in JS.
+ */
+function isIdentCharCode(code: number): boolean {
+  return (
+    (code >= 48 && code <= 57) || // 0-9
+    (code >= 65 && code <= 90) || // A-Z
+    (code >= 97 && code <= 122) || // a-z
+    code === 95 || // _
+    code === 36 // $
+  );
+}
+
+/**
+ * `literal` right boundary `(?![\w$-])` — `\w` plus an EXPLICIT `$` and `-`,
+ * so a literal token may not end right before any of those.
+ */
+function isLiteralRightCharCode(code: number): boolean {
+  return (
+    (code >= 48 && code <= 57) ||
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122) ||
+    code === 95 || // _
+    code === 36 || // $
+    code === 45 // -
+  );
+}
+
+/** `literal` left boundary `(?<![\w$.@/-])` — the right class plus `.`, `/`, `@`. */
+function isLiteralLeftCharCode(code: number): boolean {
+  return isLiteralRightCharCode(code) || code === 46 /* . */ || code === 47 /* / */ || code === 64; /* @ */
+}
+
+const IDENT_RUN_SOURCE = "[A-Za-z0-9_$]+";
+const LITERAL_RUN_SOURCE = "[A-Za-z0-9_$./@-]+";
+
+function escapeClassChar(ch: string): string {
+  return /[\\\]^[-]/.test(ch) ? `\\${ch}` : ch;
+}
+
+function buildTrie(tokens: readonly string[]): TrieNode | null {
+  let root: TrieNode | null = null;
+  for (const token of tokens) {
+    if (token.length === 0 || token.length > MAX_TOKEN_CHARS) continue;
+    if (root === null) root = { next: new Map<string, TrieNode>(), terminal: false };
+    let node: TrieNode = root;
+    for (let i = 0; i < token.length; i++) {
+      const ch = token[i]!;
+      let next: TrieNode | undefined = node.next.get(ch);
+      if (next === undefined) {
+        next = { next: new Map<string, TrieNode>(), terminal: false };
+        node.next.set(ch, next);
+      }
+      node = next;
+    }
+    node.terminal = true;
+  }
+  return root;
+}
+
+function buildTokenScanPlan(tokens: readonly string[], style: "ident" | "literal"): TokenScanPlan | null {
+  const uniq = [...new Set(tokens)].filter((t) => t.length > 0 && t.length <= MAX_TOKEN_CHARS);
   if (uniq.length === 0) return null;
-  const sorted = uniq.sort((a, b) => b.length - a.length).filter((t) => t.length <= 200);
-  const left = style === "ident" ? "(?<![A-Za-z0-9_$])" : "(?<![\\w$.@/-])";
-  const right = style === "ident" ? "(?![A-Za-z0-9_$])" : "(?![\\w$-])";
-  return { sorted, left, right };
+
+  const isLeftChar = style === "ident" ? isIdentCharCode : isLiteralLeftCharCode;
+  const runs = style === "ident" ? new Set<string>() : null;
+  const trieTokens: string[] = [];
+  const specials: string[] = [];
+  const seenSpecial = new Set<string>();
+
+  for (const token of uniq) {
+    let wholeRun = runs !== null;
+    if (runs !== null) {
+      for (let i = 0; i < token.length; i++) {
+        if (!isIdentCharCode(token.charCodeAt(i))) {
+          wholeRun = false;
+          break;
+        }
+      }
+      if (wholeRun) runs.add(token);
+      else trieTokens.push(token);
+    } else {
+      trieTokens.push(token);
+    }
+
+    const first = token[0]!;
+    if (!isLeftChar(first.charCodeAt(0)) && !seenSpecial.has(first)) {
+      seenSpecial.add(first);
+      specials.push(first);
+    }
+  }
+
+  const runSource = style === "ident" ? IDENT_RUN_SOURCE : LITERAL_RUN_SOURCE;
+  const specialSource = specials.map(escapeClassChar).join("");
+  const candidates = new RegExp(specialSource.length === 0 ? runSource : `${runSource}|[${specialSource}]`, "g");
+
+  const rightOk =
+    style === "ident"
+      ? (line: string, end: number): boolean => end >= line.length || !isIdentCharCode(line.charCodeAt(end))
+      : (line: string, end: number): boolean => end >= line.length || !isLiteralRightCharCode(line.charCodeAt(end));
+
+  const plan: TokenScanPlan = { runs, trie: buildTrie(trieTokens), candidates, leftChar: isLeftChar, rightOk };
+  return plan;
 }
 
-function docTokenRegex(scan: DocTokenScan, groupStart: number): RegExp {
-  const batch = scan.sorted.slice(groupStart, groupStart + NAME_REGEX_CAP);
-  return new RegExp(`${scan.left}(${batch.map(escapeRegExp).join("|")})${scan.right}`, "g");
+/**
+ * The longest token starting at `start` whose right boundary holds, or `-1`.
+ * Walks the trie once, remembering the deepest terminal that passed the
+ * boundary — the same pick a longest-first alternation makes.
+ */
+function longestTokenAt(trie: TrieNode, line: string, start: number, rightOk: (line: string, end: number) => boolean): number {
+  const first: TrieNode | undefined = trie.next.get(line[start]!);
+  if (first === undefined) return -1;
+  let node: TrieNode = first;
+  let best = node.terminal && rightOk(line, start + 1) ? start + 1 : -1;
+  for (let i = start + 1; i < line.length; i++) {
+    const next: TrieNode | undefined = node.next.get(line[i]!);
+    if (next === undefined) break;
+    node = next;
+    if (node.terminal && rightOk(line, i + 1)) best = i + 1;
+  }
+  return best;
 }
 
-function scanChunkTokens(re: RegExp, chunk: DocCheckChunk, result: Map<string, DocEvidence[]>): void {
+/**
+ * The first position at or after `from` the left lookbehind accepts (the
+ * regex's own resume rule: the character before it must not be left-class).
+ */
+function nextCandidateStart(line: string, from: number, leftChar: (code: number) => boolean): number {
+  let p = from;
+  while (p > 0 && p < line.length && leftChar(line.charCodeAt(p - 1))) p++;
+  return p;
+}
+
+function scanChunkTokens(plan: TokenScanPlan, chunk: DocCheckChunk, result: Map<string, DocEvidence[]>): void {
   if (isDocPath(chunk.filePath)) return;
   if (!chunk.content) return;
   const lines = chunk.content.split("\n");
+  const re = plan.candidates;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
     if (line.length === 0) continue;
+    const evidenceLine = chunk.startLine + i;
     re.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = re.exec(line)) !== null) {
-      const matched = m[1]!;
-      let list = result.get(matched);
-      if (!list) {
-        list = [];
-        result.set(matched, list);
+      const start = m.index;
+      let end = plan.trie === null ? -1 : longestTokenAt(plan.trie, line, start, plan.rightOk);
+      if (end < 0 && plan.runs !== null && isIdentCharCode(line.charCodeAt(start))) {
+        const run = m[0]!;
+        if (plan.runs.has(run)) end = start + run.length;
       }
-      if (list.length < MAX_EVIDENCE && !list.some((e) => e.path === chunk.filePath && e.line === chunk.startLine + i)) {
-        list.push({ path: chunk.filePath, line: chunk.startLine + i });
+      if (end < 0) {
+        if (m.index === re.lastIndex) re.lastIndex++;
+        continue;
       }
-      if (m.index === re.lastIndex) re.lastIndex++;
+      recordTokenEvidence(result, line.slice(start, end), chunk, evidenceLine);
+      re.lastIndex = nextCandidateStart(line, end, plan.leftChar);
     }
+  }
+}
+
+function recordTokenEvidence(
+  result: Map<string, DocEvidence[]>,
+  token: string,
+  chunk: DocCheckChunk,
+  line: number,
+): void {
+  let list = result.get(token);
+  if (!list) {
+    list = [];
+    result.set(token, list);
+  }
+  if (list.length < MAX_EVIDENCE && !list.some((e) => e.path === chunk.filePath && e.line === line)) {
+    list.push({ path: chunk.filePath, line });
   }
 }
 

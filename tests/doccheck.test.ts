@@ -269,6 +269,145 @@ describe("scanDocTokens", () => {
     expect(hits.size).toBe(total);
   });
 
+  /**
+   * The pre-trie scanner, kept here as the reference the fast one must
+   * reproduce: one alternation per `NAME_REGEX_CAP`-sized token group, run
+   * over every line. It is the definition of the matching semantics (left
+   * boundary, longest alternative first, resume after the match), and it is
+   * far too slow to use on a real index — hence the differential tests below.
+   */
+  function referenceScan(
+    chunks: readonly DocCheckChunk[],
+    tokens: readonly string[],
+    style: "ident" | "literal",
+  ): Map<string, { path: string; line: number }[]> {
+    const sorted = [...new Set(tokens)]
+      .filter((t) => t.length > 0 && t.length <= 200)
+      .sort((a, b) => b.length - a.length);
+    const result = new Map<string, { path: string; line: number }[]>();
+    if (sorted.length === 0) return result;
+    const left = style === "ident" ? "(?<![A-Za-z0-9_$])" : "(?<![\\w$.@/-])";
+    const right = style === "ident" ? "(?![A-Za-z0-9_$])" : "(?![\\w$-])";
+    const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    for (let gi = 0; gi < sorted.length; gi += NAME_REGEX_CAP) {
+      const re = new RegExp(
+        `${left}(${sorted
+          .slice(gi, gi + NAME_REGEX_CAP)
+          .map(escape)
+          .join("|")})${right}`,
+        "g",
+      );
+      for (const c of chunks) {
+        if (isDocPath(c.filePath) || !c.content) continue;
+        const lines = c.content.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i]!;
+          if (line.length === 0) continue;
+          re.lastIndex = 0;
+          let m: RegExpExecArray | null;
+          while ((m = re.exec(line)) !== null) {
+            const matched = m[1]!;
+            let list = result.get(matched);
+            if (!list) {
+              list = [];
+              result.set(matched, list);
+            }
+            const ln = c.startLine + i;
+            // MAX_EVIDENCE in the engine.
+            if (list.length < 3 && !list.some((e) => e.path === c.filePath && e.line === ln)) {
+              list.push({ path: c.filePath, line: ln });
+            }
+            if (m.index === re.lastIndex) re.lastIndex++;
+          }
+        }
+      }
+    }
+    return result;
+  }
+
+  function sortedEntries(hits: Map<string, { path: string; line: number }[]>) {
+    return [...hits.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  }
+
+  test("fast scanner is identical to the regex reference on adversarial tokens", () => {
+    const cases: { style: "ident" | "literal"; tokens: string[]; text: string }[] = [
+      // Prefix pairs: the longer token must win, the shorter must not also match.
+      { style: "ident", tokens: ["getUser", "getUserName"], text: "getUserName getUser getUserNameX" },
+      // Impure ident tokens (contain a non-identifier char) outrank the run they start in.
+      { style: "ident", tokens: ["foo", "foo=bar", "bar"], text: "foo=bar foo bar=x" },
+      // Literal boundaries: '.'/'/'/'@' are left-class, so a match can't start after them,
+      // but a token may end right before one.
+      {
+        style: "literal",
+        tokens: ["serde_json", "serde_json.1", "a.b", "a.b.c", "docs/status.md", "qwen3:8b", "--last"],
+        text: "serde_json.1 serde_json xa.b.c a.b.c a.b see docs/status.md. model=qwen3:8b --last --lastx",
+      },
+      // Tokens starting outside the left class ('<', '~') still need their own start position.
+      {
+        style: "literal",
+        tokens: ["<placeholder>", "~/.config/x", "x"],
+        text: "a=<placeholder> ~/.config/x x=1",
+      },
+      // Identifier runs split by '.', and '$' which is an identifier char but not a \w char.
+      { style: "ident", tokens: ["$state", "state", "run"], text: "this.$state $state2 run.run" },
+    ];
+    for (const c of cases) {
+      const chunks = [chunk("src/a.ts", c.text)];
+      expect(sortedEntries(scanDocTokens(chunks, c.tokens, c.style))).toEqual(
+        sortedEntries(referenceScan(chunks, c.tokens, c.style)),
+      );
+    }
+  });
+
+  test("fast scanner matches the regex reference on randomized corpora", () => {
+    // Deterministic PRNG so a failing round is reproducible.
+    let seed = 0x9e3779b9;
+    const rnd = () => {
+      seed ^= seed << 13;
+      seed ^= seed >>> 17;
+      seed ^= seed << 5;
+      return (seed >>> 0) / 0x100000000;
+    };
+    const alphabet = "abXZ019_.$-/:@=<>() '";
+    const wordChars = "abXZ019_$";
+    const pick = (s: string) => s[Math.floor(rnd() * s.length)]!;
+    const randWord = (max: number) => {
+      let out = "";
+      const n = 1 + Math.floor(rnd() * max);
+      for (let i = 0; i < n; i++) out += pick(wordChars);
+      return out;
+    };
+
+    for (let round = 0; round < 20; round++) {
+      const lines: string[] = [];
+      const tokens = new Set<string>();
+      for (let l = 0; l < 8; l++) {
+        let line = "";
+        const words = 1 + Math.floor(rnd() * 4);
+        for (let w = 0; w < words; w++) {
+          const word = randWord(4);
+          // Sprinkle literal-ish glue so tokens with '.', '/', ':', '@' can occur.
+          const glue = rnd() < 0.5 ? pick(".$/:@-") : "";
+          line += word + glue + (rnd() < 0.3 ? pick(alphabet) : " ");
+          if (rnd() < 0.7) tokens.add(rnd() < 0.5 ? word : word + glue);
+        }
+        lines.push(line);
+      }
+      // A few tokens that never occur, plus a long-prefix pair.
+      tokens.add("neverAppearsAnywhere");
+      tokens.add(randWord(3));
+      const chunks = [chunk("src/a.ts", lines.join("\n"))];
+      for (const style of ["ident", "literal"] as const) {
+        const list = [...tokens];
+        expect({ round, style, hits: sortedEntries(scanDocTokens(chunks, list, style)) }).toEqual({
+          round,
+          style,
+          hits: sortedEntries(referenceScan(chunks, list, style)),
+        });
+      }
+    }
+  });
+
   test("the cooperative variant yields but returns the identical hits", async () => {
     const chunks = [
       chunk("src/a.ts", "export function getUserName() {}\ngetUser();\ndocs/status.md"),
