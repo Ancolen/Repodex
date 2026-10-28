@@ -2,11 +2,11 @@
 
 Version-by-version implementation history, **newest first**. For the current done / proposed picture, see [`status.md`](./status.md); for what the tools do, [`features.md`](./features.md).
 
-> **How this repo versions:** the design uses informal "waves" (v1 → v4); the **release version** in `package.json` is bumped per wave (currently `2.8.0`). The version string lives in **five** places that must be bumped together on release: `package.json`, `src/server/mcp.ts` (`Server` info), `src/server/control-api.ts` (`/ping`), `src/stdio-bridge.ts`, and `src/cli.ts` (`CLI_VERSION`). The `web-install.sh` / Release workflow fires on a pushed `v*` git tag.
+> **How this repo versions:** the design uses informal "waves" (v1 → v4); the **release version** in `package.json` is bumped per wave (currently `2.9.0`). The version string lives in **five** places that must be bumped together on release: `package.json`, `src/server/mcp.ts` (`Server` info), `src/server/control-api.ts` (`/ping`), `src/stdio-bridge.ts`, and `src/cli.ts` (`CLI_VERSION`). The `web-install.sh` / Release workflow fires on a pushed `v*` git tag.
 
 ---
 
-## Unreleased
+## 2.9.0 (2026-10-28)
 
 ### Why: `check_docs` took two minutes on a real index, and a wedged loop went unnoticed for a day
 
