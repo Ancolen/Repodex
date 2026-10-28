@@ -840,6 +840,12 @@ describe("collectDocFiles", () => {
       writeFileSync(path.join(dir, "docs", "draft.md"), "d");
       const only = await collectDocFiles(dir, { files: ["docs/**/*.md"] });
       expect(only.files.map((f) => path.basename(f)).sort()).toEqual(["a.md", "draft.md"]);
+      // Refs are root-anchored: a leading `./` and an absolute path under the
+      // root name the same docs (discovery + requestedDocs share this form).
+      for (const ref of ["./docs/**/*.md", path.join(dir, "docs/**/*.md")]) {
+        const normalized = await collectDocFiles(dir, { files: [ref] });
+        expect(normalized.files.map((f) => path.basename(f)).sort()).toEqual(["a.md", "draft.md"]);
+      }
       const filtered = await collectDocFiles(dir, { ignore: ["docs/draft.md"] });
       expect(filtered.files.map((f) => path.basename(f)).sort()).toEqual(["README.md", "a.md"]);
     } finally {
@@ -1344,5 +1350,34 @@ describe("resolveRequestedDocs — the non-silent requested doc feedback", () =>
     // An absolute ref INSIDE the root resolves like its relative form.
     expect(resolveRequestedDocs([path.join(root, "docs/PLAN.md")], root, matched())[0])
       .toEqual({ ref: path.join(root, "docs/PLAN.md"), status: "matched" });
+  });
+
+  test("include globs (the documented `files` form) resolve as matched, not missing", () => {
+    const walked = new Set(["notes.txt"]);
+    const res = resolveRequestedDocs(
+      ["*.md", "docs/**/*.md", "docs/**/*.mdx", "./docs/*.md"],
+      root,
+      matched(),
+      walked,
+    );
+    expect(res).toEqual([
+      { ref: "*.md", status: "matched" },
+      { ref: "docs/**/*.md", status: "matched" },
+      // A glob the walk sees nothing for is still honestly reported.
+      { ref: "docs/**/*.mdx", status: "missing" },
+      // The walker normalises a leading `./`; the feedback must agree.
+      { ref: "./docs/*.md", status: "matched" },
+    ]);
+    // An absolute glob inside the root resolves like its relative form.
+    const absGlob = path.join(root, "docs/**/*.md");
+    expect(resolveRequestedDocs([absGlob], root, matched(), walked)[0])
+      .toEqual({ ref: absGlob, status: "matched" });
+  });
+
+  test("a glob naming only walked-but-undiscovered files is 'filtered'; out-of-root globs never match", () => {
+    expect(resolveRequestedDocs(["*.txt"], root, matched(), new Set(["notes.txt"]))[0])
+      .toEqual({ ref: "*.txt", status: "filtered" });
+    expect(resolveRequestedDocs(["../docs/**/*.md"], root, matched())[0])
+      .toEqual({ ref: "../docs/**/*.md", status: "outsideRoot" });
   });
 });

@@ -6,6 +6,23 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ---
 
+## Unreleased
+
+### Fixed
+
+- **`check_docs` `files` globs no longer report as `missing`** (`src/services/docfiles.ts`).
+  `files` is a root-anchored **glob** include list — the tool schema and
+  `.cidx.json` both say so, and `collectDocFiles` has always matched it that way
+  — but the `requestedDocs` feedback resolved every ref as a literal file path.
+  The canonical `["*.md", "docs/**/*.md"]` set therefore stat-failed and came
+  back `missing` with a "requested docs not included" note on every check, even
+  though those docs *were* checked (`docs: 11`). Refs now resolve with the
+  walker's own semantics: globs match the discovered docs (`matched`), the
+  walked-but-undiscovered set (`filtered`), or nothing (`missing`); literal
+  paths keep file-level resolution. Include/ignore refs are normalised once
+  (leading `./`, backslashes, absolute paths under the root), so discovery and
+  the feedback can never disagree about what a ref means.
+
 ## 2.9.0 (2026-10-28)
 
 ### Why: `check_docs` took two minutes on a real index, and a wedged loop went unnoticed for a day

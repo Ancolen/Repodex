@@ -24,6 +24,22 @@ export const DOC_MAX_WALK_FILES = 10000;
 /** Only real prose formats; code fences live inside them. */
 const DOC_EXTS = new Set([".md", ".mdx"]);
 
+/** The glob metacharacters `globToRegex` understands. */
+const GLOB_MAGIC_RE = /[*?]/;
+
+/**
+ * Normalise one include/ignore ref to the root-anchored posix vocabulary the
+ * walker matches paths in: separators become `/`, a leading `./` is dropped,
+ * and an absolute ref under the project root becomes its relative form. Shared
+ * by discovery and `resolveRequestedDocs` so the checked set and the feedback
+ * can never disagree about what a ref means.
+ */
+function rootAnchoredRef(ref: string, root: string): string {
+  if (!path.isAbsolute(ref)) return ref.replace(/\\/g, "/").replace(/^\.\//, "");
+  const rel = path.relative(root, path.resolve(ref)).replace(/\\/g, "/");
+  return rel.length === 0 ? ref.replace(/\\/g, "/") : rel;
+}
+
 export interface DocDiscovery {
   /** Absolute paths of the discovered doc files (sorted, deterministic). */
   files: string[];
@@ -53,8 +69,10 @@ export interface DocDiscoveryOpts {
  * never a throw (an unreadable project must not crash the daemon).
  */
 export async function collectDocFiles(baseDir: string, opts?: DocDiscoveryOpts): Promise<DocDiscovery> {
-  const includes = (opts?.files && opts.files.length > 0 ? opts.files : DOC_DEFAULT_INCLUDE).map(globToRegex);
-  const extraIgnore = (opts?.ignore ?? []).map(globToRegex);
+  const includes = (opts?.files && opts.files.length > 0 ? opts.files : DOC_DEFAULT_INCLUDE).map((ref) =>
+    globToRegex(rootAnchoredRef(ref, baseDir)),
+  );
+  const extraIgnore = (opts?.ignore ?? []).map((ref) => globToRegex(rootAnchoredRef(ref, baseDir)));
 
   let ig;
   try {
@@ -152,18 +170,52 @@ export async function readProjectManifest(baseDir: string): Promise<{
 
 /**
  * Resolves caller-passed doc refs (`opts.files` / `.cidx.json`
- * `doccheck.files`) against a discovered set: a ref the engine never picks up
- * is NOT silent — an out-of-root path, a non-existent file, or an on-disk file
- * excluded by the include globs / ignore rules each get their own status, so a
- * report whose checked subset reads `docs: 1` can explain itself. Pure data +
- * one fs existence check per ref (this module is the fs half of D1).
+ * `doccheck.files`) against a discovered set. Refs are **root-anchored globs**
+ * (the documented `files` form) or literal paths; either way a ref the engine
+ * never picks up is NOT silent — an out-of-root ref, a ref matching nothing, or
+ * a ref whose files were filtered away each get their own status, so a report
+ * whose checked subset reads `docs: 1` can explain itself.
+ *
+ * A glob is `matched` when it names at least one checked doc, `filtered` when
+ * it only names walked (on-disk, non-ignored) files the doc set never picked
+ * up, and `missing` when the walk sees nothing it names. A literal ref keeps
+ * file-level resolution (exists on disk → `matched`/`filtered`, absent →
+ * `missing`). Pure data + one fs existence check per literal ref (this module
+ * is the fs half of D1).
  */
 export function resolveRequestedDocs(
   refs: readonly string[],
   root: string,
   matchedAbs: ReadonlySet<string>,
+  walkedRel: ReadonlySet<string> = new Set(),
 ): Array<{ ref: string; status: "matched" | "missing" | "filtered" | "outsideRoot" }> {
+  // The discovered docs in the walker's own vocabulary (project-relative
+  // posix), so include globs resolve against exactly what discovery selected.
+  let matchedRel: Set<string> | undefined;
+  const discoveredRel = (): Set<string> => {
+    if (!matchedRel) {
+      matchedRel = new Set<string>();
+      for (const abs of matchedAbs) {
+        const rel = path.relative(root, abs);
+        if (rel.length > 0 && !rel.startsWith("..") && !path.isAbsolute(rel)) {
+          matchedRel.add(rel.replace(/\\/g, "/"));
+        }
+      }
+    }
+    return matchedRel;
+  };
+
   return refs.map((ref) => {
+    if (GLOB_MAGIC_RE.test(ref)) {
+      const glob = rootAnchoredRef(ref, root);
+      if (glob === ".." || glob.startsWith("../") || path.isAbsolute(glob)) {
+        return { ref, status: "outsideRoot" };
+      }
+      const re = globToRegex(glob);
+      if ([...discoveredRel()].some((p) => re.test(p))) return { ref, status: "matched" };
+      if ([...walkedRel].some((p) => re.test(p))) return { ref, status: "filtered" };
+      return { ref, status: "missing" };
+    }
     const abs = path.isAbsolute(ref) ? path.resolve(ref) : path.resolve(root, ref);
     const rel = path.relative(root, abs);
     if (rel.startsWith("..") || path.isAbsolute(rel)) return { ref, status: "outsideRoot" };

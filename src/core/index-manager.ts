@@ -4108,11 +4108,15 @@ export class IndexManager {
     // this the checked subset would read `docs: 1` with no hint that the rest
     // were out-of-root, missing, or swallowed by the include/ignore rules
     // (observed live: an agent re-issued 9 check_docs calls probing doc paths).
-    const requestedRefs = opts.files ?? cfg?.doccheck?.files;
-    if (requestedRefs && requestedRefs.length > 0) {
+    if (files && files.length > 0) {
       const matchedAbs = new Set<string>();
       for (const abs of discovery.files) matchedAbs.add(path.resolve(abs));
-      const requestedDocs = resolveRequestedDocs(requestedRefs, rec.path, matchedAbs);
+      const requestedDocs = resolveRequestedDocs(
+        files,
+        rec.path,
+        matchedAbs,
+        new Set(discovery.allFiles),
+      );
       report.requestedDocs = requestedDocs;
       const unmatched = requestedDocs.filter((x) => x.status !== "matched");
       if (unmatched.length > 0) {
