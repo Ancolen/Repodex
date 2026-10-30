@@ -111,6 +111,7 @@ What the tool **does today** (version 2.8.0). For what's planned, see [`status.m
 
 - **Incremental sync** (`sync`) — indexes only changed / new files and cleans up deleted ones; catches up at startup on offline changes.
 - **Live watching** — chokidar + debounce; `atomic` + `awaitWriteFinish` handle editor temp→rename saves and large copies.
+- **Non-regular files are never watched (nor their parent directory).** Bun's `fs.watch(dir)` walks the directory and `open()`s every direct child; opening a FIFO blocks until a writer appears, which parks an fs worker and — once the pool is exhausted — blocks the daemon's event loop itself. The watcher therefore gives no handle to a FIFO/socket/device (or a symlink to one) and skips any directory that directly contains one. Indexing is unaffected: `collectFiles` already filters non-regular entries, so the only loss is live-watch coverage of that directory (e.g. a probe log directory full of `host-stdin.fifo`).
 - **Deleted-file cleanup** — runs against the cached set so files removed while the daemon was down are pruned.
 
 ## Git awareness

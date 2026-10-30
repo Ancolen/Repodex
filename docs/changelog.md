@@ -6,6 +6,32 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ---
 
+## Unreleased
+
+### Fixed
+
+- **The daemon no longer hangs at startup when a watched tree contains a FIFO**
+  (`src/services/watcher.ts`). `restore()` started the watchers, then the
+  process stopped dead before opening either HTTP server: no log line, no
+  listening socket, main thread in `futex_do_wait`, ~0 CPU. The O5 event-loop
+  watchdog then SIGKILLed it every 300 s — 324 times over two days, with the
+  restart counter at 111. Root cause is in Bun 1.3's `fs.watch(directory)`:
+  it walks the directory and `open()`s every **direct child** to attach its
+  inotify handle, and `open()` on a FIFO blocks until a writer appears. One
+  FIFO parks an fs worker forever; once the pool is exhausted the next fs call
+  blocks the event loop itself, so no timer — the heartbeat included — can
+  fire. The trigger was a set of probe-run directories containing
+  `host-stdin.fifo` inside an indexed project (`logs/second-screen-probe/runs/*`),
+  reached through the project root's watcher.
+  The chokidar `ignored` predicate now rejects non-regular entries **and any
+  directory that directly contains one** (`dirHasUnwatchableChild`, cached per
+  watcher; symlinks are resolved, so a link to a FIFO counts). Rejecting the
+  parent is what actually prevents the blocking `open()` — ignoring only the
+  FIFO itself still lets Bun's directory walk reach it. Indexing is unaffected
+  (`collectFiles` filters `entry.isFile()`); only live-watch coverage of those
+  directories is dropped. Regression test:
+  `tests/watcher-ignore.test.ts` (creates a real FIFO).
+
 ## 2.9.1 (2026-10-28)
 
 ### Fixed

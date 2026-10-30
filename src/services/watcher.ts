@@ -1,4 +1,5 @@
 import chokidar, { type FSWatcher } from "chokidar";
+import { readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { CONFIG } from "../config";
 import { buildIgnoreSync, isAllowedFile, isPathIgnored, indexFile, removeFileIndex, effectiveMaxFileSizeBytes, type IndexTarget } from "./indexer";
@@ -51,12 +52,78 @@ export function startWatcher(target: IndexTarget, opts: WatchOptions = {}): FSWa
   const startupConfig = readProjectConfig(target.baseDir);
   const ig = buildIgnoreSync(target.baseDir, startupConfig?.ignore);
 
+  // Cached per watcher: chokidar asks about each directory repeatedly. A full
+  // readdir pass per directory is acceptable — the initial crawl reads them all
+  // anyway, and this is the only place that can keep Bun's `fs.watch` away from
+  // an un-openable child (see `dirHasUnwatchableChild`).
+  const unwatchableDirCache = new Map<string, boolean>();
+
+  /**
+   * True when the directory directly contains an entry Bun's `fs.watch` cannot
+   * safely open: a FIFO, socket or device node (or a symlink to one).
+   *
+   * Bun 1.3's `fs.watch(dir)` walks the directory and `open()`s every direct
+   * child to attach its inotify handle. `open()` on a FIFO blocks until a
+   * writer appears, so one such child parks an fs worker forever; once enough
+   * are parked, the NEXT fs call blocks the event loop itself (the main thread
+   * sits in `futex_do_wait` and no timer fires — the daemon hangs, keeps its
+   * sockets shut, and a supervisor's event-loop watchdog kills it in a loop).
+   *
+   * Chokidar hands no watch handle to an ignored path, so rejecting the PARENT
+   * directory keeps `fs.watch` away from it entirely; the child-level rule in
+   * the `ignored` predicate only prevents a direct watch on the FIFO, which is
+   * not where Bun blocks. Only the watcher is affected — the indexer walks the
+   * tree on its own and already skips non-regular entries (`entry.isFile()`),
+   * so nothing indexable is lost.
+   */
+  const dirHasUnwatchableChild = (dirPath: string): boolean => {
+    const cached = unwatchableDirCache.get(dirPath);
+    if (cached !== undefined) return cached;
+    let unwatchable = false;
+    try {
+      for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
+        if (entry.isFile() || entry.isDirectory()) continue;
+        if (entry.isSymbolicLink()) {
+          // A symlink is opened through to its target — only a link to a
+          // non-regular file can block. A dangling link fails fast (ENOENT).
+          try {
+            const target = statSync(path.join(dirPath, entry.name));
+            if (target.isFile() || target.isDirectory()) continue;
+          } catch {
+            continue;
+          }
+          unwatchable = true;
+          break;
+        }
+        unwatchable = true; // FIFO / socket / block or char device
+        break;
+      }
+    } catch {
+      // Unreadable directory: nothing to protect, let chokidar decide.
+      unwatchable = false;
+    }
+    unwatchableDirCache.set(dirPath, unwatchable);
+    return unwatchable;
+  };
+
   const watcher = chokidar.watch(target.baseDir, {
     // Files the indexer would never read get no watch handle (the extension
     // rule); directories stay traversable. `stats` is provided by chokidar's
     // matcher (see chokidar's docs); when absent, only ignore rules apply.
-    ignored: (p: string, stats?: { isFile(): boolean }) =>
-      isPathIgnored(ig, target.baseDir, p) || (stats?.isFile() === true && !isAllowedFile(p)),
+    //
+    // NON-REGULAR entries (FIFO, socket, device) must be rejected here, not
+    // just filtered at event time: chokidar opens a watch handle per accepted
+    // path. A probe run directory full of `host-stdin.fifo`
+    // (logs/second-screen-probe/runs/*) did exactly that: the daemon hung at
+    // startup right after restoring watchers, never opened its servers, and
+    // the event-loop watchdog kept SIGKILLing it every 5 minutes. The indexer
+    // already skips these (`entry.isFile()` in collectFiles), so nothing
+    // indexable is lost.
+    ignored: (p: string, stats?: { isFile(): boolean; isDirectory(): boolean }) =>
+      isPathIgnored(ig, target.baseDir, p) ||
+      (stats !== undefined && !stats.isFile() && !stats.isDirectory()) ||
+      (stats?.isDirectory() === true && dirHasUnwatchableChild(p)) ||
+      (stats?.isFile() === true && !isAllowedFile(p)),
     persistent: true,
     ignoreInitial: true,
     // Properly handle editors' atomic saves (write to temp file then rename).
