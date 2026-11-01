@@ -2,7 +2,62 @@
 
 Version-by-version implementation history, **newest first**. For the current done / proposed picture, see [`status.md`](./status.md); for what the tools do, [`features.md`](./features.md).
 
-> **How this repo versions:** the design uses informal "waves" (v1 → v4); the **release version** in `package.json` is bumped per wave (currently `2.9.2`). The version string lives in **five** places that must be bumped together on release: `package.json`, `src/server/mcp.ts` (`Server` info), `src/server/control-api.ts` (`/ping`), `src/stdio-bridge.ts`, and `src/cli.ts` (`CLI_VERSION`). The `web-install.sh` / Release workflow fires on a pushed `v*` git tag.
+> **How this repo versions:** the design uses informal "waves" (v1 → v4); the **release version** in `package.json` is bumped per wave (currently `2.9.3`). The version string lives in **five** places that must be bumped together on release: `package.json`, `src/server/mcp.ts` (`Server` info), `src/server/control-api.ts` (`/ping`), `src/stdio-bridge.ts`, and `src/cli.ts` (`CLI_VERSION`). The `web-install.sh` / Release workflow fires on a pushed `v*` git tag.
+
+---
+
+## 2.9.3 (2026-11-01)
+
+### Fixed — the watchdog that could not fire
+
+- **An external, out-of-process watchdog for the daemon** (`src/core/systemd-watchdog.ts`,
+  `src/index.ts`, installers). The O5 watchdog lives inside the process as a Bun
+  Worker; it catches a blocked main thread (reproduced with an `Atomics.wait`
+  wedge: the worker thread still ticks and SIGKILLs the process). On 2026-11-01
+  the daemon wedged in a way that froze every thread: both ports stayed bound,
+  new connections queued in the accept backlog and were never read, CPU sat at
+  0 %, `ss` showed ~20 pending connections — and the watchdog logged nothing,
+  because its own thread could not run either. Claude's MCP client therefore
+  failed with `CONNECT_TIMEOUT` ("connecting") while systemd saw a healthy
+  service.
+  The daemon now sends `sd_notify` heartbeats (`READY=1`, `WATCHDOG=1`) from a
+  **main-loop** timer through `bun:ffi` → `libsystemd.so.0`, and the installer's
+  unit ships `WatchdogSec=300`. When the loop stops beating — for any reason,
+  including a runtime-wide deadlock — systemd (a different process) kills the
+  unit and `Restart=on-failure` brings it back. The ping cadence is systemd's
+  `WATCHDOG_USEC/2` (clamped to 1–30 s); the module is a no-op outside systemd
+  or when the unit does not set `WatchdogSec=`. The in-process worker remains
+  the first line of defense, and the two thresholds stay aligned at 5 minutes
+  (`daemon.watchdogMinutes` / `WatchdogSec`).
+
+### Fixed — descriptor usage is now visible, bounded, and avoidable
+
+- **`cidx doctor` reports the watcher descriptor budget** (`src/services/resources.ts`,
+  `src/core/doctor.ts`). Measured Bun 1.3 behaviour: `fs.watch` opens and holds
+  one descriptor per watched path, and watching a directory opens **every
+  direct child** (non-recursive too). A project therefore costs roughly one fd
+  per file under it; on this host the daemon held ~13.8k fds for ~11k indexed
+  files (fine under `LimitNOFILE=524288`, fatal on stock limits). The new
+  `resources` check reports fds vs `RLIMIT_NOFILE` and inotify watches vs
+  `fs.inotify.max_user_watches`, warns at 50 % and fails at 85 %, with the
+  actionable hint. Regression: `tests/doctor.test.ts`.
+- **The installers raise the fd budget** (`install.sh`, `web-install.sh`):
+  `LimitNOFILE=524288` in the generated systemd unit.
+- **New `watcher.polling` (default off) + `watcher.pollIntervalMs` (default
+  1000 ms, clamped ≥ 50)** (`src/config.ts`, `src/services/watcher.ts`). Polling
+  runs chokidar's stat-based backend: **zero watch descriptors** (and the FIFO
+  hazard disappears, since Bun's `fs.watch` is not used), trading them for a
+  periodic stat sweep — the right option for very large trees or low
+  `LimitNOFILE` / inotify budgets. Measured (1,200 files, 500 ms interval):
+  0 fds, ~73 ms CPU over 5 s.
+- **Directory-level ignores are the fd lever, and the docs now say so.** An
+  experiment with chokidar showed that rejecting files at the `ignored` level
+  does **not** reduce descriptors (the parent directory watch opened them
+  anyway), while rejecting subdirectories does (1,200 files: ~1,205 → ~305 fds).
+  The existing `.cidxignore` / `ignoredDirs` machinery is therefore the way to
+  trim the watch set.
+- **Watcher startup logs `initial crawl done in N ms`**, so a slow or repeated
+  crawl — the shape of the 2026-11-01 wedge — is visible in the journal.
 
 ---
 
