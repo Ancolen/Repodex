@@ -7,6 +7,7 @@ import { BridgeSessionRegistry } from "./core/bridgesessions";
 import { DaemonEventRing } from "./core/events";
 import { shouldIdleShutdown, IDLE_TICK_MS } from "./core/idle";
 import { startLoopWatchdog } from "./core/watchdog";
+import { startSystemdWatchdog } from "./core/systemd-watchdog";
 import { startMcpServer } from "./server/mcp";
 import { startControlApi } from "./server/control-api";
 
@@ -16,6 +17,10 @@ async function main(): Promise<void> {
   // every client timing out, so nothing inside the loop can notice it. Armed
   // before any traffic; `daemon.watchdogMinutes` 0 turns it off.
   const watchdog = startLoopWatchdog(CONFIG.WATCHDOG_MINUTES);
+  // External half of the same net: systemd's WatchdogSec= survives a
+  // runtime-wide deadlock that also freezes the in-process worker thread (the
+  // 2026-11-01 incident). No-op unless the unit sets WatchdogSec=.
+  const systemdWatchdog = startSystemdWatchdog();
   console.error(`[init] Configuration: ${CONFIG_SOURCE ?? "(defaults)"}`);
   const registry = new Registry();
   const jobQueue = new JobQueue({ registry, concurrency: CONFIG.JOB_CONCURRENCY });
@@ -65,6 +70,7 @@ async function main(): Promise<void> {
       // it's fine if it's already closed
     }
     watchdog?.stop();
+    systemdWatchdog?.stop();
     process.exit(0);
   };
 

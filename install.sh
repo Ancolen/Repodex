@@ -222,6 +222,14 @@ ExecStart=$BUN_BIN run $REPO_DIR/src/index.ts
 # cidx command / MCP session auto-starts the daemon again.
 Restart=on-failure
 RestartSec=3
+# External watchdog (the daemon pings WATCHDOG=1 from its event loop). Unlike
+# the in-process watchdog thread, this survives a runtime-wide deadlock — the
+# 2026-11-01 wedge, where every thread was futex-waiting and nothing restarted
+# the daemon. Keep this aligned with daemon.watchdogMinutes.
+WatchdogSec=300
+# Bun's fs.watch holds one descriptor per watched path (watching a directory
+# opens every direct child), so a large source tree needs a matching fd budget.
+LimitNOFILE=524288
 $home_env
 # Settings can also be overridden via environment variables:
 # Environment=OLLAMA_URL=http://127.0.0.1:11434
