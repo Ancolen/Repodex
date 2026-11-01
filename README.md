@@ -140,6 +140,11 @@ For automatic startup at boot, user `linger` is enabled; manually if needed:
 sudo loginctl enable-linger "$USER"
 ```
 
+The generated unit also carries two health settings worth knowing about:
+
+- **`WatchdogSec=300`** — the daemon pings systemd from its event loop. If the loop stops beating (a blocked native call, or a runtime-wide deadlock that freezes even the in-process watchdog thread), systemd restarts the service. A wedged daemon can no longer sit alive-but-unreachable until someone notices.
+- **`LimitNOFILE=524288`** — Bun's `fs.watch` holds one descriptor per watched path (watching a directory opens every direct child), so a large source tree needs a matching fd budget. `cidx doctor` reports current usage against `RLIMIT_NOFILE` and `fs.inotify.max_user_watches`. If your watch set is too large for the host, set `watcher.polling: true` in `~/.cidx/config.yml` — the watcher then stat-polls (no watch descriptors, periodic stat sweep) instead of holding a handle per file.
+
 > **daemon service vs `cidx start`:** the systemd service runs and supervises `src/index.ts` (the daemon itself) in the foreground and restarts it if it crashes. `cidx start`, on the other hand, is a helper that starts the daemon in the background if it isn't running — if the service is already running it says "already running". If the control port accepts connections but does not answer `/ping`, `cidx start` reports the daemon as **busy** (a long synchronous report pass occupies its event loop) instead of spawning a second daemon that cannot bind; only when no daemon port is answering *and* the MCP port is still held does it diagnose a wedged daemon and point at `systemctl --user restart cidx.service`. The two can be used together safely.
 
 ### Uninstall
