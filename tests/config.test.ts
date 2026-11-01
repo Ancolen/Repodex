@@ -137,6 +137,25 @@ describe("config — defaults and environment variable overrides", () => {
     expect(invalid.CONFIG.EMBED_READY_TIMEOUT_MS).toBe(20000);
   });
 
+  test("watcher polling is off by default; WATCH_POLLING / WATCH_POLL_INTERVAL_MS override it", async () => {
+    const def = await runConfig({});
+    expect(def.CONFIG.WATCH_POLLING).toBe(false);
+    expect(def.CONFIG.WATCH_POLL_INTERVAL_MS).toBe(1000);
+
+    const on = await runConfig({ WATCH_POLLING: "true", WATCH_POLL_INTERVAL_MS: "2500" });
+    expect(on.CONFIG.WATCH_POLLING).toBe(true);
+    expect(on.CONFIG.WATCH_POLL_INTERVAL_MS).toBe(2500);
+
+    const off = await runConfig({ WATCH_POLLING: "0" });
+    expect(off.CONFIG.WATCH_POLLING).toBe(false);
+    const junk = await runConfig({ WATCH_POLLING: "yes" });
+    expect(junk.CONFIG.WATCH_POLLING).toBe(false);
+
+    // A sub-50 ms sweep would be a stat storm; the resolver clamps it.
+    const clamped = await runConfig({ WATCH_POLLING: "true", WATCH_POLL_INTERVAL_MS: "1" });
+    expect(clamped.CONFIG.WATCH_POLL_INTERVAL_MS).toBe(50);
+  });
+
   test("boost defaults: on, with the S3 weights and the conventional source roots", async () => {
     const { CONFIG } = await runConfig({});
     expect(CONFIG.BOOST_ENABLED).toBe(true);

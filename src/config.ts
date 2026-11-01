@@ -105,7 +105,19 @@ export interface IndexerConfig {
     /** Number of indexing jobs that can run at the same time (worker pool). */
     jobConcurrency: number;
   };
-  watcher: { debounceMs: number };
+  watcher: {
+    /** Reindex delay after a file change. */
+    debounceMs: number;
+    /**
+     * Watch by stat polling instead of Bun's `fs.watch`. Bun opens and holds
+     * one descriptor per watched path (including every direct child of a
+     * watched directory), so a large tree costs one fd per file under it;
+     * polling holds none, at the cost of a periodic stat sweep. Off by default.
+     */
+    polling: boolean;
+    /** Stat sweep interval when `polling` is on (ms). */
+    pollIntervalMs: number;
+  };
   search: {
     /**
      * Max rows kept in the local query log (search analytics, proposal A3):
@@ -284,7 +296,7 @@ const DEFAULTS: IndexerConfig = {
     docstrings: true,
     jobConcurrency: 2,
   },
-  watcher: { debounceMs: 300 },
+  watcher: { debounceMs: 300, polling: false, pollIntervalMs: 1000 },
   search: {
     queryLogSize: 10000,
     expand: { model: "", url: "", maxVariants: 3, timeoutMs: 10000 },
@@ -380,10 +392,12 @@ doccheck:
 
 watcher:
   debounceMs: ${DEFAULTS.watcher.debounceMs}        # reindexing delay after a file change
+  polling: ${DEFAULTS.watcher.polling}              # stat-poll instead of Bun fs.watch: no per-file watch descriptors (Bun holds one per watched path) but a periodic stat sweep; use on huge trees / low fd or inotify limits
+  pollIntervalMs: ${DEFAULTS.watcher.pollIntervalMs}         # stat sweep interval when polling is on (ms)
 
 daemon:
   idleTimeoutMinutes: ${DEFAULTS.daemon.idleTimeoutMinutes}        # exit the daemon after N minutes without activity (requests, index jobs, open MCP sessions); 0 = off. Every cidx command / MCP entry point restarts it on demand.
-  watchdogMinutes: ${DEFAULTS.daemon.watchdogMinutes}           # if the event loop stops beating for this many minutes, a watchdog thread exits the process so the supervisor restarts it; 0 = off
+  watchdogMinutes: ${DEFAULTS.daemon.watchdogMinutes}           # if the event loop stops beating for this many minutes, an in-process watchdog thread exits the process so the supervisor restarts it; 0 = off. The shipped systemd unit ALSO sets WatchdogSec=300 (external, survives a runtime-wide deadlock) — keep the two aligned
 `;
 
 // ---- helpers ----
@@ -548,7 +562,21 @@ export const RESOLVED: IndexerConfig = {
       y.indexing?.jobConcurrency ??
       DEFAULTS.indexing.jobConcurrency,
   },
-  watcher: { debounceMs: y.watcher?.debounceMs ?? DEFAULTS.watcher.debounceMs },
+  watcher: {
+    debounceMs: y.watcher?.debounceMs ?? DEFAULTS.watcher.debounceMs,
+    polling:
+      envBool(process.env.WATCH_POLLING) ??
+      (typeof y.watcher?.polling === "boolean" ? y.watcher.polling : DEFAULTS.watcher.polling),
+    // A zero/negative (or non-numeric YAML) sweep interval would mean a stat
+    // storm; clamp to 50 ms.
+    pollIntervalMs: Math.max(
+      50,
+      num(process.env.WATCH_POLL_INTERVAL_MS) ??
+        (typeof y.watcher?.pollIntervalMs === "number"
+          ? y.watcher.pollIntervalMs
+          : DEFAULTS.watcher.pollIntervalMs),
+    ),
+  },
   search: {
     queryLogSize:
       num(process.env.QUERY_LOG_SIZE) ?? y.search?.queryLogSize ?? DEFAULTS.search.queryLogSize,
@@ -667,6 +695,8 @@ export const CONFIG = {
   JOB_CONCURRENCY: RESOLVED.indexing.jobConcurrency,
 
   WATCH_DEBOUNCE_MS: RESOLVED.watcher.debounceMs,
+  WATCH_POLLING: RESOLVED.watcher.polling,
+  WATCH_POLL_INTERVAL_MS: RESOLVED.watcher.pollIntervalMs,
 
   RERANK_ENABLED: RESOLVED.search.rerank.enabled,
   RERANK_MODEL: RESOLVED.search.rerank.model,

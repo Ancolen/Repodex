@@ -620,6 +620,71 @@ export function diskCheck(s: DiskUsageState): DoctorCheck {
   return check("disk", "disk usage", "ok", parts.join(" · "));
 }
 
+export interface ResourcesCheckState {
+  /** Soft `RLIMIT_NOFILE`, null when the platform does not expose it. */
+  fdLimit: number | null;
+  /** Open descriptors of the daemon process. */
+  openFds: number | null;
+  /** `fs.inotify.max_user_watches`. */
+  inotifyLimit: number | null;
+  /** inotify watches held by the daemon process. */
+  inotifyWatches: number | null;
+  /** True when `watcher.polling` is on (no watch descriptors are held). */
+  polling: boolean;
+}
+
+/** Warn at half the budget, fail at 85 % — beyond that watch failures are likely. */
+const RESOURCE_WARN_RATIO = 0.5;
+const RESOURCE_FAIL_RATIO = 0.85;
+
+function usageRatio(used: number | null, limit: number | null): number | null {
+  if (used === null || limit === null || limit <= 0) return null;
+  return used / limit;
+}
+
+/**
+ * Check — watcher descriptor budget. Bun's `fs.watch` holds one open descriptor
+ * per watched path (watching a directory opens every direct child), so the
+ * watcher's memory cost is proportional to the file count under the watched
+ * trees; inotify watches are a second, separate kernel budget
+ * (`fs.inotify.max_user_watches`, often 8,192–65,536 on stock systems). This
+ * check makes both visible before the watcher starts failing.
+ */
+export function resourcesCheck(s: ResourcesCheckState): DoctorCheck {
+  if (s.polling) {
+    return check(
+      "resources",
+      "watcher resources",
+      "ok",
+      "polling mode — the watcher holds no watch descriptors (periodic stat sweeps instead)",
+    );
+  }
+  const fdRatio = usageRatio(s.openFds, s.fdLimit);
+  const watchRatio = usageRatio(s.inotifyWatches, s.inotifyLimit);
+  const ratios = [fdRatio, watchRatio].filter((r): r is number => r !== null);
+  if (ratios.length === 0) {
+    return check("resources", "watcher resources", "ok", "descriptor usage not measurable on this platform");
+  }
+  const parts: string[] = [];
+  if (fdRatio !== null) parts.push(`fds ${s.openFds}/${s.fdLimit} (${(fdRatio * 100).toFixed(1)}%)`);
+  if (watchRatio !== null) {
+    parts.push(`inotify watches ${s.inotifyWatches}/${s.inotifyLimit} (${(watchRatio * 100).toFixed(1)}%)`);
+  }
+  const worst = Math.max(...ratios);
+  if (worst < RESOURCE_WARN_RATIO) {
+    return check("resources", "watcher resources", "ok", parts.join(" · "));
+  }
+  return check(
+    "resources",
+    "watcher resources",
+    worst >= RESOURCE_FAIL_RATIO ? "fail" : "warn",
+    parts.join(" · "),
+    "Bun's fs.watch holds one descriptor per watched path: ignore large generated trees " +
+      "(indexing.ignoredDirs / .cidxignore), set watcher.polling: true, or raise " +
+      "LimitNOFILE / fs.inotify.max_user_watches",
+  );
+}
+
 // ------------------------------------------------------- disk size walk (fs)
 
 /**
@@ -729,6 +794,8 @@ export interface DoctorPorts {
   readText(filePath: string): Promise<string | null>;
   /** Measured sizes of the data root. */
   diskUsage(): DiskUsageState;
+  /** Live descriptor / inotify usage of the daemon process. */
+  resources(): ResourcesCheckState;
   /** The config values the verdicts depend on (already resolved by the daemon). */
   settings: {
     home: string;
@@ -831,6 +898,9 @@ export async function runDoctor(ports: DoctorPorts): Promise<DoctorReport> {
 
   // 6 — disk usage.
   checks.push(diskCheck(ports.diskUsage()));
+
+  // 7 — watcher descriptor budget (Bun's fs.watch holds one fd per watched path).
+  checks.push(resourcesCheck(ports.resources()));
 
   return { status: aggregateStatus(checks), checks, home: settings.home };
 }

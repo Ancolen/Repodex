@@ -23,6 +23,7 @@ import {
   projectCheck,
   projectFindings,
   rerankerCheck,
+  resourcesCheck,
   runDoctor,
   type DoctorPorts,
   type ProjectDoctorState,
@@ -85,6 +86,13 @@ function ports(overrides: Partial<DoctorPorts> = {}): DoctorPorts {
       entries: [{ name: "db", bytes: 2048 }],
       tables: [{ name: "idx_api", bytes: 2048 }],
       errors: 0,
+    }),
+    resources: () => ({
+      fdLimit: 524288,
+      openFds: 100,
+      inotifyLimit: 524288,
+      inotifyWatches: 100,
+      polling: false,
     }),
     settings: {
       home: "/home/dev/.cidx",
@@ -524,6 +532,58 @@ describe("doctor — disk usage", () => {
   });
 });
 
+// --------------------------------------------------------------- resources
+
+describe("doctor — resourcesCheck (watcher descriptor budget)", () => {
+  const base = {
+    fdLimit: 524288,
+    openFds: 13_788,
+    inotifyLimit: 524288,
+    inotifyWatches: 12_089,
+    polling: false,
+  };
+
+  test("polling mode holds no watch descriptors → ok", () => {
+    const c = resourcesCheck({ ...base, polling: true });
+    expect(c.status).toBe("ok");
+    expect(c.detail).toContain("polling");
+  });
+
+  test("low usage is ok and reports both budgets", () => {
+    const c = resourcesCheck(base);
+    expect(c.status).toBe("ok");
+    expect(c.detail).toContain("fds 13788/524288 (2.6%)");
+    expect(c.detail).toContain("inotify watches 12089/524288 (2.3%)");
+    expect(c.hint).toBeUndefined();
+  });
+
+  test("warn at half the fd budget, fail at 85 %", () => {
+    const warn = resourcesCheck({ ...base, openFds: 300_000 });
+    expect(warn.status).toBe("warn");
+    expect(warn.hint).toContain("watcher.polling");
+    const fail = resourcesCheck({ ...base, openFds: 500_000 });
+    expect(fail.status).toBe("fail");
+  });
+
+  test("the inotify watch budget counts too", () => {
+    const c = resourcesCheck({ ...base, inotifyLimit: 20_000, inotifyWatches: 12_000 });
+    expect(c.status).toBe("warn");
+    expect(c.detail).toContain("inotify watches 12000/20000 (60.0%)");
+  });
+
+  test("unmeasurable platforms stay ok", () => {
+    const c = resourcesCheck({
+      fdLimit: null,
+      openFds: null,
+      inotifyLimit: null,
+      inotifyWatches: null,
+      polling: false,
+    });
+    expect(c.status).toBe("ok");
+    expect(c.detail).toContain("not measurable");
+  });
+});
+
 // --------------------------------------------------------------- aggregate
 
 describe("doctor — aggregateStatus", () => {
@@ -564,7 +624,7 @@ describe("doctor — runDoctor (collector over fake ports)", () => {
 
     expect(report.status).toBe("ok");
     expect(report.checks.map((c) => c.id)).toEqual([
-      "backend", "reranker", "project:api", "tables", "config", "disk",
+      "backend", "reranker", "project:api", "tables", "config", "disk", "resources",
     ]);
     for (const c of report.checks) expect(c.status).toBe("ok");
     expect(byId(report.checks, "project:api")?.detail).toContain("schema current");

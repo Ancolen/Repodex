@@ -10,6 +10,7 @@ import { collectStats, compactBusyMessage, jobIsActive, type StatsPorts } from "
 import { countTableRows, listTables, tableColumns, tableStats } from "../services/db";
 import { probeOllama, resolveEmbedBackend } from "../services/embed";
 import { probeLlamaServer } from "../services/llamacpp";
+import { measureProcessResources } from "../services/resources";
 import type { JobQueue } from "../core/job-queue";
 import { indexNotFoundMessage } from "../core/index-manager";
 import type { IndexManager } from "../core/index-manager";
@@ -100,6 +101,7 @@ function doctorPorts(deps: ControlDeps): DoctorPorts {
       }
     },
     diskUsage: () => measureDiskUsage(CONFIG.ROOT_DIR),
+    resources: () => ({ ...measureProcessResources(), polling: CONFIG.WATCH_POLLING }),
     settings: {
       home: CONFIG.ROOT_DIR,
       dbDir: CONFIG.DB_DIR,

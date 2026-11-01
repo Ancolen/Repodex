@@ -44,11 +44,19 @@ export function startWatcher(target: IndexTarget, opts: WatchOptions = {}): FSWa
   const debounceMs = opts.debounceMs ?? CONFIG.WATCH_DEBOUNCE_MS;
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
   // The ignore matcher must exist BEFORE chokidar's first traversal: chokidar
-  // opens a watch handle per accepted file, so filtering only at event time
+  // opens a watch handle per accepted path, so filtering only at event time
   // (the old behavior) still watched every file in ignored trees — e.g. a
   // Python `.venv` with ~75k files held ~75k fds. Same sources/precedence as
   // the full index (`buildIgnore`); rules are read once at startup, matching
   // the `.cidxignore` semantics documented below.
+  //
+  // The effective lever is the DIRECTORY rule. Bun 1.3's `fs.watch(dir)` opens
+  // every direct child to attach its inotify handle (even non-recursively), so
+  // file-level rejection does not save descriptors by itself — measured: a
+  // tree of 1,200 files under four directories holds ~1,200 fds whether files
+  // are ignored or not, while rejecting the subdirectories drops it to ~300.
+  // `watcher.polling` removes the cost entirely (chokidar stats files instead
+  // of watching them).
   const startupConfig = readProjectConfig(target.baseDir);
   const ig = buildIgnoreSync(target.baseDir, startupConfig?.ignore);
 
@@ -106,6 +114,7 @@ export function startWatcher(target: IndexTarget, opts: WatchOptions = {}): FSWa
     return unwatchable;
   };
 
+  const crawlStartedAt = Date.now();
   const watcher = chokidar.watch(target.baseDir, {
     // Files the indexer would never read get no watch handle (the extension
     // rule); directories stay traversable. `stats` is provided by chokidar's
@@ -134,6 +143,13 @@ export function startWatcher(target: IndexTarget, opts: WatchOptions = {}): FSWa
       stabilityThreshold: 200,
       pollInterval: 50,
     },
+    // `watcher.polling`: chokidar's stat-based backend. No watch descriptors
+    // are held at all (Bun's fs.watch holds one fd per watched path), at the
+    // cost of a stat sweep every `pollIntervalMs`. Useful for very large trees
+    // or tight RLIMIT_NOFILE / fs.inotify.max_user_watches budgets.
+    usePolling: CONFIG.WATCH_POLLING,
+    interval: CONFIG.WATCH_POLL_INTERVAL_MS,
+    binaryInterval: CONFIG.WATCH_POLL_INTERVAL_MS,
   });
 
   /** The event's target with the record's CURRENT table name (an O2 migration swaps it). */
@@ -254,6 +270,16 @@ export function startWatcher(target: IndexTarget, opts: WatchOptions = {}): FSWa
         console.error(`[watcher] watch error:`, err);
       }
     });
+
+  // The initial crawl is what opens the watch handles (and, with Bun's
+  // fs.watch, the per-path fds). Logging its duration makes a slow or repeated
+  // crawl — the shape of the 2026-11-01 wedge — visible in the journal.
+  watcher.on("ready", () => {
+    console.error(
+      `[watcher] '${target.indexName}' initial crawl done in ${Date.now() - crawlStartedAt} ms` +
+        (CONFIG.WATCH_POLLING ? " (polling)" : ""),
+    );
+  });
 
   console.error(`[watcher] Watching: ${target.baseDir}`);
   return watcher;
