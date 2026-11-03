@@ -25,6 +25,8 @@ The design of `cidx` (`cidx` / `repodex`): a single long-lived Bun daemon that v
 > **Version pinning (chunking):** `web-tree-sitter@0.22.6` + `tree-sitter-wasms@0.1.13`. The grammars are compiled against the tree-sitter-cli 0.20.x ABI; with web-tree-sitter 0.25+ they throw a `getDylinkMetadata` error. 0.22.6 is compatible.
 >
 > **GDScript exception (vendored wasm):** `tree-sitter-wasms@0.1.13` (frozen) has no gdscript, so the GDScript grammar is **vendored at `src/chunking/wasm/tree-sitter-gdscript.wasm`** and built by `scripts/build-gdscript-wasm.sh` from `tree-sitter-gdscript@2.0.0` (MIT, PrestonKnopp; Godot-4-capable, external scanner included) — compiled as shipped (`tree-sitter-cli@0.20.8` `build-wasm`, **no `generate`** — regenerating could shift the ABI/node shapes) inside `emscripten/emsdk:3.1.61` docker. The script hard-fails unless `src/parser.c` still declares `LANGUAGE_VERSION 14` (web-tree-sitter 0.22.6 accepts 13–14 only). Built wasm: ~200 KB, sha256 `33e7de5db98e…`. Any grammar bump must re-pass the interleaved-determinism suite (`tests/tree-sitter.test.ts`) — the Lua precedent.
+>
+> **WASM heap discipline (2.9.4):** every parse site (`chunkCode`, `extractImports`, `parseHasError`) frees its tree explicitly with `tree.delete()` in a `finally`. The shared Emscripten `WebAssembly.Memory` is capped at **2 GiB** (32768 pages in 0.22.6) and **never shrinks**; GC-finalizer-only cleanup let live trees ratchet the heap to the cap across a multi-thousand-file index (2026-11-03: a resident 2 GiB mapping, 89 `Aborted()` OOM aborts, ~8 GB daemon RSS). New parse call sites must follow the same rule.
 
 ## Core architecture decisions
 

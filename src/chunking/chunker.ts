@@ -441,8 +441,19 @@ export async function chunkCode(filePath: string, content: string): Promise<Chun
     parser.setLanguage(lang);
     const tree = parser.parse(content);
     if (!tree) return fallbackChunks(content, language);
-    const chunks = astChunks(tree.rootNode, content, language);
-    return chunks.length > 0 ? chunks : fallbackChunks(content, language);
+    // `web-tree-sitter` keeps the AST in the shared Emscripten WASM heap. That
+    // WebAssembly.Memory is capped at 2 GiB (32768 pages in 0.22.6) and never
+    // shrinks. Relying on the JS GC finalizer alone lets live trees pile up
+    // between collections: a multi-thousand-file index grew the heap to the cap
+    // and every subsequent parse aborted (observed 2026-11-03, 89 `Aborted()`
+    // lines + a 2 GiB resident mapping). Free the tree deterministically —
+    // chunks already hold plain strings, never tree nodes.
+    try {
+      const chunks = astChunks(tree.rootNode, content, language);
+      return chunks.length > 0 ? chunks : fallbackChunks(content, language);
+    } finally {
+      tree.delete();
+    }
   } catch {
     return fallbackChunks(content, language);
   }

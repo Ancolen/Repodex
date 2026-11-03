@@ -448,5 +448,12 @@ export async function extractImports(filePath: string, content: string): Promise
   }
   if (!tree) return [];
 
-  return collectImports(tree.rootNode, language);
+  try {
+    return collectImports(tree.rootNode, language);
+  } finally {
+    // Same shared-WASM discipline as `chunkCode`: free the AST deterministically
+    // instead of waiting for the JS GC finalizer (the heap is capped at 2 GiB
+    // and never shrinks).
+    tree.delete();
+  }
 }

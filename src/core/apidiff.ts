@@ -405,7 +405,12 @@ async function parseHasError(ext: string, content: string): Promise<boolean> {
     const parser = await getParser();
     parser.setLanguage(lang);
     const tree = parser.parse(content);
-    return tree ? tree.rootNode.hasError : false;
+    try {
+      return tree ? tree.rootNode.hasError : false;
+    } finally {
+      // Shared-WASM discipline: free the AST now; the heap never shrinks.
+      tree?.delete();
+    }
   } catch {
     return false;
   }
