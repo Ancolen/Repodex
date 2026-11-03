@@ -6,9 +6,9 @@ This folder is the **canonical, living documentation** for the project. The root
 
 ## At a glance
 
-- **Current version:** `2.9.4` (tree-sitter WASM heap fix — every AST parse now frees its tree, capping the shared 2 GiB heap; `cidx compact --prune-days` for explicit old-version cleanup. Prior `2.9.3` added the external systemd watchdog + watcher descriptor budget.)
+- **Current version:** `2.9.5` (batched + pipelined full index — per-file LanceDB commits replaced by 64-file slice commits and a bounded file pool, one shared embed semaphore; measured 596 files / 17,073 chunks: 7.98 s → 2.23 s on an instant backend). Prior `2.9.4` fixed the tree-sitter WASM heap (every AST parse frees its tree) and added `cidx compact --prune-days`; `2.9.3` added the external systemd watchdog + watcher descriptor budget.
 - **Status:** core architecture, hybrid search (rerank / MMR / docstring legs / boost), multi-language chunking (incl. Godot), every code-intelligence tool, and all robustness/security fixes are **complete and stable** — the proposals backlog is empty. See [`status.md`](./status.md) for the full done / not-done breakdown.
-- **Test suite:** `bun test` — 1138/1138 passing (3717 expectations), including a persistent daemon/Control-API integration battery (`tests/integration/`).
+- **Test suite:** `bun test` — 1149/1149 passing (3747 expectations), including a persistent daemon/Control-API integration battery (`tests/integration/`).
 
 ## Documentation map
 
