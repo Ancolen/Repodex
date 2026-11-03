@@ -481,6 +481,8 @@ indexing:
   respectGitignore: true      # also obey .gitignore rules
   gitTrackedOnly: false       # if true, index only git-tracked files
   jobConcurrency: 2           # number of projects (jobs) indexed in parallel at the same time
+  fileConcurrency: 4          # files a full index prepares concurrently (overlaps chunking with embedding I/O); total embed requests still capped by ollama.concurrency
+  writeBatchFiles: 64         # files committed per LanceDB write batch (one delete+add per slice, not per file); 1 = legacy per-file commits
 
 daemon:
   idleTimeoutMinutes: 0       # exit after N minutes without activity (requests, jobs, open MCP sessions); 0 = off; every entry point restarts the daemon on demand
@@ -497,7 +499,7 @@ watcher:
   debounceMs: 300
 ```
 
-**Priority:** in-code defaults < YAML < environment variables. Environment variables can also be used for a quick temporary override: `CIDX_HOME`, `EMBED_PROVIDER`, `LLAMACPP_URL`, `EMBEDDING_FRAMING`, `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX`, `MCP_PORT`, `CONTROL_PORT`, `EMBED_BATCH_SIZE`, `EMBED_CONCURRENCY`, `EMBED_CACHE_MAX`, `MAX_CHUNK_TOKENS`, `MAX_FILE_SIZE_BYTES`, `VECTOR_INDEX_THRESHOLD`, `JOB_CONCURRENCY`, `QUERY_LOG_SIZE`, `EXPAND_MODEL`, `EXPAND_URL`, `EXPAND_MAX_VARIANTS`, `EXPAND_TIMEOUT_MS`, `BOOST_ENABLED`, `BOOST_SHORT_PATH`, `BOOST_SOURCE_ROOT`, `BOOST_TEST_DEMOTION`, `BOOST_GENERATED_DEMOTION`, `RERANK_MODEL`, `RERANK_URL`, `RERANK_TOP_K`, `RERANK_CONCURRENCY`, `RERANK_NUM_CTX`, `MMR_LAMBDA`, `MMR_TOP_K`, `DOC_CHECK_JUDGE_MODEL`, `DOC_CHECK_JUDGE_URL`, `DOC_CHECK_WATCH`, `DAEMON_IDLE_TIMEOUT_MINUTES`. You can define additional ignore rules by placing a `.cidxignore` at a project root (`.gitignore` is also obeyed).
+**Priority:** in-code defaults < YAML < environment variables. Environment variables can also be used for a quick temporary override: `CIDX_HOME`, `EMBED_PROVIDER`, `LLAMACPP_URL`, `EMBEDDING_FRAMING`, `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX`, `MCP_PORT`, `CONTROL_PORT`, `EMBED_BATCH_SIZE`, `EMBED_CONCURRENCY`, `EMBED_CACHE_MAX`, `MAX_CHUNK_TOKENS`, `MAX_FILE_SIZE_BYTES`, `VECTOR_INDEX_THRESHOLD`, `JOB_CONCURRENCY`, `INDEX_FILE_CONCURRENCY`, `INDEX_WRITE_BATCH_FILES`, `QUERY_LOG_SIZE`, `EXPAND_MODEL`, `EXPAND_URL`, `EXPAND_MAX_VARIANTS`, `EXPAND_TIMEOUT_MS`, `BOOST_ENABLED`, `BOOST_SHORT_PATH`, `BOOST_SOURCE_ROOT`, `BOOST_TEST_DEMOTION`, `BOOST_GENERATED_DEMOTION`, `RERANK_MODEL`, `RERANK_URL`, `RERANK_TOP_K`, `RERANK_CONCURRENCY`, `RERANK_NUM_CTX`, `MMR_LAMBDA`, `MMR_TOP_K`, `DOC_CHECK_JUDGE_MODEL`, `DOC_CHECK_JUDGE_URL`, `DOC_CHECK_WATCH`, `DAEMON_IDLE_TIMEOUT_MINUTES`. You can define additional ignore rules by placing a `.cidxignore` at a project root (`.gitignore` is also obeyed).
 
 > 💡 **Exclude large data folders.** Since `allowedExtensions` includes `.json`, generated/very large JSON data files (e.g. HuggingFace `tokenizer.json`, fixture/static data) get split into thousands of chunks and embedded — this slows down indexing and pollutes search results. Exclude such folders by placing a `.cidxignore` at the project root:
 > ```gitignore

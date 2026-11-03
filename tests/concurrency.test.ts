@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { mapWithConcurrency } from "../src/utils/concurrency";
+import { createSemaphore, mapWithConcurrency } from "../src/utils/concurrency";
 
 describe("mapWithConcurrency", () => {
   test("returns empty on empty input", async () => {
@@ -45,5 +45,35 @@ describe("mapWithConcurrency", () => {
   test("works even if limit > number of elements", async () => {
     const out = await mapWithConcurrency([1, 2], 100, async (x) => x * 2);
     expect(out).toEqual([2, 4]);
+  });
+});
+
+describe("createSemaphore", () => {
+  test("caps concurrent holders at the limit", async () => {
+    const sem = createSemaphore(2);
+    let active = 0;
+    let maxActive = 0;
+    await Promise.all(
+      Array.from({ length: 10 }, () =>
+        sem.run(async () => {
+          active++;
+          maxActive = Math.max(maxActive, active);
+          await new Promise((r) => setTimeout(r, 3));
+          active--;
+        }),
+      ),
+    );
+    expect(maxActive).toBe(2);
+  });
+
+  test("releases the permit when the body throws", async () => {
+    const sem = createSemaphore(1);
+    await expect(sem.run(async () => { throw new Error("boom"); })).rejects.toThrow("boom");
+    await expect(sem.run(async () => 42)).resolves.toBe(42);
+  });
+
+  test("a limit below 1 still admits one holder (never deadlocks)", async () => {
+    const sem = createSemaphore(0);
+    await expect(sem.run(async () => "ok")).resolves.toBe("ok");
   });
 });

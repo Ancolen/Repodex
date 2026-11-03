@@ -6,6 +6,41 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ---
 
+## Unreleased
+
+### Performance — a full index no longer pays one LanceDB commit per file
+
+- **Batched slice commits** (`src/services/indexer.ts`, `src/services/db.ts`).
+  `indexDirectory` now prepares a slice of files and writes it with ONE
+  delete+add pair via the new `replaceFileRecords`; `insertChunks` keeps the
+  single-file contract for the watcher and the retry pass. The old loop did
+  two commits per file, and every commit writes a dataset version whose
+  manifest lists the whole fragment set — quadratic growth. Measured on the
+  same machine (2,000 files × 13 chunks): **51 s / 528 MB on disk per-file vs
+  0.9 s / 82 MB for 32-file batches** (256-file batches: 0.5 s). A fresh
+  13k-file index now costs ~200 commit pairs instead of ~27,000 commits — and
+  the `projects` umbrella index's 19 GB of `_versions` (973 MB live data) no
+  longer accumulates.
+- **Pipelined file preparation** (`indexing.fileConcurrency`, default 4;
+  `INDEX_FILE_CONCURRENCY`). The file loop used to be strictly sequential:
+  chunking one file and committing it left the embedding backend idle. A
+  bounded worker pool overlaps parse/CPU with embedding I/O. One shared
+  semaphore (`ollama.concurrency` permits) caps TOTAL in-flight embed requests
+  across the pool, so the per-file fan-out cannot multiply the configured
+  bound. Measured client throughput on a mix where the backend does ~113
+  chunks/s: the old loop ran at ~32 chunks/s.
+- **`indexing.writeBatchFiles`** (`INDEX_WRITE_BATCH_FILES`, default 64) sets
+  the slice size; `1` restores the old per-file commit behavior.
+- **Failure semantics preserved**: the mtime cache is written only after a
+  batch commit succeeds, so a failed batch stays pending and is retried
+  file-by-file by the existing retry pass; cancellation still flushes only
+  fully prepared files.
+- Tests: `tests/db-batch.test.ts` (batch replace/delete semantics),
+  `tests/index-batch.test.ts` (end-to-end batched index, unchanged re-run,
+  changed-file replacement), semaphore cases in `tests/concurrency.test.ts`.
+
+---
+
 ## 2.9.4 (2026-11-03)
 
 ### Fixed — the tree-sitter WASM heap that grew to its 2 GiB cap

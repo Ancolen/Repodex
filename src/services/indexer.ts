@@ -10,6 +10,7 @@ import { extractIdTerms } from "../core/idterms";
 import { getEmbeddings, waitForEmbedBackend } from "./embed";
 import {
   insertChunks,
+  replaceFileRecords,
   deleteFileRecords,
   ensureVectorIndex,
   ensureFtsIndex,
@@ -20,7 +21,7 @@ import {
   type CodeRecord,
 } from "./db";
 import { hashContent } from "../utils/hash";
-import { mapWithConcurrency } from "../utils/concurrency";
+import { createSemaphore, mapWithConcurrency, type Semaphore } from "../utils/concurrency";
 import { gitTrackedFiles } from "./git";
 import { tableNameFor } from "../core/registry";
 import type { Registry } from "../core/registry";
@@ -270,6 +271,7 @@ async function embedTexts(
   model: string,
   registry?: Registry,
   signal?: AbortSignal,
+  embedLimiter?: Semaphore | undefined,
 ): Promise<(number[] | null)[]> {
   const hashes = texts.map(hashContent);
   const vectors: (number[] | null)[] = new Array(texts.length).fill(null);
@@ -301,7 +303,12 @@ async function embedTexts(
     // corresponding chunks are not written; this is fine since cancellation will
     // drop the table anyway.
     if (signal?.aborted) return;
-    const embs = await getEmbeddings(batch.map((i) => texts[i]!), model);
+    const batchTexts = batch.map((i) => texts[i]!);
+    // The shared semaphore caps TOTAL in-flight embed requests across every
+    // file the full index prepares concurrently; the query path passes none.
+    const embs = embedLimiter
+      ? await embedLimiter.run(() => getEmbeddings(batchTexts, model))
+      : await getEmbeddings(batchTexts, model);
     for (let k = 0; k < batch.length; k++) {
       const i = batch[k]!;
       const vec = embs[k];
@@ -315,9 +322,44 @@ async function embedTexts(
 }
 
 /**
- * Indexes a single file. Skips it if unchanged (mtime cache).
- * Embeddings are read from the content-hash cache; missing ones are fetched from
- * Ollama in batches and written to the cache.
+ * What to do with one prepared file.
+ * - `write`  — the file changed and produced records.
+ * - `delete` — the file changed but now yields no chunks; its old rows must go.
+ * - `skip`   — nothing to do (unchanged mtime hit, aborted, disallowed path,
+ *              non-regular file, or the oversized guard — see `skippedOversized`).
+ */
+export type PreparedAction = "write" | "delete" | "skip";
+
+/** One file after chunking + embedding, before any table/cache write. */
+export interface PreparedFile {
+  filePath: string;
+  /** mtime observed during preparation — written to the cache only AFTER a commit. */
+  mtime: number;
+  action: PreparedAction;
+  /** Rows to write; empty for `delete`/`skip`. */
+  records: CodeRecord[];
+  /** Observed embedding dimension (from the first vector), null when no embed ran. */
+  dim: number | null;
+  /** The file was skipped by the `maxFileSizeBytes` guard (old rows stay). */
+  skippedOversized: boolean;
+}
+
+/** A skip result that writes/caches nothing. */
+function skipPrepared(filePath: string, mtime = 0, skippedOversized = false): PreparedFile {
+  return { filePath, mtime, action: "skip", records: [], dim: null, skippedOversized };
+}
+
+/**
+ * Prepares a single file: read → chunk → embed → build records. NO table write
+ * and NO mtime-cache write happen here — the caller commits (`indexFile` for
+ * the watcher/retry path, `replaceFileRecords` for a whole slice of a full
+ * index). That split is what makes batched full indexing possible: embedding A
+ * file no longer implies committing it on its own.
+ *
+ * Embeddings are read from the content-hash cache; missing ones are fetched
+ * from the backend in batches and written to the cache. `embedLimiter` (only
+ * the full-index path passes one) caps total in-flight requests across the
+ * file-level worker pool.
  *
  * `maxFileSizeBytes` (the effective project limit, see
  * `effectiveMaxFileSizeBytes`): when > 0 and the file exceeds it, the file is
@@ -338,7 +380,7 @@ async function embedTexts(
  * the raw text; a null framing embeds the raw bytes exactly as before framing
  * existed.
  */
-export async function indexFile(
+export async function prepareFile(
   target: IndexTarget,
   filePath: string,
   registry?: Registry,
@@ -346,37 +388,42 @@ export async function indexFile(
   embedModel?: string | undefined,
   framing?: string | null | undefined,
   maxFileSizeBytes?: number | undefined,
-): Promise<FileIndexResult> {
-  if (!isAllowedFile(filePath)) return { chunks: 0, dim: null };
-  if (signal?.aborted) return { chunks: 0, dim: null };
+  embedLimiter?: Semaphore | undefined,
+): Promise<PreparedFile> {
+  if (!isAllowedFile(filePath)) return skipPrepared(filePath);
+  if (signal?.aborted) return skipPrepared(filePath);
 
   const st = await stat(filePath);
-  if (!st.isFile()) return { chunks: 0, dim: null };
+  if (!st.isFile()) return skipPrepared(filePath);
 
   // Oversized-file guard (the same rule collectFiles applies on full indexes).
   if (maxFileSizeBytes !== undefined && maxFileSizeBytes > 0 && st.size > maxFileSizeBytes) {
     console.error(
       `[indexer] '${target.indexName}' skipping '${filePath}': ${st.size} bytes exceeds maxFileSizeBytes (${maxFileSizeBytes}).`,
     );
-    return { chunks: 0, dim: null, skippedOversized: true };
+    return skipPrepared(filePath, st.mtimeMs, true);
   }
 
   const mtime = st.mtimeMs;
   if (registry && registry.getFileMtime(target.indexName, filePath) === mtime) {
-    return { chunks: 0, dim: null }; // unchanged → skip
+    return skipPrepared(filePath, mtime); // unchanged → skip
   }
 
   const content = await readFile(filePath, "utf-8");
   const chunks = await chunkCode(filePath, content);
 
   if (chunks.length === 0) {
-    await deleteFileRecords(target.tableName, filePath);
-    registry?.setFileMtime(target.indexName, filePath, mtime);
-    return { chunks: 0, dim: null };
+    return { filePath, mtime, action: "delete", records: [], dim: null, skippedOversized: false };
   }
 
   const model = embedModel ?? CONFIG.OLLAMA_MODEL;
-  const vectors = await embedTexts(chunks.map((c) => frameDoc(c.content, framing)), model, registry, signal);
+  const vectors = await embedTexts(
+    chunks.map((c) => frameDoc(c.content, framing)),
+    model,
+    registry,
+    signal,
+    embedLimiter,
+  );
 
   // Docstring leg: one extra embedding per doc-carrying chunk (framed too —
   // the docstring is a document for the same framing).
@@ -392,10 +439,10 @@ export async function indexFile(
     }
   }
   const docVecs =
-    docIdx.length > 0 ? await embedTexts(docTexts, model, registry, signal) : null;
+    docIdx.length > 0 ? await embedTexts(docTexts, model, registry, signal, embedLimiter) : null;
 
   // If aborted, don't write half data for this file; exit silently.
-  if (signal?.aborted) return { chunks: 0, dim: null };
+  if (signal?.aborted) return skipPrepared(filePath, mtime);
 
   // 3) Build the records (fixed schema)
   const records: CodeRecord[] = [];
@@ -432,14 +479,48 @@ export async function indexFile(
     }
   }
 
-  if (records.length > 0) {
-    await insertChunks(target.tableName, records);
+  return { filePath, mtime, action: "write", records, dim, skippedOversized: false };
+}
+
+/**
+ * Indexes a single file: `prepareFile` + its own commit. Used by the watcher
+ * (one event = one file) and by the end-of-job retry pass. Full indexing uses
+ * `prepareFile` directly so it can commit a whole SLICE of files in one
+ * LanceDB transaction pair (see `replaceFileRecords`).
+ */
+export async function indexFile(
+  target: IndexTarget,
+  filePath: string,
+  registry?: Registry,
+  signal?: AbortSignal,
+  embedModel?: string | undefined,
+  framing?: string | null | undefined,
+  maxFileSizeBytes?: number | undefined,
+): Promise<FileIndexResult> {
+  const prepared = await prepareFile(
+    target,
+    filePath,
+    registry,
+    signal,
+    embedModel,
+    framing,
+    maxFileSizeBytes,
+  );
+  if (prepared.action === "skip") {
+    // Preserve the public result shape exactly: `skippedOversized` appears only
+    // when the size guard actually fired (tests and callers key on it).
+    return prepared.skippedOversized
+      ? { chunks: 0, dim: null, skippedOversized: true }
+      : { chunks: 0, dim: null };
+  }
+
+  if (prepared.action === "write" && prepared.records.length > 0) {
+    await insertChunks(target.tableName, prepared.records);
   } else {
     await deleteFileRecords(target.tableName, filePath);
   }
-
-  registry?.setFileMtime(target.indexName, filePath, mtime);
-  return { chunks: records.length, dim };
+  registry?.setFileMtime(target.indexName, filePath, prepared.mtime);
+  return { chunks: prepared.action === "write" ? prepared.records.length : 0, dim: prepared.dim };
 }
 
 export async function removeFileIndex(
@@ -481,6 +562,10 @@ async function hasFilesToEmbed(
  * - If a registry is provided, files that are in file_cache but not in the list
  *   (deleted/ignored) on disk are cleaned up from the table + cache.
  *   This prevents files deleted while the daemon was down from remaining.
+ * - Files are prepared by a bounded worker pool (`indexing.fileConcurrency`)
+ *   and committed in slices (`indexing.writeBatchFiles`): a full index costs
+ *   `files / writeBatchFiles` LanceDB commit pairs, not one pair per file.
+ *   A slice whose commit fails is retried file-by-file by the retry pass.
  * - At the end of indexing, an ANN vector index is built if the table is large.
  */
 export async function indexDirectory(
@@ -601,20 +686,88 @@ export async function indexDirectory(
   let failed = 0;
   /** Files whose embed/write threw; retried ONCE after the main loop. */
   const failedFiles: string[] = [];
-  for (const file of files) {
+
+  // Full-index pipeline (see `indexing.fileConcurrency` / `writeBatchFiles`):
+  //   - a small worker pool prepares files concurrently, so chunking/CPU of one
+  //     file overlaps embedding I/O of another instead of strictly serializing;
+  //   - ONE semaphore caps total in-flight embed requests at EMBED_CONCURRENCY
+  //     (the per-file fan-out alone would multiply by the pool size);
+  //   - a whole SLICE of prepared files is committed with one delete+add pair
+  //     instead of one commit per file (the quadratic-manifest / version-bloat
+  //     root cause).
+  const fileConcurrency = Math.max(1, CONFIG.INDEX_FILE_CONCURRENCY);
+  const writeBatchFiles = Math.max(1, CONFIG.INDEX_WRITE_BATCH_FILES);
+  const embedLimiter = createSemaphore(CONFIG.EMBED_CONCURRENCY);
+
+  for (let start = 0; start < files.length; start += writeBatchFiles) {
     if (opts.signal?.aborted) break;
-    try {
-      const r = await indexFile(target, file, opts.registry, opts.signal, pcfg?.embedModel, framing, maxFileBytes);
-      chunks += r.chunks;
-      if (dim === null && r.dim !== null) dim = r.dim;
-      if (r.skippedOversized) skippedOversized++;
-    } catch (err) {
-      failed++;
-      failedFiles.push(file);
-      console.error(`[indexer] failed to index '${file}':`, err);
+    const slice = files.slice(start, start + writeBatchFiles);
+
+    const prepared = await mapWithConcurrency(slice, fileConcurrency, async (file) => {
+      if (opts.signal?.aborted) return null;
+      try {
+        const p = await prepareFile(
+          target,
+          file,
+          opts.registry,
+          opts.signal,
+          pcfg?.embedModel,
+          framing,
+          maxFileBytes,
+          embedLimiter,
+        );
+        processed++;
+        opts.onProgress?.(processed, total, file);
+        return p;
+      } catch (err) {
+        failed++;
+        failedFiles.push(file);
+        console.error(`[indexer] failed to index '${file}':`, err);
+        processed++;
+        opts.onProgress?.(processed, total, file);
+        return null;
+      }
+    });
+
+    // Aggregate this slice into ONE commit pair.
+    const records: CodeRecord[] = [];
+    const deletePaths: string[] = [];
+    const commits: { filePath: string; mtime: number }[] = [];
+    let sliceChunks = 0;
+    let sliceDim: number | null = null;
+    for (const p of prepared) {
+      if (!p) continue;
+      if (p.action === "skip") {
+        if (p.skippedOversized) skippedOversized++;
+        continue;
+      }
+      deletePaths.push(p.filePath);
+      commits.push({ filePath: p.filePath, mtime: p.mtime });
+      if (p.action === "write") {
+        for (const rec of p.records) records.push(rec);
+        sliceChunks += p.records.length;
+        if (sliceDim === null && p.dim !== null) sliceDim = p.dim;
+      }
     }
-    processed++;
-    opts.onProgress?.(processed, total, file);
+    if (deletePaths.length === 0) continue;
+
+    try {
+      await replaceFileRecords(target.tableName, records, deletePaths);
+      // The mtime cache is written only AFTER the batch is durable: a failed
+      // commit must stay pending for the retry pass / the next sync.
+      if (opts.registry) {
+        for (const c of commits) opts.registry.setFileMtime(target.indexName, c.filePath, c.mtime);
+      }
+      chunks += sliceChunks;
+      if (dim === null && sliceDim !== null) dim = sliceDim;
+    } catch (err) {
+      failed += commits.length;
+      for (const c of commits) failedFiles.push(c.filePath);
+      console.error(
+        `[indexer] failed to write ${commits.length} file(s) in one batch; they will be retried individually:`,
+        err,
+      );
+    }
   }
 
   // RETRY PASS (once): a backend that was down/loading for part of the run is

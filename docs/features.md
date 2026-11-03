@@ -6,6 +6,7 @@ What the tool **does today** (version 2.8.0). For what's planned, see [`status.m
 
 - **Asynchronous daemon** — the server opens instantly; indexing runs in the background on a job queue. Search continues uninterrupted while a project indexes.
 - **Worker pool** — `jobConcurrency` (default 2) projects index in parallel; a long job doesn't block others.
+- **Batched, pipelined full index** — files are prepared by a small worker pool (`indexing.fileConcurrency`, default 4) and committed in slices (`indexing.writeBatchFiles`, default 64) instead of one LanceDB commit per file. The old per-file pattern cost two dataset versions per file (quadratic manifest growth); measured 2,000 files × 13 chunks: 51 s / 528 MB → 0.9 s / 82 MB. Total in-flight embed requests stay bounded by `ollama.concurrency` through one shared semaphore. Env: `INDEX_FILE_CONCURRENCY`, `INDEX_WRITE_BATCH_FILES`; `1` restores the old behavior.
 - **Multi-project** — each project lives in its own isolated LanceDB table (`idx_<name>`); search one project or all.
 - **Persistent state** — registry, file cache, and job state in `bun:sqlite`; resumes where it left off after a restart.
 

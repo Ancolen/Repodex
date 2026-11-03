@@ -170,16 +170,47 @@ export function buildWhere(filters?: SearchFilters): string | undefined {
  */
 export async function insertChunks(table: string, records: CodeRecord[]): Promise<void> {
   if (records.length === 0) return;
+  const paths = [...new Set(records.map((r) => r.filePath))];
+  return replaceFileRecords(table, records, paths);
+}
+
+/**
+ * Replaces the rows of a whole SLICE of files in one commit pair.
+ *
+ * Full indexing used to call `insertChunks` once per file. Each call is two
+ * LanceDB commits (delete + add), every commit writes a new dataset version
+ * whose manifest lists every fragment — so a 13k-file index produced tens of
+ * thousands of versions whose manifests grew ~linearly with the file count
+ * (measured on the `projects` umbrella index: 20.7 GB on disk for 973 MB of
+ * live data, and the last per-file commits ~40 ms each while the first ones
+ * were ~8 ms). A batch of 64 files costs two commits instead of 128
+ * (benchmark: 2,000 files × 13 chunks = 51 s per-file vs 0.9 s batched, and
+ * 528 MB vs 82 MB on disk).
+ *
+ * `deletePaths` must contain EVERY file in the slice — including files that
+ * produced no chunks (their stale rows must go). Records for files in the
+ * slice are written after the delete, so the batch is atomic per filePath
+ * just like `insertChunks`. The table is created by the first non-empty
+ * batch; a delete-only batch on a missing table is a no-op.
+ */
+export async function replaceFileRecords(
+  table: string,
+  records: CodeRecord[],
+  deletePaths: string[],
+): Promise<void> {
+  if (records.length === 0 && deletePaths.length === 0) return;
+  const paths = [...new Set(deletePaths)];
   return lockTable(table, async () => {
     const conn = getDB();
     const names = await conn.tableNames();
     if (names.includes(table)) {
       const t = await conn.openTable(table);
-      const paths = [...new Set(records.map((r) => r.filePath))];
-      const inList = paths.map((p) => `'${sqlLit(p)}'`).join(",");
-      await t.delete(`filePath IN (${inList})`);
-      await t.add(await stripUnknownColumns(t, records));
-    } else {
+      if (paths.length > 0) {
+        const inList = paths.map((p) => `'${sqlLit(p)}'`).join(",");
+        await t.delete(`filePath IN (${inList})`);
+      }
+      if (records.length > 0) await t.add(await stripUnknownColumns(t, records));
+    } else if (records.length > 0) {
       await conn.createTable(table, records, { schema: arrowSchemaFor(records) });
     }
   });

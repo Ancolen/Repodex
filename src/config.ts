@@ -104,6 +104,23 @@ export interface IndexerConfig {
     docstrings: boolean;
     /** Number of indexing jobs that can run at the same time (worker pool). */
     jobConcurrency: number;
+    /**
+     * Files a full index prepares concurrently. Chunking/embedding one file at
+     * a time leaves the embedding server idle during every parse and DB write
+     * (measured: ~32 chunks/s against a backend capable of ~113); a small file
+     * pool overlaps those phases. Total in-flight embed REQUESTS are still
+     * bounded by `ollama.concurrency` through one shared semaphore.
+     */
+    fileConcurrency: number;
+    /**
+     * Files committed to LanceDB per write batch during a full index. The
+     * per-file commit pattern cost one delete+add (two dataset versions) per
+     * file — quadratic manifest growth (measured: 2,000 files = 51 s and 528 MB
+     * at 26k rows, vs 0.9 s / 82 MB batched). Batching keeps a fresh 13k-file
+     * index at a few hundred commits instead of tens of thousands. 1 restores
+     * the old per-file behavior.
+     */
+    writeBatchFiles: number;
   };
   watcher: {
     /** Reindex delay after a file change. */
@@ -295,6 +312,8 @@ const DEFAULTS: IndexerConfig = {
     gitTrackedOnly: false,
     docstrings: true,
     jobConcurrency: 2,
+    fileConcurrency: 4,
+    writeBatchFiles: 64,
   },
   watcher: { debounceMs: 300, polling: false, pollIntervalMs: 1000 },
   search: {
@@ -355,6 +374,8 @@ ${DEFAULTS.indexing.ignoredDirs.map((d) => `    - "${d}"`).join("\n")}
   gitTrackedOnly: ${DEFAULTS.indexing.gitTrackedOnly}            # index only git-tracked files (in git repos)
   docstrings: ${DEFAULTS.indexing.docstrings}                # embed each symbol's docstring/comment into a separate doc_vector (docstring search leg)
   jobConcurrency: ${DEFAULTS.indexing.jobConcurrency}              # number of indexing jobs running at the same time (worker pool)
+  fileConcurrency: ${DEFAULTS.indexing.fileConcurrency}              # files a full index prepares concurrently (overlaps chunking with embedding I/O); total embed requests still capped by ollama.concurrency
+  writeBatchFiles: ${DEFAULTS.indexing.writeBatchFiles}              # files committed per LanceDB write batch during a full index; 1 = one commit per file (the old, quadratic-version behavior)
 
 search:
   queryLogSize: ${DEFAULTS.search.queryLogSize}          # max rows kept in the local query log (search analytics via 'cidx stats'); 0 = off
@@ -561,6 +582,20 @@ export const RESOLVED: IndexerConfig = {
       num(process.env.JOB_CONCURRENCY) ??
       y.indexing?.jobConcurrency ??
       DEFAULTS.indexing.jobConcurrency,
+    // Both are worker-pool sizes; anything < 1 would deadlock/serialize the
+    // pool, so clamp to 1 (writeBatchFiles 1 = the legacy per-file commit).
+    fileConcurrency: Math.max(
+      1,
+      num(process.env.INDEX_FILE_CONCURRENCY) ??
+        y.indexing?.fileConcurrency ??
+        DEFAULTS.indexing.fileConcurrency,
+    ),
+    writeBatchFiles: Math.max(
+      1,
+      num(process.env.INDEX_WRITE_BATCH_FILES) ??
+        y.indexing?.writeBatchFiles ??
+        DEFAULTS.indexing.writeBatchFiles,
+    ),
   },
   watcher: {
     debounceMs: y.watcher?.debounceMs ?? DEFAULTS.watcher.debounceMs,
@@ -693,6 +728,8 @@ export const CONFIG = {
   GIT_TRACKED_ONLY: RESOLVED.indexing.gitTrackedOnly,
   DOCSTRINGS: RESOLVED.indexing.docstrings,
   JOB_CONCURRENCY: RESOLVED.indexing.jobConcurrency,
+  INDEX_FILE_CONCURRENCY: RESOLVED.indexing.fileConcurrency,
+  INDEX_WRITE_BATCH_FILES: RESOLVED.indexing.writeBatchFiles,
 
   WATCH_DEBOUNCE_MS: RESOLVED.watcher.debounceMs,
   WATCH_POLLING: RESOLVED.watcher.polling,
