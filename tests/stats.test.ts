@@ -105,6 +105,7 @@ describe("Registry countFileCache / embeddingCacheStats (proposal O3)", () => {
 
 const FIX_TABLE = "idx_stats_fixture";
 const FRAG_TABLE = "idx_stats_frag";
+const PRUNE_TABLE = "idx_stats_prune";
 
 /** The three chunks of the fixture table (two rows of alpha, one of beta). */
 const FIX_ROWS = [
@@ -148,6 +149,13 @@ describe("db tableStats / compactTable on real temp-LanceDB tables (proposal O3)
           fixRecord({ file: `/proj/src/${file}.ts`, symbol: file, chunk }),
         ),
       );
+    }
+    // PRUNE_TABLE mirrors the daemon's per-file commit pattern: each insert is
+    // a dataset version, so an explicit `cleanupOlderThan` has versions to drop.
+    for (const file of ["one", "two", "three"]) {
+      await db.insertChunks(PRUNE_TABLE, [
+        fixRecord({ file: `/proj/src/${file}.ts`, symbol: file, chunk: 0 }),
+      ]);
     }
   });
 
@@ -206,6 +214,15 @@ describe("db tableStats / compactTable on real temp-LanceDB tables (proposal O3)
     const statsAfter = await db.tableStats(FRAG_TABLE);
     expect(statsAfter!.numRows).toBe(6);
     expect(statsAfter!.numFragments).toBe(1);
+  });
+
+  test("compactTable prunes every old version with cleanupOlderThan = now", async () => {
+    // Three per-file inserts → three dataset versions; `new Date()` keeps only
+    // the current one (LanceDB never removes it), and the rows survive intact.
+    const before = await db.countTableRows(PRUNE_TABLE);
+    const r = await db.compactTable(PRUNE_TABLE, { cleanupOlderThan: new Date() });
+    expect(r.prune.oldVersionsRemoved).toBeGreaterThanOrEqual(2);
+    expect(await db.countTableRows(PRUNE_TABLE)).toBe(before);
   });
 
   test("compactTable refuses a table that does not exist", async () => {

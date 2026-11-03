@@ -185,7 +185,7 @@ PURGE_DATA=1 ./uninstall.sh   # also deletes the ~/.cidx data
 | `apidiff <project\|dir> <base> [flags]` | Public-API diff between two git refs (breaking symbols surfaced) |
 | `doccheck <project\|path> [--last] [flags]` | Doc–code conformance: checks the project's markdown docs against the code (deterministic, no LLM); `--last` prints the stored watch snapshot; exit 1 on drift |
 | `stats [project]` | Table stats: rows, disk size, index freshness + query analytics (zero-hit queries, latency) |
-| `compact <name>` | Reclaims table space via the native LanceDB optimize (refuses while a job runs) |
+| `compact <name> [--prune-days n]` | Reclaims table space via the native LanceDB optimize (refuses while a job runs); `--prune-days 0` keeps only the current version |
 | `doctor` | Read-only diagnostic pass over the whole install (ok/warn/fail + fix hints) |
 | `config [path]` | Shows the active YAML configuration (or its path) |
 | `mcp` (`stdio`) | Starts the stdio MCP bridge (Claude Desktop etc.) |

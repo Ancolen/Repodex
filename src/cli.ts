@@ -1478,14 +1478,15 @@ const COMMANDS: Record<string, CmdDoc> = {
     examples: ["cidx stats", "cidx stats api"],
   },
   compact: {
-    usage: "compact <name>",
+    usage: "compact <name> [--prune-days <n>]",
     summary: "Compacts a project's table: merges small fragments, prunes old versions, refreshes indices.",
     details: [
       "Runs LanceDB's native optimize inside the per-table write lock — never a hand-rolled rewriter.",
       "Refuses while an index/sync/migrate job runs on the project (the busy rule the watcher deferral also uses).",
       "Safe to call anytime: on an already-compact table it is a fast native no-op and reports 'nothing to do'.",
+      "--prune-days <n> overrides the default 7-day version-retention window; 0 keeps only the current version (deletes every old version — the space-reclaim lever after a long reindex).",
     ],
-    examples: ["cidx compact api"],
+    examples: ["cidx compact api", "cidx compact projects --prune-days 0"],
   },
   config: {
     usage: "config [path]",
@@ -1781,19 +1782,33 @@ async function cmdStats(positionals: string[]): Promise<void> {
 }
 
 /**
- * `cidx compact <name>` — native table maintenance (proposal O3) via
- * `POST /compact`: merges small fragments, prunes old versions and refreshes
- * the ANN/FTS indices inside the per-table write lock. Refused (with the
- * server's clear message) while an index/sync/migrate job runs on the project.
+ * `cidx compact <name> [--prune-days <n>]` — native table maintenance
+ * (proposal O3) via `POST /compact`: merges small fragments, prunes old
+ * versions and refreshes the ANN/FTS indices inside the per-table write lock.
+ * `--prune-days` overrides the default 7-day version-retention window; `0`
+ * keeps only the current version. Refused (with the server's clear message)
+ * while an index/sync/migrate job runs on the project.
  */
-async function cmdCompact(positionals: string[]): Promise<void> {
+async function cmdCompact(
+  positionals: string[],
+  flags: Record<string, string | boolean>,
+): Promise<void> {
   await requireDaemon();
   const name = positionals[0];
   if (!name) {
-    console.error("Usage: cidx compact <name>");
+    console.error("Usage: cidx compact <name> [--prune-days <n>]");
     process.exit(1);
   }
-  const r = await api<CompactResult>("POST", "/compact", { name });
+  const body: { name: string; pruneDays?: number } = { name };
+  const raw = flags["prune-days"];
+  if (raw !== undefined) {
+    if (typeof raw !== "string" || raw.trim() === "" || !Number.isFinite(Number(raw)) || Number(raw) < 0) {
+      console.error("--prune-days must be a non-negative number (0 = keep only the current version)");
+      process.exit(1);
+    }
+    body.pruneDays = Number(raw);
+  }
+  const r = await api<CompactResult>("POST", "/compact", body);
   console.log(formatCompactResult(r));
 }
 
@@ -1838,7 +1853,7 @@ async function main(): Promise<void> {
     case "apidiff": case "api-diff": await cmdApiDiff(positionals, flags); break;
     case "doctor": await cmdDoctor(); break;
     case "stats": case "analytics": await cmdStats(positionals); break;
-    case "compact": await cmdCompact(positionals); break;
+    case "compact": await cmdCompact(positionals, flags); break;
     case "config": await cmdConfig(positionals); break;
     case "mcp": case "stdio": await cmdMcp(); break;
     case "stop": await cmdStop(); break;

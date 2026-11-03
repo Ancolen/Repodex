@@ -956,7 +956,7 @@ export function startControlApi(
    * handler's job); refused with a 404 for unknown projects.
    */
   app.post("/compact", async (req, res) => {
-    const { name } = (req.body ?? {}) as { name?: string };
+    const { name, pruneDays } = (req.body ?? {}) as { name?: string; pruneDays?: number };
     if (!name) {
       res.status(400).json({ error: "'name' is required" });
       return;
@@ -967,13 +967,28 @@ export function startControlApi(
         .json({ error: indexNotFoundMessage(name, deps.manager.listIndexes().map((r) => r.name)) });
       return;
     }
+    // `pruneDays` is the explicit old-version floor: omit it for LanceDB's
+    // native 7-day default, or pass 0 to keep only the current version (the
+    // space-reclaim lever after a long per-file-commit reindex).
+    let cleanupOlderThan: Date | undefined;
+    if (pruneDays !== undefined) {
+      if (typeof pruneDays !== "number" || !Number.isFinite(pruneDays) || pruneDays < 0) {
+        res.status(400).json({
+          error: "'pruneDays' must be a non-negative number (0 = keep only the current version)",
+        });
+        return;
+      }
+      cleanupOlderThan = new Date(Date.now() - pruneDays * 86_400_000);
+    }
     const job = deps.manager.activeJob(name);
     if (jobIsActive(job)) {
       res.status(409).json({ error: compactBusyMessage(name, { type: job.type, status: job.status }) });
       return;
     }
     try {
-      res.json(await deps.manager.compactIndex(name));
+      res.json(
+        await deps.manager.compactIndex(name, cleanupOlderThan ? { cleanupOlderThan } : {}),
+      );
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }

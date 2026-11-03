@@ -1248,14 +1248,14 @@ export class IndexManager {
    * index/sync/migrate job holds the table, the same busy rule the watcher's
    * per-file deferral enforces — compaction must not interleave with writes.
    */
-  async compactIndex(name: string): Promise<CompactResult> {
+  async compactIndex(name: string, opts: { cleanupOlderThan?: Date } = {}): Promise<CompactResult> {
     const rec = this.registry.getIndex(name);
     if (!rec) throw this.indexNotFound(name);
     if (this.isIndexing(name)) {
       const job = this.activeJob(name);
       throw new Error(compactBusyMessage(name, { type: job?.type ?? "index", status: job?.status ?? "running" }));
     }
-    return await compactTable(tableNameFor(rec));
+    return await compactTable(tableNameFor(rec), opts);
   }
 
   getIndex(name: string): IndexRecord | null {

@@ -781,15 +781,23 @@ export interface CompactResult {
 
 /**
  * Compacts a table with LanceDB's NATIVE `optimize` (proposal O3): merges
- * small fragments, prunes old dataset versions (>7 days by default) and adds
- * new data to existing indices — `VACUUM` semantics, never a hand-rolled
- * rewriter. Runs inside the per-table write lock, exactly like every other
- * table write, so a compaction cannot interleave with an index job's writes.
+ * small fragments, prunes old dataset versions and adds new data to existing
+ * indices — `VACUUM` semantics, never a hand-rolled rewriter. Runs inside the
+ * per-table write lock, exactly like every other table write, so a compaction
+ * cannot interleave with an index job's writes.
+ *
+ * `cleanupOlderThan` overrides LanceDB's default 7-day version-retention
+ * window; pass `new Date()` to keep only the current version (the explicit
+ * space-reclaim lever for tables whose per-file commits accumulated hundreds
+ * of thousands of manifests). Omitted = native default (7 days).
  *
  * On an already-compact table it is a native no-op (zero stats), which the
  * callers report as "nothing to do" rather than an error.
  */
-export async function compactTable(table: string): Promise<CompactResult> {
+export async function compactTable(
+  table: string,
+  opts: { cleanupOlderThan?: Date } = {},
+): Promise<CompactResult> {
   return await lockTable(table, async () => {
     const conn = getDB();
     const names = await conn.tableNames();
@@ -797,7 +805,9 @@ export async function compactTable(table: string): Promise<CompactResult> {
       throw new Error(`Table '${table}' does not exist on disk — index the project first.`);
     }
     const t = await conn.openTable(table);
-    const s = await t.optimize();
+    const s = opts.cleanupOlderThan
+      ? await t.optimize({ cleanupOlderThan: opts.cleanupOlderThan })
+      : await t.optimize();
     return {
       table,
       compaction: {
