@@ -2,7 +2,36 @@
 
 Version-by-version implementation history, **newest first**. For the current done / proposed picture, see [`status.md`](./status.md); for what the tools do, [`features.md`](./features.md).
 
-> **How this repo versions:** the design uses informal "waves" (v1 → v4); the **release version** in `package.json` is bumped per wave (currently `2.9.3`). The version string lives in **five** places that must be bumped together on release: `package.json`, `src/server/mcp.ts` (`Server` info), `src/server/control-api.ts` (`/ping`), `src/stdio-bridge.ts`, and `src/cli.ts` (`CLI_VERSION`). The `web-install.sh` / Release workflow fires on a pushed `v*` git tag.
+> **How this repo versions:** the design uses informal "waves" (v1 → v4); the **release version** in `package.json` is bumped per wave (currently `2.9.4`). The version string lives in **five** places that must be bumped together on release: `package.json`, `src/server/mcp.ts` (`Server` info), `src/server/control-api.ts` (`/ping`), `src/stdio-bridge.ts`, and `src/cli.ts` (`CLI_VERSION`). The `web-install.sh` / Release workflow fires on a pushed `v*` git tag.
+
+---
+
+## 2.9.4 (2026-11-03)
+
+### Fixed — the tree-sitter WASM heap that grew to its 2 GiB cap
+
+- **Every AST parse site frees its tree explicitly** (`src/chunking/chunker.ts`,
+  `src/chunking/imports.ts`, `src/core/apidiff.ts`). `web-tree-sitter` stores
+  trees in a shared Emscripten `WebAssembly.Memory` capped at **2 GiB** (32768
+  pages in 0.22.6) that never shrinks. Relying on the JS GC finalizer alone let
+  live trees pile up across thousands of per-file parses until the heap hit the
+  cap. Observed on 2026-11-03: the daemon held a fully-resident 2 GiB anonymous
+  mapping, logged **89 `Aborted()` lines** (Emscripten OOM abort) during one
+  `projects` sync, and its RSS sat at ~8 GB while idle. `chunkCode`,
+  `extractImports` and `parseHasError` now delete the tree in a `finally`;
+  chunks/imports are plain strings, so nothing outlives the AST.
+
+### Added — explicit old-version cleanup for `compact`
+
+- **`cidx compact <name> --prune-days <n>`** (`POST /compact` `pruneDays`,
+  `src/services/db.ts → compactTable`, `src/core/index-manager.ts`,
+  `src/server/control-api.ts`, `src/cli.ts`). LanceDB's native `Table.optimize`
+  keeps 7 days of dataset versions by default; after a long reindex the
+  per-file commit pattern can leave tens of thousands of manifests (measured:
+  **84,574 version files / 86 GB** for a 164k-chunk umbrella index, while the
+  live data was 2.6 GB). `--prune-days 0` passes `cleanupOlderThan: new Date()`
+  — keep only the current version — while still merging fragments and
+  refreshing indices. Omitting the flag preserves the native 7-day default.
 
 ---
 
