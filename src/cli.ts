@@ -83,11 +83,37 @@ function statusBadge(s: string): string {
   return { ready: "✓ ready", indexing: "… indexing", error: "✗ error", queued: "· queued" }[s] ?? s;
 }
 
-function printIndex(ix: any): void {
+// Column widths for an aligned listing (badges, counts and table names line up
+// across projects). Computed once per listing so single-project output is
+// unchanged: padding a lone row to its own width is a no-op.
+interface IndexColumns {
+  name: number;
+  badge: number;
+  files: number;
+  chunks: number;
+}
+
+function indexColumns(indexes: any[]): IndexColumns {
+  const width = (values: unknown[]) => Math.max(0, ...values.map((v) => String(v ?? "").length));
+  return {
+    name: width(indexes.map((ix) => ix.name)),
+    badge: width(indexes.map((ix) => statusBadge(String(ix.status)))),
+    files: width(indexes.map((ix) => ix.files)),
+    chunks: width(indexes.map((ix) => ix.chunks)),
+  };
+}
+
+function printIndex(ix: any, cols: IndexColumns = indexColumns([ix])): void {
+  const badge = statusBadge(String(ix.status));
   const prog = ix.job && ix.job.total > 0 ? `  (${ix.job.percent}% — ${ix.job.processed}/${ix.job.total})` : "";
-  console.log(`• ${ix.name}  [${statusBadge(ix.status)}]${prog}`);
+  console.log(
+    `• ${String(ix.name).padEnd(cols.name)}  [${badge}]${" ".repeat(cols.badge - badge.length)}${prog}`,
+  );
   console.log(`    path:   ${ix.path}`);
-  console.log(`    data:   ${ix.files} files, ${ix.chunks} chunks  (table: ${ix.table})`);
+  console.log(
+    `    data:   ${String(ix.files).padStart(cols.files)} files, ` +
+      `${String(ix.chunks).padStart(cols.chunks)} chunks  (table: ${ix.table})`,
+  );
   if (ix.error) console.log(`    error:  ${ix.error}`);
   if (ix.note) console.log(`    note:   ${ix.note}`);
 }
@@ -184,7 +210,8 @@ async function cmdList(): Promise<void> {
     console.log("No projects indexed yet.  cidx index <directory>");
     return;
   }
-  for (const ix of indexes) printIndex(ix);
+  const cols = indexColumns(indexes);
+  for (const ix of indexes) printIndex(ix, cols);
 }
 
 async function cmdStatus(positionals: string[]): Promise<void> {
