@@ -181,7 +181,7 @@ if command -v ollama >/dev/null 2>&1; then
   fi
 else
   warn "No embedding backend found. Either install Ollama (https://ollama.com) and: ollama pull $MODEL"
-  warn "or run a llama-server: llama-server -m <model.gguf> -a $MODEL --ctx-size 2048 --ubatch-size 2048 --embedding"
+  warn "or run a llama-server: llama-server -m <model.gguf> -a $MODEL --ctx-size 2048 --ubatch-size 2048 --embedding (with --parallel N, per-slot context is ctx-size/N — keep it above a chunk's real token count)"
 fi
 
 # ---------------------------------------------- 5) systemd user service

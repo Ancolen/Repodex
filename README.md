@@ -46,9 +46,9 @@ A single long-lived daemon manages **multiple projects**. By sending commands to
     ```
   - **or** a **llama.cpp `llama-server`** process (OpenAI-compatible; one model per process):
     ```bash
-    llama-server -m embeddinggemma-2-BF16.gguf -a qwen3-embedding --ctx-size 1024 --embedding
+    llama-server -m embeddinggemma-2-BF16.gguf -a qwen3-embedding --ctx-size 2048 --embedding
     ```
-    The `-a` alias must match the model cidx sends. With both backends up, cidx prefers the one that actually serves the configured model (Ollama first); pin a side explicitly with `embedding.provider: ollama|llamacpp`.
+    The `-a` alias must match the model cidx sends. `--ctx-size` is the total context and `--parallel N` splits it across slots, so size the per-slot value (`--ctx-size / N`, N=1 when unset) above a chunk's real token count — char-capped chunks tokenize denser than the chars/4 estimate, and a too-small slot context makes the server reject entire embed batches. With both backends up, cidx prefers the one that actually serves the configured model (Ollama first); pin a side explicitly with `embedding.provider: ollama|llamacpp`.
 
 ## Installation
 
@@ -432,7 +432,7 @@ ollama:
 embedding:
   cacheMax: 50000             # max records in the content-hash embedding cache
   provider: auto              # auto | ollama | llamacpp; auto = an Ollama that serves the model wins, else a live llama-server
-  llamacppUrl: http://127.0.0.1:8080  # llama-server base URL; start with -m <model.gguf> -a <model> --ctx-size 2048 --ubatch-size 2048 --embedding (ubatch ≥ tokens per chunk — char-estimated chunks can tokenize larger than maxChunkTokens)
+  llamacppUrl: http://127.0.0.1:8080  # llama-server base URL; start with -m <model.gguf> -a <model> --ctx-size 8192 --ubatch-size 2048 --embedding (per-request context = --ctx-size / --parallel, so keep it above a chunk's real token count; ubatch ≥ tokens per chunk — char-estimated chunks can tokenize well above maxChunkTokens)
   framing: none               # none | auto; auto = per-model task prefixes (EmbeddingGemma 2 docs/queries, qwen3 query instruction) — measured +0.06–0.08 MRR; unknown models stay unframed; a change re-embeds via migration
   readyTimeoutMs: 20000       # how long an index job waits for the backend to load (llama-server /health) before its first embed; 0 = probe once, never wait. Failed files are retried once at the end of the job
 

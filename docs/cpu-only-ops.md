@@ -93,8 +93,10 @@ cidx config               # show the active configuration
 
 ```bash
 llama-server -m qwen3-embedding-0.6b-Q8_0.gguf -a qwen3-embedding:0.6b \
-  --ctx-size 1024 --embedding -ngl 0 --host 127.0.0.1 --port 8080
+  --ctx-size 2048 --embedding -ngl 0 --host 127.0.0.1 --port 8080
 ```
+
+`--ctx-size` is the total context; with `--parallel N` each request gets `ctx-size / N`, and char-capped chunks can tokenize denser than the chars/4 estimate, so keep the per-slot value above ~1000 tokens.
 
 Point cidx at it with `embedding.provider: llamacpp` + `embedding.llamacppUrl` (or set
 just those and leave other projects on Ollama). One llama-server serves one model; a
