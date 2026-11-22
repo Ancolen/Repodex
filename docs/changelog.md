@@ -6,7 +6,7 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ---
 
-## Unreleased (2.10.0)
+## 2.10.0 (2026-11-22)
 
 ### Fixed — meta.db free pages are reclaimed at boot
 

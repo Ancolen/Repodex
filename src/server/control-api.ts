@@ -203,7 +203,7 @@ export function startControlApi(
   });
 
   app.get("/ping", (_req, res) => {
-    res.json({ ok: true, version: "2.9.5", pid: process.pid });
+    res.json({ ok: true, version: "2.10.0", pid: process.pid });
   });
 
   // `?wait=true&waitMs=<n>` is the status-as-one-round-trip form (2.10.0):
