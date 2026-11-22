@@ -719,6 +719,44 @@ describe("runDocCheck", () => {
     expect(report.verdict.consistent).toBe(false);
   });
 
+  test("ONE budget is shared across findings, needsReview and undocumented", async () => {
+    const state = baseState({
+      chunks: codeChunks,
+      docs: [docFile("docs/a.md", "`madeUpThing` then `anotherGhost`")],
+      exportedSymbols: [
+        {
+          symbolName: "undocAlpha",
+          symbolType: "function",
+          language: "typescript",
+          relativePath: "src/a.ts",
+          line: 1,
+          content: "export function undocAlpha() {}",
+        },
+        {
+          symbolName: "undocBeta",
+          symbolType: "function",
+          language: "typescript",
+          relativePath: "src/b.ts",
+          line: 1,
+          content: "export function undocBeta() {}",
+        },
+      ],
+    });
+    // Tight: the top finding consumes the whole budget — undocumented gets none.
+    const tight = await runDocCheck(state, { maxChars: 10 });
+    expect(tight.findings).toHaveLength(1);
+    expect(tight.undocumented).toHaveLength(0);
+    expect(tight.verdict.undocumented).toBe(0);
+    expect(tight.omitted).toBeGreaterThanOrEqual(3); // 1 extra finding + 2 undocumented
+    expect(tight.notes.some((n) => n.includes("across findings, needsReview and undocumented"))).toBe(true);
+
+    // Generous: everything passes through and the verdict counts what was kept.
+    const open = await runDocCheck(state, { maxChars: 1_000_000 });
+    expect(open.findings.length).toBeGreaterThan(1);
+    expect(open.undocumented).toHaveLength(2);
+    expect(open.verdict.undocumented).toBe(2);
+  });
+
   test("limit truncates findings with a note; consistent stays true only with zero findings", async () => {
     const state = baseState({
       chunks: codeChunks,

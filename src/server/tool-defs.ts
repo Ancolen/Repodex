@@ -704,7 +704,7 @@ export const TOOL_DEFINITIONS: Tool[] = [
         files: { type: "array", items: { type: "string" }, description: "Restrict the doc set (project-relative, root-anchored globs, e.g. ['docs/**/*.md']). Default: root *.md + docs/**." },
         ignore: { type: "array", items: { type: "string" }, description: "Doc files/globs to skip (also picked up from .cidx.json 'doccheck.ignore')." },
         limit: { type: "number", description: "Max findings/review items kept (default 100)." },
-        maxChars: { type: "number", description: "Char budget over the rendered findings (kept whole; default from config, 12000)." },
+        maxChars: { type: "number", description: "ONE char budget shared across findings, needsReview and undocumented (findings first; kept whole; default from config, 12000)." },
         undocumentedLimit: { type: "number", description: "Max undocumented-symbol entries (default 25)." },
         noUndocumented: { type: "boolean", description: "Skip reverse coverage (exported symbols no doc mentions) entirely." },
         since: { type: "string", description: "A git ref; keep only findings whose doc or code side changed since that commit." },

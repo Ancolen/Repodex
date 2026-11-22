@@ -1830,6 +1830,11 @@ function findingSize(f: DocFinding): number {
   return f.doc.excerpt.length + f.message.length + (f.suggestion?.length ?? 0) + 100;
 }
 
+/** Rough rendered size of one undocumented entry (`path:line  type name`). */
+function undocumentedSize(u: UndocumentedEntry): number {
+  return u.relativePath.length + u.symbolName.length + u.symbolType.length + 60;
+}
+
 // --------------------------------------------- semantic judge pass (D1b)
 
 /** A `needsReview` candidate kept with its span + verdict so the judge can be handed the claim as-is. */
@@ -2028,17 +2033,47 @@ export async function runDocCheck(state: DocCheckState, opts: DocCheckOpts = {})
   if (judgeFailed > 0) {
     notes.push(`${judgeFailed} semantic judge call(s) failed; those claim(s) stay in needsReview`);
   }
-  const findingsKept = applyBudgetBySize(findings.slice(0, limit), maxChars, findingSize);
-  const reviewKept = applyBudgetBySize(needsReview.slice(0, limit), maxChars, findingSize);
+  // ONE shared budget for the whole report (2.10.0): findings first, then
+  // needsReview, then the remaining budget funds `undocumented`. Budgeting the
+  // sections separately let a 12k request return ~37k (each section got 12k).
+  const findingLimit = findings.slice(0, limit);
+  const reviewLimit = needsReview.slice(0, limit);
+  const budgeted = applyBudgetBySize([...findingLimit, ...reviewLimit], maxChars, findingSize);
+  const findingsKept = budgeted.kept.slice(0, Math.min(findingLimit.length, budgeted.kept.length));
+  const reviewKept = budgeted.kept.slice(findingsKept.length);
+  const spent = budgeted.kept.reduce((n, f) => n + findingSize(f), 0);
+  const hasBudget = maxChars !== undefined && Number.isFinite(maxChars) && maxChars > 0;
+  const remaining = hasBudget ? Math.max(0, maxChars - spent) : undefined;
   if (findings.length > limit) notes.push(`findings truncated at limit ${limit} (${findings.length} found)`);
   if (needsReview.length > limit) notes.push(`needsReview truncated at limit ${limit} (${needsReview.length} found)`);
-  const omitted = findingsKept.omitted + reviewKept.omitted;
-  if (omitted > 0) notes.push(`${omitted} item(s) omitted by the ${maxChars} char budget (kept whole, never truncated)`);
 
   const mentioned = new Set<string>([...identTokens, ...literalTokens]);
-  const undocumented = opts.noUndocumented
+  const undocumentedAll = opts.noUndocumented
     ? []
     : collectUndocumented(state, idx, mentioned, undocLimit);
+  // Undocumented is advisory: unlike the findings (whose top item is always
+  // kept), an entry that does not fit the remaining budget is dropped whole.
+  let undocumented = undocumentedAll;
+  let undocumentedOmitted = 0;
+  if (remaining !== undefined) {
+    const kept: UndocumentedEntry[] = [];
+    let left = remaining;
+    for (const u of undocumentedAll) {
+      const size = undocumentedSize(u);
+      if (size > left) break;
+      kept.push(u);
+      left -= size;
+    }
+    undocumentedOmitted = undocumentedAll.length - kept.length;
+    undocumented = kept;
+  }
+
+  const omitted = budgeted.omitted + undocumentedOmitted;
+  if (omitted > 0) {
+    notes.push(
+      `${omitted} item(s) omitted by the ${maxChars} char budget across findings, needsReview and undocumented (kept whole, never truncated)`,
+    );
+  }
 
   const judgeModel = opts.judgeModel ?? "";
   const checked: DocCheckReport["checked"] = {
@@ -2065,13 +2100,13 @@ export async function runDocCheck(state: DocCheckState, opts: DocCheckOpts = {})
     project: state.project,
     checked,
     verdict: {
-      consistent: findingsKept.kept.length === 0 && findings.length === 0,
-      findings: findingsKept.kept.length,
-      needsReview: reviewKept.kept.length,
+      consistent: findingsKept.length === 0 && findings.length === 0,
+      findings: findingsKept.length,
+      needsReview: reviewKept.length,
       undocumented: undocumented.length,
     },
-    findings: findingsKept.kept,
-    needsReview: reviewKept.kept,
+    findings: findingsKept,
+    needsReview: reviewKept,
     undocumented,
     omitted,
     maxChars: maxChars === undefined ? null : maxChars,

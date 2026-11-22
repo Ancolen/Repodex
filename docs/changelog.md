@@ -45,6 +45,19 @@ Version-by-version implementation history, **newest first**. For the current don
   duplicates, `indexing` suppression, indices without stats), `tests/stats.test.ts`
   (note wording, duplicate note, threshold override).
 
+### Fixed — `check_docs` enforces ONE shared `maxChars` budget
+
+- **Shared report budget** (`src/core/doccheck.ts`, `src/server/tool-defs.ts`).
+  `maxChars` was applied to `findings` and `needsReview` independently (and not
+  to `undocumented`), so a 12k request could return ~37k. The whole report now
+  draws from one budget: findings first, then needsReview (the same
+  prefix-keeping `applyBudgetBySize`), then the remaining budget funds
+  `undocumented` (dropped whole when it does not fit — advisory, and unlike the
+  top finding it is not force-kept). One omission note counts all three
+  sections, and `verdict.undocumented` reports what was actually kept.
+- Tests: `tests/doccheck.test.ts` (tight budget → no undocumented, one note;
+  generous → all kept), `tests/budget.test.ts` (`applyBudgetBySize`).
+
 ### Added — umbrella indexes exclude nested registered projects
 
 - **Nested-root exclusion** (`src/utils/pathtools.ts`, `src/services/indexer.ts`,

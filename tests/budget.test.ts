@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { applyCharBudget, resultSize } from "../src/utils/budget";
+import { applyBudgetBySize, applyCharBudget, resultSize } from "../src/utils/budget";
 
 // resultSize = content.length + context lines joined + HEADER_CHARS (120).
 function mk(content: string, before: string[] = [], after: string[] = []): {
@@ -63,5 +63,28 @@ describe("applyCharBudget", () => {
   test("large budget keeps everything", () => {
     const rows = [mk("a"), mk("b"), mk("c")];
     expect(applyCharBudget(rows, 1_000_000)).toHaveLength(3);
+  });
+});
+
+describe("applyBudgetBySize", () => {
+  const rows = [{ s: "a".repeat(100) }, { s: "b".repeat(100) }, { s: "c".repeat(100) }];
+  const sizeOf = (r: { s: string }) => r.s.length;
+
+  test("no-op when the budget is unset / non-finite / <= 0", () => {
+    for (const budget of [undefined, 0, -1, Number.NaN]) {
+      expect(applyBudgetBySize(rows, budget, sizeOf)).toEqual({ kept: [...rows], omitted: 0 });
+    }
+  });
+
+  test("keeps the ranked prefix and reports the rest as omitted", () => {
+    const r = applyBudgetBySize(rows, 250, sizeOf);
+    expect(r.kept).toEqual(rows.slice(0, 2));
+    expect(r.omitted).toBe(1);
+  });
+
+  test("always keeps the first row, even when it alone exceeds the budget", () => {
+    const r = applyBudgetBySize(rows, 10, sizeOf);
+    expect(r.kept).toHaveLength(1);
+    expect(r.omitted).toBe(2);
   });
 });
