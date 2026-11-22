@@ -1101,7 +1101,7 @@ async function cmdConfig(positionals: string[]): Promise<void> {
   console.log(`\nEdit it and restart the daemon. For the path: indexer config path`);
 }
 
-const CLI_VERSION = "2.10.0";
+const CLI_VERSION = "2.10.1";
 
 /** Per-command detailed help catalog (`repodex help <command>` and `<command> --help`). */
 interface CmdDoc {

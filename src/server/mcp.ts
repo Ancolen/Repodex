@@ -122,7 +122,7 @@ function recordMcpToolUsage(
 
 export function buildServer(deps: McpDeps): Server {
   const server = new Server(
-    { name: "cidx", version: "2.10.0" },
+    { name: "cidx", version: "2.10.1" },
     // A2: read-only resources + the listChanged capability. HTTP stays stateless —
     // the capability announcement is metadata; push lives on the stdio bridge.
     { capabilities: { tools: {}, resources: { listChanged: true } } },

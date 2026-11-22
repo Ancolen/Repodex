@@ -2,9 +2,42 @@
 
 Version-by-version implementation history, **newest first**. For the current done / proposed picture, see [`status.md`](./status.md); for what the tools do, [`features.md`](./features.md).
 
-> **How this repo versions:** the design uses informal "waves" (v1 → v4); the **release version** in `package.json` is bumped per wave (currently `2.9.5`). The version string lives in **five** places that must be bumped together on release: `package.json`, `src/server/mcp.ts` (`Server` info), `src/server/control-api.ts` (`/ping`), `src/stdio-bridge.ts`, and `src/cli.ts` (`CLI_VERSION`). The `web-install.sh` / Release workflow fires on a pushed `v*` git tag.
+> **How this repo versions:** the design uses informal "waves" (v1 → v4); the **release version** in `package.json` is bumped per wave (currently `2.10.1`). The version string lives in **five** places that must be bumped together on release: `package.json`, `src/server/mcp.ts` (`Server` info), `src/server/control-api.ts` (`/ping`), `src/stdio-bridge.ts`, and `src/cli.ts` (`CLI_VERSION`). The `web-install.sh` / Release workflow fires on a pushed `v*` git tag.
 
 ---
+
+## 2.10.1 (2026-11-22)
+
+### Added — `cidx doctor --fix` repairs duplicate native indexes in place
+
+- **In-place duplicate-index cleanup** (`src/core/index-dedupe.ts`,
+  `src/services/db.ts`, `src/core/index-manager.ts`,
+  `src/server/control-api.ts`, `src/cli.ts`, `src/core/doctor.ts`). A table can
+  carry several native indexes over one column set (legacy data; modern
+  LanceDB dedupes on create), and `doctor` warned with only the heavy
+  `cidx reindex` hint. `cidx doctor --fix [project]` — or
+  `POST /doctor/fix { name? }` — now repairs them across every registered
+  project (or the one named project). Indexes are grouped by **column set AND
+  index type** (an FTS and an ANN index on one column serve different search
+  legs and are never mixed) and the best-covered one is kept. The repair shape
+  is name-sensitive, and that matters: distinct names are dropped with native
+  `dropIndex`, while a **shared** native name (live legacy data lists
+  `vector_idx` twice with identical coverage — one physical index referenced
+  twice in the manifest) is **rebuilt once** (`dropIndex` + `createIndex`,
+  same config the project's own builders use, n-gram `symbolName` included),
+  because dropping it by name would remove the only physical index. The same
+  pass also **builds a missing ANN `vector` index** when the table is at/above
+  `vectorIndexThreshold` (index build only). No re-embed, no table rebuild;
+  search keeps serving throughout, and a project whose table is owned by an
+  active index/sync/migrate job is reported under `skipped` rather than raced
+  (the `compactIndex` rule). Per-index drop/rebuild failures are reported,
+  never hidden; a second run is a read-only no-op. The doctor duplicate and
+  missing-ANN warnings now point at `--fix` first, with `cidx reindex <name>`
+  kept as the rebuild fallback.
+- Tests: `tests/index-dedupe.test.ts` (grouping by column set + type, best
+  coverage, unknown coverage, ties, shared-name rebuild), `tests/db-coverage.test.ts`
+  (a real legacy duplicate is dropped, the kept index still covers every row,
+  a second run is a no-op, a missing table is an honest error).
 
 ## 2.10.0 (2026-11-22)
 
