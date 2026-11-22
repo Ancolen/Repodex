@@ -249,13 +249,25 @@ export const TOOL_DEFINITIONS: Tool[] = [
     name: "get_index_status",
     description:
       "Returns the indexing status and live progress (% / file) of a project (or all of them). " +
-      "An unknown project name is reported with the list of available projects.",
+      "An unknown project name is reported with the list of available projects. " +
+      "With 'wait: true' it blocks until the job settles (one round-trip instead of repeated polling) — " +
+      "the default budget is 90 s, 'waitMs' overrides it (clamped to 110 s, under the client timeout); " +
+      "past the budget the current status is returned with an explicit note. Without a project, " +
+      "every active job is awaited against ONE shared deadline.",
     inputSchema: {
       type: "object",
       properties: {
         project: {
           type: "string",
           description: "The project name whose status is requested. If not given, a summary of all projects is returned.",
+        },
+        wait: {
+          type: "boolean",
+          description: "Block until the job settles (or the wait budget elapses) and return the final status.",
+        },
+        waitMs: {
+          type: "number",
+          description: "Wait budget in milliseconds (default 90000; clamped to 110000 to stay under client timeouts).",
         },
       },
     },

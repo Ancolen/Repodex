@@ -200,7 +200,7 @@ Every tool that takes a `project` also takes a **`path`** — a file/dir inside 
 | `get_coupling(project?, path?, limit?)` | Coupling metrics per file: fanIn / fanOut / instability / externalImports, banded topFanIn / changeMagnets / unstableLeaves; bands capped with `truncated`. Rides the dependency-graph cache — no reindex. |
 | `get_hotspots(project?, path?, since?, limit?)` | Hotspot / tech-debt report: churn × size (log-scaled proxy), promoted by dead-code density + coupling, test files demoted; bands critical (≥ 50) / warm (≥ 25) / review; churn runs live per call, size/dead-density from a data-revision-keyed snapshot (watcher writes invalidate it). `notARepo` reported, not thrown. |
 | `list_indexes()` | Indexed projects + statuses. |
-| `get_index_status(project?)` | Indexing status + live progress. |
+| `get_index_status(project?, wait?, waitMs?)` | Indexing status + live progress. `wait: true` blocks for the final state in one round-trip (default 90 s, `waitMs` clamped to 110 s); without a project, every active job is awaited against one shared deadline. |
 | `index_project(path, name?, wait?)` | Agent starts indexing a new directory (background, or `wait: true` for the final status in the same reply). Re-indexing an existing path is a full rebuild (table + file cache dropped); warns on overlapping scopes. |
 | `sync_project(project?, path?, wait?)` | Incremental refresh of an existing project: mtime-skipped unchanged files, changed/new files re-indexed, deleted files pruned; never drops the table. `wait: true` returns the final status in the reply. |
 

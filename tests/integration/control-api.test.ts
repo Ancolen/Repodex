@@ -247,6 +247,29 @@ describe("db + control-api integration battery", () => {
     expect(view.chunks).toBeGreaterThan(0);
   }, 60_000);
 
+  test("get_index_status wait settles in one round-trip (HTTP + MCP)", async () => {
+    if (!daemon) throw new Error("daemon not started");
+    const settled = await callApi<IndexView & { timedOut?: boolean }>(
+      daemon.controlUrl,
+      `/indexes/${PROJECT_NAME}?wait=true&waitMs=5000`,
+    );
+    expect(settled.status).toBe("ready");
+    expect(settled.timedOut).toBeUndefined();
+
+    const mcp = await mcpToolCall(daemon.mcpUrl, "get_index_status", {
+      project: PROJECT_NAME,
+      wait: true,
+      waitMs: 5000,
+    });
+    expect(mcp.result?.isError).not.toBe(true);
+    expect(mcp.result?.content?.[0]?.text).toContain("[ready]");
+
+    // Anchorless: every active job against one shared deadline.
+    const all = await mcpToolCall(daemon.mcpUrl, "get_index_status", { wait: true, waitMs: 5000 });
+    expect(all.result?.isError).not.toBe(true);
+    expect(all.result?.content?.[0]?.text).toContain(PROJECT_NAME);
+  });
+
   test("GET /indexes lists the served project", async () => {
     if (!daemon) throw new Error("daemon not started");
     const list = await callApi<IndexView[]>(daemon.controlUrl, "/indexes");

@@ -336,7 +336,32 @@ export function buildServer(deps: McpDeps): Server {
     }
 
     if (name === "get_index_status") {
-      const args = rawArgs as { project?: string };
+      const args = rawArgs as { project?: string; wait?: boolean; waitMs?: number };
+      const wait = args.wait === true;
+      const waitMs = typeof args.waitMs === "number" ? args.waitMs : undefined;
+      // `wait` turns the poll into one round-trip: the project's final record,
+      // or every active job against ONE shared deadline (never per-project).
+      // Past the budget the status is returned as-is with an explicit note.
+      let timedOut = false;
+      if (wait && args.project) {
+        if (!deps.manager.getIndex(args.project)) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: indexNotFoundMessage(
+                  args.project,
+                  deps.manager.listIndexes().map((ix) => ix.name),
+                ),
+              },
+            ],
+            isError: true,
+          };
+        }
+        timedOut = (await deps.manager.waitForIndexSettle(args.project, true, waitMs)).timedOut;
+      } else if (wait) {
+        timedOut = (await deps.manager.waitForAllSettle(waitMs)).timedOut;
+      }
       const fmt = (ixName: string): string | null => {
         const ix = deps.manager.getIndex(ixName);
         if (!ix) return null;
@@ -349,8 +374,9 @@ export function buildServer(deps: McpDeps): Server {
       };
       if (args.project) {
         const text = fmt(args.project);
-        return text
-          ? { content: [{ type: "text", text }] }
+        const body = text !== null && timedOut ? `${text}\n(wait: budget elapsed — still indexing; call again for the final state.)` : text;
+        return body
+          ? { content: [{ type: "text", text: body }] }
           : {
               content: [
                 {
@@ -368,7 +394,10 @@ export function buildServer(deps: McpDeps): Server {
       const text = all.length
         ? all.map((ix) => fmt(ix.name)).filter(Boolean).join("\n")
         : "No projects indexed yet.";
-      return { content: [{ type: "text", text }] };
+      const body = timedOut
+        ? `${text}\n(wait: budget elapsed — some projects are still indexing; call again.)`
+        : text;
+      return { content: [{ type: "text", text: body }] };
     }
 
     if (name === "index_project") {

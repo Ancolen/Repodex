@@ -17,6 +17,7 @@ import type { Job } from "./types";
 import {
   INDEX_JOB_TYPE,
   INDEX_WAIT_MS,
+  INDEX_WAIT_MAX_MS,
   JOB_PRIORITY_BACKGROUND,
   MIGRATE_JOB_TYPE,
   DOC_CHECK_JOB_TYPE,
@@ -701,6 +702,16 @@ export function assertSearchQuery(query: unknown): asserts query is string {
   }
 }
 
+/**
+ * The effective wait budget: the caller's value when it is a positive finite
+ * number, clamped to `INDEX_WAIT_MAX_MS` (under the ~120 s client timeout);
+ * absent/invalid → the `INDEX_WAIT_MS` default.
+ */
+export function clampIndexWaitMs(timeoutMs?: number): number {
+  if (timeoutMs === undefined || !Number.isFinite(timeoutMs) || timeoutMs <= 0) return INDEX_WAIT_MS;
+  return Math.min(Math.floor(timeoutMs), INDEX_WAIT_MAX_MS);
+}
+
 /** Symbol types that can make/receive a call (the call-graph inventory). */
 const CALLABLE_TYPES = new Set(["function", "method", "constructor"]);
 
@@ -1191,15 +1202,41 @@ export class IndexManager {
    * `/events`), so without this they must poll `get_index_status`. Returns the
    * latest record plus `timedOut` (still indexing when the budget elapsed).
    */
-  async waitForIndexSettle(name: string, wait?: boolean): Promise<{ rec: IndexRecord; timedOut: boolean }> {
+  async waitForIndexSettle(
+    name: string,
+    wait?: boolean,
+    timeoutMs?: number,
+  ): Promise<{ rec: IndexRecord; timedOut: boolean }> {
     const rec = this.registry.getIndex(name);
     if (!rec) throw this.indexNotFound(name);
     if (!wait) return { rec, timedOut: false };
     const jobId = this.jobByIndex.get(name);
     // An entry already removed from jobByIndex means the job finished before
     // we looked; a missed lookup is settled, not an error.
-    const done = jobId ? await this.jobQueue.waitForJob(jobId, INDEX_WAIT_MS) : true;
+    const done = jobId ? await this.jobQueue.waitForJob(jobId, clampIndexWaitMs(timeoutMs)) : true;
     return { rec: this.registry.getIndex(name) ?? rec, timedOut: !done };
+  }
+
+  /**
+   * Waits for EVERY active job against ONE shared deadline (2.10.0) — the
+   * anchorless `get_index_status { wait: true }`. Per-job waits would multiply
+   * the budget by the project count; this never exceeds `timeoutMs` in total.
+   */
+  async waitForAllSettle(timeoutMs?: number): Promise<{ timedOut: boolean }> {
+    const deadline = Date.now() + clampIndexWaitMs(timeoutMs);
+    const jobs = this.registry
+      .listIndexes()
+      .map((r) => this.activeJob(r.name))
+      .filter((j): j is Job => j !== null && (j.status === "queued" || j.status === "running"));
+    let timedOut = false;
+    await Promise.all(
+      jobs.map(async (job) => {
+        const remaining = Math.max(0, deadline - Date.now());
+        const done = await this.jobQueue.waitForJob(job.id, remaining);
+        if (!done) timedOut = true;
+      }),
+    );
+    return { timedOut };
   }
 
   /**

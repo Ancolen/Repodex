@@ -140,11 +140,28 @@ export function startControlApi(
     res.json({ ok: true, version: "2.9.5", pid: process.pid });
   });
 
-  app.get("/indexes", (_req, res) => {
+  // `?wait=true&waitMs=<n>` is the status-as-one-round-trip form (2.10.0):
+  // a single project waits for its job, the list form awaits every active job
+  // against ONE shared deadline. A timed-out wait is honest — the response is
+  // the current view plus `timedOut` (single) / `X-Cidx-Timed-Out` (list).
+  const waitQuery = (req: express.Request): { wait: boolean; waitMs?: number } => {
+    const wait = req.query.wait === "true" || req.query.wait === "1";
+    const raw = req.query.waitMs;
+    const parsed = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : undefined;
+    const out: { wait: boolean; waitMs?: number } = { wait };
+    if (parsed !== undefined && Number.isFinite(parsed)) out.waitMs = parsed;
+    return out;
+  };
+
+  app.get("/indexes", async (req, res) => {
+    const { wait, waitMs } = waitQuery(req);
+    let timedOut = false;
+    if (wait) ({ timedOut } = await deps.manager.waitForAllSettle(waitMs));
+    if (timedOut) res.setHeader("X-Cidx-Timed-Out", "1");
     res.json(deps.manager.listIndexes().map((r) => viewIndex(deps.manager, r)));
   });
 
-  app.get("/indexes/:name", (req, res) => {
+  app.get("/indexes/:name", async (req, res) => {
     const rec = deps.manager.getIndex(req.params.name);
     if (!rec) {
       res
@@ -152,7 +169,13 @@ export function startControlApi(
         .json({ error: indexNotFoundMessage(req.params.name, deps.manager.listIndexes().map((r) => r.name)) });
       return;
     }
-    res.json(viewIndex(deps.manager, rec));
+    const { wait, waitMs } = waitQuery(req);
+    if (!wait) {
+      res.json(viewIndex(deps.manager, rec));
+      return;
+    }
+    const settled = await deps.manager.waitForIndexSettle(req.params.name, true, waitMs);
+    res.json({ ...viewIndex(deps.manager, settled.rec), ...(settled.timedOut ? { timedOut: true } : {}) });
   });
 
   app.post("/index", async (req, res) => {

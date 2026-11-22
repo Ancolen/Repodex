@@ -214,13 +214,25 @@ async function cmdList(): Promise<void> {
   for (const ix of indexes) printIndex(ix, cols);
 }
 
-async function cmdStatus(positionals: string[]): Promise<void> {
+async function cmdStatus(positionals: string[], flags: Record<string, string | boolean> = {}): Promise<void> {
   const name = positionals[0];
+  const q = new URLSearchParams();
+  if (flags.wait === true) {
+    q.set("wait", "true");
+    const raw = flags["wait-ms"];
+    const waitMs = typeof raw === "string" ? Number(raw) : undefined;
+    if (waitMs !== undefined && Number.isFinite(waitMs)) q.set("waitMs", String(waitMs));
+  }
+  const suffix = q.size > 0 ? `?${q.toString()}` : "";
+  await requireDaemon();
   if (name) {
-    await requireDaemon();
-    const ix = await api("GET", `/indexes/${encodeURIComponent(name)}`);
+    const ix = await api<any>("GET", `/indexes/${encodeURIComponent(name)}${suffix}`);
     printIndex(ix);
+    if (ix.timedOut) console.log("    (wait budget elapsed — still indexing; run the command again.)");
   } else {
+    // The list form awaits every active job against one shared deadline, then
+    // prints the fresh list (a second small GET).
+    if (q.size > 0) await api("GET", `/indexes${suffix}`);
     await cmdList();
   }
 }
@@ -1115,8 +1127,10 @@ const COMMANDS: Record<string, CmdDoc> = {
     aliases: ["ls"],
   },
   status: {
-    usage: "status [name]",
-    summary: "Shows the status and live progress of a project (or all of them if no name is given).",
+    usage: "status [name] [--wait [--wait-ms n]]",
+    summary:
+      "Shows the status and live progress of a project (or all of them if no name is given). " +
+      "--wait blocks for the final state (default 90 s, --wait-ms up to 110 s) instead of polling.",
     examples: ["cidx status", "cidx status backend"],
   },
   reindex: {
@@ -1859,7 +1873,7 @@ async function main(): Promise<void> {
     case "start": await cmdStart(positionals); break;
     case "index": await cmdIndex(positionals, flags); break;
     case "list": case "ls": await cmdList(); break;
-    case "status": await cmdStatus(positionals); break;
+    case "status": await cmdStatus(positionals, flags); break;
     case "reindex": await cmdReindex(positionals); break;
     case "sync": await cmdSync(positionals, flags); break;
     case "remove": case "rm": await cmdRemove(positionals); break;

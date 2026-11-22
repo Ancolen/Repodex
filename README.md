@@ -167,7 +167,7 @@ PURGE_DATA=1 ./uninstall.sh   # also deletes the ~/.cidx data
 | `start [directory]` | Starts the daemon if it isn't running; if a directory is given, indexes it too |
 | `index <directory> [--name x]` | Sends a new indexing job to the running daemon (returns immediately) |
 | `list` (`ls`) | Lists all projects and their statuses |
-| `status [name]` | Shows the status/progress of a project (or all of them) |
+| `status [name] [--wait [--wait-ms n]]` | Shows the status/progress of a project (or all of them); `--wait` blocks for the final state (90 s default, max 110 s) |
 | `reindex <name>` | Reindexes the project from scratch |
 | `sync <name>` | Incremental sync: updates changed/new + deleted files |
 | `remove <name>` (`rm`) | Removes the project and its data |
@@ -368,7 +368,7 @@ Every tool that takes a `project` also takes a **`path`** — a file/dir inside 
 - `find_references(name, project?, path?, limit?, includeDocs?, language?, symbolType?)` — finds where a symbol is used (call sites + definition) as `file:line` occurrences. Honest about its cap (`total`/`truncated`); doc artifacts count as evidence unless `includeDocs: false`.
 - `get_repo_overview(project?, path?)` — structural onboarding summary (languages, symbol types, top directories, entry points, largest files).
 - `list_indexes()` — lists indexed projects and their statuses.
-- `get_index_status(project?)` — indexing status and live progress (% / file).
+- `get_index_status(project?, wait?, waitMs?)` — indexing status and live progress (% / file). `wait: true` blocks for the final state in one round-trip (default budget 90 s, `waitMs` clamped to 110 s, under the client timeout).
 - `index_project(path, name?, wait?)` — the agent itself starts indexing a new directory (in the background, or `wait: true` for the final status). Re-indexing an existing path is a **full rebuild** (table + file cache dropped); use `sync_project` for an incremental refresh.
 - `sync_project(project?, path?, wait?)` — incremental refresh of an existing project over MCP: unchanged files are skipped, changed/new files re-indexed, deleted files pruned, and the table is never dropped (search keeps serving). `wait: true` returns the final status. CLI: `cidx sync <name> --wait`.
 - `get_file_outline(path)` — the symbol map of a file (function/class/method + line ranges).

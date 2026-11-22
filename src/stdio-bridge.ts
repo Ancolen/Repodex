@@ -448,14 +448,27 @@ async function main(): Promise<void> {
           return ok(formatIndexList(indexes));
         }
         case "get_index_status": {
-          if (args.project) {
-            const ix = await api<IndexView>(
-              "GET",
-              `/indexes/${encodeURIComponent(String(args.project))}`,
-            );
-            return ok(formatIndexStatus(ix));
+          // `wait`/`waitMs` are forwarded to the Control API (2.10.0): one
+          // round-trip instead of repeated polling; the server clamps the budget.
+          const q = new URLSearchParams();
+          if (args.wait === true) {
+            q.set("wait", "true");
+            if (typeof args.waitMs === "number") q.set("waitMs", String(args.waitMs));
           }
-          const indexes = await api<IndexView[]>("GET", "/indexes");
+          const suffix = q.size > 0 ? `?${q.toString()}` : "";
+          if (args.project) {
+            const ix = await api<IndexView & { timedOut?: boolean }>(
+              "GET",
+              `/indexes/${encodeURIComponent(String(args.project))}${suffix}`,
+            );
+            const text = formatIndexStatus(ix);
+            return ok(
+              ix.timedOut
+                ? `${text}\n(wait: budget elapsed — still indexing; call again for the final state.)`
+                : text,
+            );
+          }
+          const indexes = await api<IndexView[]>("GET", `/indexes${suffix}`);
           return ok(indexes.length ? indexes.map(formatIndexStatus).join("\n") : "No projects indexed yet.");
         }
         case "index_project": {

@@ -45,6 +45,24 @@ Version-by-version implementation history, **newest first**. For the current don
   duplicates, `indexing` suppression, indices without stats), `tests/stats.test.ts`
   (note wording, duplicate note, threshold override).
 
+### Added — status waits for the final state in one round-trip
+
+- **`get_index_status { wait, waitMs }` + a safer wait budget**
+  (`src/core/types.ts`, `src/core/index-manager.ts`, `src/server/mcp.ts`,
+  `src/server/control-api.ts`, `src/stdio-bridge.ts`, `src/server/tool-defs.ts`,
+  `src/cli.ts`). Agents without job-completion notifications used to poll
+  `get_index_status` (one audited session made 14 consecutive calls). It now
+  takes `wait: true` and returns the settled record; without a project every
+  active job is awaited against ONE shared deadline (`waitForAllSettle`), never
+  per project. `INDEX_WAIT_MS` drops 120 s → 90 s and a caller's `waitMs` is
+  clamped to `INDEX_WAIT_MAX_MS` (110 s) so a server-side wait always finishes
+  under the ~120 s client timeout. `GET /indexes` / `GET /indexes/:name` accept
+  `wait`/`waitMs` (single route returns `timedOut`; list route sets
+  `X-Cidx-Timed-Out`), and `cidx status [name] --wait [--wait-ms n]` rides the
+  same path.
+- Tests: `tests/index-wait.test.ts` (clamp, settle, timeout, not-found,
+  shared-deadline all-settle), the integration battery (HTTP + MCP wait).
+
 ### Fixed — search rejects malformed queries instead of crashing
 
 - **Search input validation** (`src/core/index-manager.ts`, `src/server/mcp.ts`,

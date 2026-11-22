@@ -68,7 +68,15 @@ export const JOB_PRIORITY_BACKGROUND = -5;
  * deadlock on a slow backend: past the budget the call returns with
  * `timedOut: true` and the caller falls back to polling like before.
  */
-export const INDEX_WAIT_MS = 120_000;
+export const INDEX_WAIT_MS = 90_000;
+
+/**
+ * Hard ceiling for a caller-supplied wait budget (2.10.0). Client HTTP/MCP
+ * timeouts sit at ~120 s, so a server-side wait must finish below them — 110 s
+ * leaves room for the response to travel. Anything above is clamped, never
+ * honored verbatim.
+ */
+export const INDEX_WAIT_MAX_MS = 110_000;
 
 /** The zero-downtime model migration job (proposal O2): rebuild every vector of the
  * project's current table in a shadow table with `targetModel` and swap the
