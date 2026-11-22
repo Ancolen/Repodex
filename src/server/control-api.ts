@@ -260,8 +260,10 @@ export function startControlApi(
       blame?: boolean;
       expand?: boolean;
     };
-    if (!query) {
-      res.status(400).json({ error: "'query' is required" });
+    if (typeof query !== "string" || query.trim().length === 0) {
+      res.status(400).json({
+        error: "'query' must be a non-empty string — for several queries use POST /search/batch with 'queries'",
+      });
       return;
     }
     const opts = { mode, language, symbolType, pathGlob, contextLines, rerank, mmr, boost, maxChars, doc, blame, expand };
@@ -313,7 +315,11 @@ export function startControlApi(
       blame?: boolean;
       expand?: boolean;
     };
-    if (!Array.isArray(queries) || queries.length === 0 || !queries.every((q) => typeof q === "string")) {
+    if (
+      !Array.isArray(queries) ||
+      queries.length === 0 ||
+      !queries.every((q) => typeof q === "string" && q.trim().length > 0)
+    ) {
       res.status(400).json({ error: "'queries' must be a non-empty array of strings" });
       return;
     }
@@ -339,8 +345,8 @@ export function startControlApi(
       symbolType?: string;
       pathGlob?: string;
     };
-    if (!query) {
-      res.status(400).json({ error: "'query' is required" });
+    if (typeof query !== "string" || query.trim().length === 0) {
+      res.status(400).json({ error: "'query' must be a non-empty string" });
       return;
     }
     const opts: {

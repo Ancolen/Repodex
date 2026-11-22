@@ -45,6 +45,20 @@ Version-by-version implementation history, **newest first**. For the current don
   duplicates, `indexing` suppression, indices without stats), `tests/stats.test.ts`
   (note wording, duplicate note, threshold override).
 
+### Fixed — search rejects malformed queries instead of crashing
+
+- **Search input validation** (`src/core/index-manager.ts`, `src/server/mcp.ts`,
+  `src/server/control-api.ts`, `src/stdio-bridge.ts`, `src/server/tool-defs.ts`).
+  A raw JSON client (or an agent confusing the tools) sending
+  `search_codebase { queries: [...] }` — or any non-string query — reached
+  `query.trim()` and threw an opaque error. `searchIndex` / `searchAll` /
+  `getContextPack` now assert a non-empty string and `searchBatch` a
+  string array; every entry point returns an actionable message ("'queries'
+  belongs to search_codebase_batch — pass one non-empty string as 'query' here")
+  and the schemas carry `minLength: 1` / `minItems: 1`.
+- Tests: `tests/search-validation.test.ts`; the integration battery exercises
+  `POST /search { queries }` → 400 and the MCP tool call → `isError`.
+
 ### Fixed — `check_docs` works without an anchor on a single-project install
 
 - **Doccheck anchor rule** (`src/core/index-manager.ts`, `src/server/mcp.ts`,

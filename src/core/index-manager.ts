@@ -687,6 +687,20 @@ export function indexNotFoundMessage(name: string, available: readonly string[])
   return msg;
 }
 
+/**
+ * Rejects a non-string or blank search query with an actionable message. The
+ * MCP/HTTP schemas say "string", but a raw JSON consumer can still send
+ * `undefined`/`42`/`{queries: [...]}` — those used to crash on `query.trim()`.
+ */
+export function assertSearchQuery(query: unknown): asserts query is string {
+  if (typeof query !== "string" || query.trim().length === 0) {
+    throw new Error(
+      "Search query must be a non-empty string — for several queries use " +
+        "search_codebase_batch (POST /search/batch) with 'queries'.",
+    );
+  }
+}
+
 /** Symbol types that can make/receive a call (the call-graph inventory). */
 const CALLABLE_TYPES = new Set(["function", "method", "constructor"]);
 
@@ -1333,6 +1347,7 @@ export class IndexManager {
     limit = 5,
     opts?: SearchOptions,
   ): Promise<SearchEnvelope> {
+    assertSearchQuery(query);
     const startedAt = Date.now();
     const rec = this.registry.getIndex(name);
     if (!rec) throw this.indexNotFound(name);
@@ -1354,6 +1369,7 @@ export class IndexManager {
 
   /** Search across all projects; results are merged and ranked. */
   async searchAll(query: string, limit = 5, opts?: SearchOptions): Promise<SearchEnvelope> {
+    assertSearchQuery(query);
     const startedAt = Date.now();
     const mode = opts?.mode ?? "hybrid";
     const indexes = this.registry.listIndexes();
@@ -1644,6 +1660,9 @@ export class IndexManager {
     limit = 5,
     opts?: SearchOptions,
   ): Promise<BatchSearchGroup[]> {
+    if (!Array.isArray(queries) || queries.some((q) => typeof q !== "string")) {
+      throw new Error("'queries' must be an array of non-empty strings.");
+    }
     const uniq = [...new Set(queries.map((q) => q.trim()).filter((q) => q.length > 0))];
     if (uniq.length === 0) return [];
     return Promise.all(
@@ -1743,6 +1762,7 @@ export class IndexManager {
       pathGlob?: string | undefined;
     },
   ): Promise<ContextPack> {
+    assertSearchQuery(query);
     const limit = opts?.limit ?? PACK_DEFAULT_LIMIT;
     const contextLines = opts?.contextLines ?? 0;
     // No `maxChars` here on purpose: the pack budget is applied once, below.

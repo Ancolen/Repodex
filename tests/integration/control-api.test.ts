@@ -125,6 +125,37 @@ const WATCH_DOC_REL = "docs/watcher-freshness.md";
 /** Every indexed file after the doccheck scenario: the fixture sources + that doc. */
 const INDEXED_FILE_COUNT = FIXTURE_FILES.length + 1;
 
+/** One `tools/call` over the stateless Streamable-HTTP MCP endpoint (JSON or SSE reply). */
+interface McpResponse {
+  id?: number;
+  result?: { isError?: boolean; content?: { type?: string; text?: string }[] };
+  error?: { message?: string };
+}
+
+async function mcpToolCall(mcpUrl: string, name: string, args: unknown): Promise<McpResponse> {
+  const resp = await fetch(`${mcpUrl}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name, arguments: args },
+    }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const text = await resp.text();
+  if (resp.status !== 200) throw new Error(`MCP ${name} → ${resp.status}: ${text.slice(0, 500)}`);
+  const contentType = resp.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) return JSON.parse(text) as McpResponse;
+  // Streamable HTTP replies as SSE: one `data:` JSON-RPC payload per event.
+  const payloads = text
+    .split("\n")
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => JSON.parse(line.slice(5).trim()) as McpResponse);
+  return payloads.find((p) => p.id === 1) ?? payloads[payloads.length - 1] ?? {};
+}
+
 describe("db + control-api integration battery", () => {
   let backend: FakeEmbedBackend | undefined;
   let projectRoot: string | undefined;
@@ -168,6 +199,22 @@ describe("db + control-api integration battery", () => {
     expect(pong.version.length).toBeGreaterThan(0);
     expect(pong.pid).toBeGreaterThan(0);
     expect(pong.pid).not.toBe(process.pid); // the daemon is really a subprocess
+  });
+
+  test("search validation: a non-string query is a 400; MCP points at the batch tool", async () => {
+    if (!daemon) throw new Error("daemon not started");
+    const bad = await fetch(`${daemon.controlUrl}/search`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ queries: ["greet"] }),
+    });
+    expect(bad.status).toBe(400);
+    const badBody = (await bad.json()) as { error: string };
+    expect(badBody.error).toContain("POST /search/batch");
+
+    const mcp = await mcpToolCall(daemon.mcpUrl, "search_codebase", { queries: ["greet"] });
+    expect(mcp.result?.isError).toBe(true);
+    expect(mcp.result?.content?.[0]?.text).toContain("search_codebase_batch");
   });
 
   // ------------------------------------------------- create + await the job

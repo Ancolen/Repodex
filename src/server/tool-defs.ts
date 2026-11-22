@@ -19,12 +19,14 @@ export const TOOL_DEFINITIONS: Tool[] = [
       "(save detection + embedding). Do not rely on this tool to search the NEW content of a file " +
       "you JUST edited yourself — the result may show the old version; get that content by reading the " +
       "file directly. This tool is for DISCOVERY (finding related/similar code, where something is). " +
-      "If you need to see an edit reflected in the index, wait ~2 sec before searching.",
+      "If you need to see an edit reflected in the index, wait ~2 sec before searching. " +
+      "For SEVERAL queries in one call use search_codebase_batch with its 'queries' array (each entry a non-empty string).",
     inputSchema: {
       type: "object",
       properties: {
         query: {
           type: "string",
+          minLength: 1,
           description: "Natural language query or technical terms to search for.",
         },
         project: {
@@ -140,8 +142,9 @@ export const TOOL_DEFINITIONS: Tool[] = [
       properties: {
         queries: {
           type: "array",
-          items: { type: "string" },
-          description: "The queries to run (natural language or technical terms).",
+          minItems: 1,
+          items: { type: "string", minLength: 1 },
+          description: "The queries to run (natural language or technical terms; each a non-empty string).",
         },
         project: {
           type: "string",
@@ -514,6 +517,7 @@ export const TOOL_DEFINITIONS: Tool[] = [
       properties: {
         query: {
           type: "string",
+          minLength: 1,
           description: "Natural language query or technical terms to search for.",
         },
         project: {

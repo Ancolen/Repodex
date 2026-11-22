@@ -349,6 +349,13 @@ async function main(): Promise<void> {
     try {
       switch (name) {
         case "search_codebase": {
+          if (typeof args.query !== "string" || args.query.trim().length === 0) {
+            const hint =
+              args.queries !== undefined
+                ? "'queries' belongs to search_codebase_batch — pass one non-empty string as 'query' here"
+                : "pass a non-empty 'query' string";
+            return fail(`Search error: ${hint}.`);
+          }
           const env = await api<SearchEnvelope>("POST", "/search", {
             query: args.query,
             project: args.project,
@@ -375,6 +382,13 @@ async function main(): Promise<void> {
           };
         }
         case "search_codebase_batch": {
+          if (
+            !Array.isArray(args.queries) ||
+            args.queries.length === 0 ||
+            args.queries.some((q) => typeof q !== "string" || q.trim().length === 0)
+          ) {
+            return fail("Search error: 'queries' must be a non-empty array of strings.");
+          }
           const groups = await api<Parameters<typeof formatBatchResults>[0]>("POST", "/search/batch", {
             queries: args.queries,
             project: args.project,

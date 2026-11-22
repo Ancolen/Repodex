@@ -147,6 +147,8 @@ export function pickFreePort(): Promise<number> {
 export interface DaemonHandle {
   /** The Control API base — every scenario talks to this. */
   controlUrl: string;
+  /** The MCP (Streamable HTTP) base — the agent-facing endpoint. */
+  mcpUrl: string;
   /** The daemon's own data root (removed again by the caller). */
   home: string;
   proc: DaemonProcess;
@@ -192,6 +194,7 @@ export async function startDaemon(opts: {
     const home = mkdtempSync(path.join(tmpdir(), "cidx-battery-daemon-"));
     const [mcpPort, controlPort] = await Promise.all([pickFreePort(), pickFreePort()]);
     const controlUrl = `http://127.0.0.1:${controlPort}`;
+    const mcpUrl = `http://127.0.0.1:${mcpPort}`;
     const proc = Bun.spawn({
       cmd: [process.execPath, DAEMON_ENTRY],
       cwd: REPO_ROOT,
@@ -219,7 +222,7 @@ export async function startDaemon(opts: {
     };
     try {
       await waitForBoot(controlUrl, proc, stderrText, bootTimeoutMs);
-      return { controlUrl, home, proc, stderrText };
+      return { controlUrl, mcpUrl, home, proc, stderrText };
     } catch (err) {
       lastError = err;
       // The failed attempt's process + scratch home must not leak.

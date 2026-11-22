@@ -147,6 +147,13 @@ export function buildServer(deps: McpDeps): Server {
         blame?: boolean;
         expand?: boolean;
       };
+      if (typeof args.query !== "string" || args.query.trim().length === 0) {
+        const hint =
+          (rawArgs as { queries?: unknown }).queries !== undefined
+            ? "'queries' belongs to search_codebase_batch — pass one non-empty string as 'query' here"
+            : "pass a non-empty 'query' string";
+        return { content: [{ type: "text", text: `Search error: ${hint}.` }], isError: true };
+      }
       const limit = args.limit ?? 5;
       const opts = {
         mode: args.mode,
@@ -199,7 +206,11 @@ export function buildServer(deps: McpDeps): Server {
         blame?: boolean;
         expand?: boolean;
       };
-      if (!Array.isArray(args.queries) || args.queries.length === 0) {
+      if (
+        !Array.isArray(args.queries) ||
+        args.queries.length === 0 ||
+        args.queries.some((q) => typeof q !== "string" || q.trim().length === 0)
+      ) {
         return {
           content: [{ type: "text", text: "Search error: 'queries' must be a non-empty array of strings." }],
           isError: true,
