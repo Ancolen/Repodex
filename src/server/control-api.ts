@@ -1,7 +1,6 @@
 import { existsSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import express from "express";
-import * as lancedb from "@lancedb/lancedb";
 import { CONFIG, CONFIG_SOURCE } from "../config";
 import { hostGuard } from "./host-guard";
 import { fileOutline } from "../chunking/chunker";
@@ -40,19 +39,6 @@ export interface ControlDeps {
 
 // -------------------------------------------------------------------- doctor
 
-/**
- * Second, read-only LanceDB connection, used only for index metadata
- * (`Table.listIndices` — ANN/FTS presence). `services/db.ts` owns the daemon's
- * connection and exposes no index-metadata helper, and LanceDB is an embedded
- * store designed for concurrent readers, so a dedicated read-only handle is
- * safe. Cached: one extra connection per daemon process.
- */
-let doctorDb: lancedb.Connection | null = null;
-async function doctorConnection(): Promise<lancedb.Connection> {
-  if (!doctorDb) doctorDb = await lancedb.connect(CONFIG.DB_DIR);
-  return doctorDb;
-}
-
 /** Gathers the live state `runDoctor` reads — every port injectable, none throwing. */
 function doctorPorts(deps: ControlDeps): DoctorPorts {
   return {
@@ -60,13 +46,9 @@ function doctorPorts(deps: ControlDeps): DoctorPorts {
     tableNames: () => listTables(),
     tableColumns: async (table) => [...(await tableColumns(table))],
     rowCount: (table) => countTableRows(table),
-    tableIndices: async (table) => {
-      const conn = await doctorConnection();
-      const names = await conn.tableNames();
-      if (!names.includes(table)) return [];
-      const t = await conn.openTable(table);
-      return (await t.listIndices()).map((ix) => ({ columns: ix.columns, indexType: ix.indexType }));
-    },
+    // `tableStats` carries the per-index native coverage (indexed/unindexed
+    // rows) doctor needs to flag a search leg that silently misses rows.
+    tableIndices: async (table) => (await tableStats(table))?.indices ?? [],
     backend: async () => {
       try {
         const backend = await resolveEmbedBackend();
@@ -108,6 +90,7 @@ function doctorPorts(deps: ControlDeps): DoctorPorts {
       embedModel: CONFIG.OLLAMA_MODEL,
       docstrings: CONFIG.DOCSTRINGS,
       vectorIndexThreshold: CONFIG.VECTOR_INDEX_THRESHOLD,
+      autoMaintenanceUnindexedRatio: CONFIG.AUTO_MAINTENANCE_UNINDEXED_RATIO,
       rerankEnabled: CONFIG.RERANK_ENABLED,
       rerankModel: CONFIG.RERANK_MODEL,
     },
@@ -930,7 +913,9 @@ export function startControlApi(
    * per-project list — the global picture is always included.
    */
   app.get("/stats", async (req, res) => {
-    const opts: { project?: string } = {};
+    const opts: { project?: string; coverageGapRatio: number } = {
+      coverageGapRatio: CONFIG.AUTO_MAINTENANCE_UNINDEXED_RATIO,
+    };
     const project = req.query.project;
     if (typeof project === "string" && project.length > 0) {
       if (!deps.manager.listIndexes().some((r) => r.name === project)) {

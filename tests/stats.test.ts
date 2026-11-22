@@ -337,6 +337,40 @@ describe("collectStats — the /stats payload shape (fake ports)", () => {
     expect(b.job).toEqual({ id: "job-1", type: "index", status: "running", processed: 4, total: 8 });
   });
 
+  test("an uncovered index becomes an actionable note; a small gap stays quiet", async () => {
+    const gapped = {
+      ...nativeA,
+      numRows: 9258,
+      indices: [
+        { name: "idx_vec", columns: ["vector"], indexType: "IVF_PQ", indexedRows: 9258, unindexedRows: 0 },
+        { name: "idx_fts", columns: ["content"], indexType: "FTS", indexedRows: 375, unindexedRows: 8883 },
+      ],
+    };
+    const r = await collectStats(ports({ tableStats: async () => gapped }));
+    const notes = r.projects[0]!.notes;
+    expect(notes.some((n) => n.includes("'content' index covers 375/9258"))).toBe(true);
+    expect(notes.some((n) => n.includes("96% unindexed") && n.includes("cidx compact a"))).toBe(true);
+  });
+
+  test("duplicate native indexes on one column get a note (never summed)", async () => {
+    const dup = {
+      ...nativeA,
+      indices: [
+        { columns: ["vector"], indexType: "IVF_PQ", indexedRows: 42, unindexedRows: 0 },
+        { columns: ["vector"], indexType: "IVF_PQ", indexedRows: 42, unindexedRows: 0 },
+      ],
+    };
+    const r = await collectStats(ports({ tableStats: async () => dup }));
+    expect(r.projects[0]!.notes).toContain("2 native indexes on 'vector' — one is redundant");
+  });
+
+  test("the coverage threshold is overridable; the default leaves a 4.7% gap quiet", async () => {
+    const dflt = await collectStats(ports()); // nativeA: vector 40/42 = 4.7% uncovered
+    expect(dflt.projects[0]!.notes).toEqual(["table stats partially unavailable: probe failed"]);
+    const strict = await collectStats(ports(), { coverageGapRatio: 0.01 });
+    expect(strict.projects[0]!.notes.some((n) => n.includes("'vector' index covers 40/42"))).toBe(true);
+  });
+
   test("global stats: data-root total, meta.db (incl. WAL), cache, unreadable entries", async () => {
     const r = await collectStats(ports());
     expect(r.global.rootExists).toBe(true);

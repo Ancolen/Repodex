@@ -60,6 +60,12 @@ export interface DoctorReport {
 export interface TableIndexInfo {
   columns: string[];
   indexType: string;
+  /** Native index name (absent when the port only carries the structural fields). */
+  name?: string | undefined;
+  /** Rows the index covers — absent when the native per-index stats are unavailable. */
+  indexedRows?: number | undefined;
+  /** Rows the index does not cover yet (an `optimize` would add them). */
+  unindexedRows?: number | undefined;
 }
 
 interface Finding {
@@ -281,6 +287,8 @@ export interface ProjectDoctorState {
   vectorIndexThreshold: number;
   /** Config `indexing.docstrings` — whether missing doc columns is a problem. */
   docstringsEnabled: boolean;
+  /** Uncovered-row share above which a warn fires (config `maintenance.unindexedRatio`). */
+  coverageGapThreshold: number;
 }
 
 /** The `doc` + `doc_vector` columns the 2.4.0 docstring legs are gated on. */
@@ -291,6 +299,54 @@ function hasDocColumns(columns: string[]): boolean {
 function hasIndexOn(indices: TableIndexInfo[], column: string, typeRe?: RegExp): boolean {
   return indices.some((ix) => ix.columns.includes(column) && (typeRe === undefined || typeRe.test(ix.indexType)));
 }
+
+/** The per-column best coverage across every native index on that column. */
+interface ColumnCoverage {
+  /** How many native indexes cover the column (>1 = duplicate index). */
+  count: number;
+  /** The best-covered index's indexed rows; null when no index reported stats. */
+  indexedRows: number | null;
+  /** Uncovered rows of that best index (reported, or derived from the row count). */
+  unindexedRows: number | null;
+}
+
+/**
+ * Groups the native indices by column and keeps the best coverage per column
+ * (LanceDB `indexStats` is per native index; duplicates must never be summed).
+ */
+export function columnCoverage(indices: TableIndexInfo[], rows: number): Map<string, ColumnCoverage> {
+  const map = new Map<string, ColumnCoverage>();
+  for (const ix of indices) {
+    for (const column of ix.columns) {
+      let c = map.get(column);
+      if (!c) {
+        c = { count: 0, indexedRows: null, unindexedRows: null };
+        map.set(column, c);
+      }
+      c.count += 1;
+      if (typeof ix.indexedRows === "number") {
+        const unindexed =
+          typeof ix.unindexedRows === "number" ? ix.unindexedRows : Math.max(0, rows - ix.indexedRows);
+        // Best coverage = fewest uncovered rows; equal coverage keeps the first.
+        if (c.indexedRows === null || ix.indexedRows > c.indexedRows) {
+          c.indexedRows = ix.indexedRows;
+          c.unindexedRows = unindexed;
+        }
+      }
+    }
+  }
+  return map;
+}
+
+/** Human labels for the search columns whose coverage doctor inspects. */
+const COVERAGE_LABELS: Record<string, string> = {
+  vector: "ANN index on 'vector'",
+  doc_vector: "ANN index on 'doc_vector'",
+  content: "BM25 index on 'content'",
+  doc: "BM25 index on 'doc'",
+  id_terms: "BM25 index on 'id_terms'",
+  symbolName: "n-gram FTS index on 'symbolName'",
+};
 
 /**
  * Findings for one registered project. Table-derived findings stop at a missing
@@ -375,6 +431,37 @@ export function projectFindings(s: ProjectDoctorState): Finding[] {
         `no ANN index (below the ${s.vectorIndexThreshold} row threshold) — brute-force scan, by design`,
       ),
     );
+  }
+
+  // Native index coverage: incremental writes land behind an existing ANN/FTS
+  // index until an `optimize` folds them in (auto-maintenance does this after
+  // every index job). Mid-job the coverage is transient — never warn on it.
+  const coverage = columnCoverage(s.indices, rows);
+  if (s.status !== "indexing" && rows > 0) {
+    for (const [column, c] of coverage) {
+      if (c.indexedRows === null || c.unindexedRows === null || c.unindexedRows <= 0) continue;
+      const ratio = c.unindexedRows / rows;
+      if (ratio <= s.coverageGapThreshold) continue;
+      const pct = Math.round(ratio * 100);
+      f.push(
+        finding(
+          "warn",
+          `${COVERAGE_LABELS[column] ?? `index on '${column}'`} covers ${c.indexedRows}/${rows} rows — ${pct}% of the table is invisible to that search leg`,
+          `cidx compact ${s.name} — folds the uncovered rows in (the next sync auto-repairs it too)`,
+        ),
+      );
+    }
+  }
+  for (const [column, c] of coverage) {
+    if (c.count > 1) {
+      f.push(
+        finding(
+          "warn",
+          `${c.count} native indexes on '${column}' — one is redundant (coverage is counted once)`,
+          `${reindex} — rebuilds a single index`,
+        ),
+      );
+    }
   }
 
   if (s.status === "indexing") {
@@ -803,6 +890,8 @@ export interface DoctorPorts {
     embedModel: string;
     docstrings: boolean;
     vectorIndexThreshold: number;
+    /** Uncovered-row share above which a project gets a coverage warn. */
+    autoMaintenanceUnindexedRatio: number;
     rerankEnabled: boolean;
     rerankModel: string;
   };
@@ -867,6 +956,7 @@ export async function runDoctor(ports: DoctorPorts): Promise<DoctorReport> {
         modelOnBackend: modelProbe === null ? null : modelTagPresent(modelProbe, model),
         vectorIndexThreshold: settings.vectorIndexThreshold,
         docstringsEnabled: settings.docstrings,
+        coverageGapThreshold: settings.autoMaintenanceUnindexedRatio,
       }),
     );
   }

@@ -712,6 +712,8 @@ export async function countTableRows(table: string): Promise<number> {
  * LanceDB tracks no "built at" for indices, so stats report presence and
  * coverage only — nothing invented. */
 export interface TableIndexStat {
+  /** Native index name (unique per index; two indices may cover the same column). */
+  name?: string | undefined;
   /** The column(s) the index covers (currently always one: `vector`, `content`, ...). */
   columns: string[];
   /** The native index-type string (e.g. `IVF_PQ`, `FTS`). */
@@ -773,7 +775,7 @@ export async function tableStats(table: string): Promise<TableStatsReport | null
   try {
     const indices = await t.listIndices();
     for (const ix of indices) {
-      const stat: TableIndexStat = { columns: [...ix.columns], indexType: ix.indexType };
+      const stat: TableIndexStat = { name: ix.name, columns: [...ix.columns], indexType: ix.indexType };
       try {
         const is = await t.indexStats(ix.name);
         if (is) {

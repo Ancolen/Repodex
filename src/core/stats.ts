@@ -89,7 +89,15 @@ export interface StatsReport {
 export interface StatsOpts {
   /** Only report this project (plus the usual global picture). */
   project?: string | undefined;
+  /**
+   * Uncovered-row share above which an index-coverage note is emitted
+   * (default 0.05; the daemon passes `maintenance.unindexedRatio`).
+   */
+  coverageGapRatio?: number | undefined;
 }
+
+/** Default uncovered-row share for the coverage note (config default). */
+export const DEFAULT_COVERAGE_GAP_RATIO = 0.05;
 
 /**
  * The live state the stats need, all injected — every port resolves honestly
@@ -145,8 +153,57 @@ function sumEntries(entries: DiskEntry[], names: readonly string[]): number {
   return total;
 }
 
+/**
+ * Coverage + duplicate-index notes for one project's native indices (2.10.0).
+ * Incremental writes land behind an existing ANN/FTS index until an `optimize`
+ * folds them in, so an uncovered index is a silent search-quality regression.
+ * Duplicates are never summed — the best-covered index is reported.
+ */
+function coverageNotes(native: TableStatsReport, project: string, threshold: number): string[] {
+  const rows = native.numRows;
+  if (rows === null || rows <= 0) return [];
+  const best = new Map<string, { count: number; indexed: number | null; unindexed: number | null }>();
+  const order: string[] = [];
+  for (const ix of native.indices) {
+    for (const column of ix.columns) {
+      let c = best.get(column);
+      if (!c) {
+        c = { count: 0, indexed: null, unindexed: null };
+        best.set(column, c);
+        order.push(column);
+      }
+      c.count += 1;
+      if (ix.indexedRows !== undefined) {
+        const unindexed = ix.unindexedRows ?? Math.max(0, rows - ix.indexedRows);
+        if (c.indexed === null || ix.indexedRows > c.indexed) {
+          c.indexed = ix.indexedRows;
+          c.unindexed = unindexed;
+        }
+      }
+    }
+  }
+  const notes: string[] = [];
+  for (const column of order) {
+    const c = best.get(column)!;
+    if (c.indexed !== null && c.unindexed !== null && c.unindexed > 0 && c.unindexed / rows > threshold) {
+      const pct = Math.round((c.unindexed / rows) * 100);
+      notes.push(
+        `'${column}' index covers ${c.indexed}/${rows} rows (${pct}% unindexed) — ` +
+          `cidx compact ${project} or the next sync auto-repairs it`,
+      );
+    }
+    if (c.count > 1) notes.push(`${c.count} native indexes on '${column}' — one is redundant`);
+  }
+  return notes;
+}
+
 /** Composes one project's stats from the ports (all unknowns preserved). */
-async function projectStats(ports: StatsPorts, disk: DiskUsageState, rec: IndexRecord): Promise<ProjectStats> {
+async function projectStats(
+  ports: StatsPorts,
+  disk: DiskUsageState,
+  rec: IndexRecord,
+  coverageGapRatio: number,
+): Promise<ProjectStats> {
   const table = tableNameFor(rec);
   const size = disk.tables.find((e) => e.name === table);
   const native = await ports.tableStats(table);
@@ -164,7 +221,9 @@ async function projectStats(ports: StatsPorts, disk: DiskUsageState, rec: IndexR
     fragments: native ? native.numFragments : null,
     smallFragments: native ? native.numSmallFragments : null,
     indices: native ? native.indices : null,
-    notes: native ? [...native.unknowns] : [`table '${table}' not found on disk — reindex to rebuild it`],
+    notes: native
+      ? [...native.unknowns, ...coverageNotes(native, rec.name, coverageGapRatio)]
+      : [`table '${table}' not found on disk — reindex to rebuild it`],
     job: job
       ? {
           id: job.id,
@@ -189,10 +248,11 @@ export async function collectStats(ports: StatsPorts, opts: StatsOpts = {}): Pro
   const disk = ports.diskUsage();
   const all = ports.indexes();
   const scoped = opts.project ? all.filter((r) => r.name === opts.project) : all;
+  const coverageGapRatio = opts.coverageGapRatio ?? DEFAULT_COVERAGE_GAP_RATIO;
 
   const projects: ProjectStats[] = [];
   for (const rec of scoped) {
-    projects.push(await projectStats(ports, disk, rec));
+    projects.push(await projectStats(ports, disk, rec, coverageGapRatio));
   }
 
   return {

@@ -63,6 +63,7 @@ function projectState(overrides: Partial<ProjectDoctorState> = {}): ProjectDocto
     modelOnBackend: true,
     vectorIndexThreshold: 50000,
     docstringsEnabled: true,
+    coverageGapThreshold: 0.05,
     ...overrides,
   };
 }
@@ -100,6 +101,7 @@ function ports(overrides: Partial<DoctorPorts> = {}): DoctorPorts {
       embedModel: "qwen3-embedding",
       docstrings: true,
       vectorIndexThreshold: 50000,
+      autoMaintenanceUnindexedRatio: 0.05,
       rerankEnabled: true,
       rerankModel: "qwen3-reranker-q8",
     },
@@ -347,6 +349,87 @@ describe("doctor — projectCheck (registry ↔ table sanity)", () => {
     const c = projectCheck(projectState({ tableExists: false, tableRows: null, columns: LEGACY_COLUMNS }));
     expect(c.status).toBe("fail");
     expect(c.hint).toContain("rebuilds the table");
+  });
+});
+
+// ------------------------------------------------------ native index coverage
+
+describe("doctor — projectCheck (native index coverage)", () => {
+  test("an FTS index that misses most rows is a warn with the compact hint", () => {
+    const c = projectCheck(
+      projectState({
+        tableRows: 9258,
+        chunkCount: 9258,
+        indices: [
+          { columns: ["vector"], indexType: "IvfPq", indexedRows: 9258, unindexedRows: 0 },
+          { columns: ["content"], indexType: "Inverted", indexedRows: 375, unindexedRows: 8883 },
+        ],
+      }),
+    );
+    expect(c.status).toBe("warn");
+    expect(c.detail).toContain("BM25 index on 'content' covers 375/9258");
+    expect(c.detail).toContain("96%");
+    expect(c.hint).toContain("cidx compact api");
+  });
+
+  test("coverage below the threshold is not flagged", () => {
+    const c = projectCheck(
+      projectState({
+        tableRows: 1000,
+        chunkCount: 1000,
+        indices: [
+          { columns: ["vector"], indexType: "IvfPq", indexedRows: 1000, unindexedRows: 0 },
+          { columns: ["content"], indexType: "Inverted", indexedRows: 960, unindexedRows: 40 },
+        ],
+      }),
+    );
+    expect(c.status).toBe("ok");
+  });
+
+  test("duplicate native indexes on one column are a warn", () => {
+    const c = projectCheck(
+      projectState({
+        indices: [
+          ...FRESH_INDICES,
+          { columns: ["vector"], indexType: "IvfPq", indexedRows: 120, unindexedRows: 0 },
+        ],
+      }),
+    );
+    expect(c.status).toBe("warn");
+    expect(c.detail).toContain("2 native indexes on 'vector'");
+    expect(c.hint).toContain("cidx reindex api");
+  });
+
+  test("the best-covered duplicate wins — coverage is never summed", () => {
+    const c = projectCheck(
+      projectState({
+        indices: [
+          { columns: ["vector"], indexType: "IvfPq", indexedRows: 10, unindexedRows: 110 },
+          { columns: ["vector"], indexType: "IvfPq", indexedRows: 120, unindexedRows: 0 },
+          ...FRESH_INDICES.slice(1),
+        ],
+      }),
+    );
+    expect(c.detail).not.toContain("invisible");
+    expect(c.detail).toContain("2 native indexes on 'vector'");
+  });
+
+  test("no coverage warning while a job is writing the table", () => {
+    const c = projectCheck(
+      projectState({
+        status: "indexing",
+        indices: [
+          { columns: ["vector"], indexType: "IvfPq", indexedRows: 10, unindexedRows: 110 },
+          { columns: ["content"], indexType: "Inverted", indexedRows: 10, unindexedRows: 110 },
+        ],
+      }),
+    );
+    expect(c.status).toBe("ok");
+    expect(c.detail).toContain("indexing in progress");
+  });
+
+  test("indices without native stats produce no coverage finding", () => {
+    expect(projectCheck(projectState({ indices: FRESH_INDICES })).status).toBe("ok");
   });
 });
 
@@ -628,6 +711,77 @@ describe("doctor — runDoctor (collector over fake ports)", () => {
     ]);
     for (const c of report.checks) expect(c.status).toBe("ok");
     expect(byId(report.checks, "project:api")?.detail).toContain("schema current");
+  });
+
+  test("native index coverage flows from the port into the project warn", async () => {
+    const report = await runDoctor(
+      ports({
+        indexes: () => [
+          {
+            name: "api",
+            path: "/home/dev/api",
+            tableName: "idx_api",
+            status: "ready",
+            fileCount: 12,
+            chunkCount: 4258,
+            embedModel: "qwen3-embedding",
+            embedDim: null,
+            lastIndexedAt: 1,
+            createdAt: 1,
+            error: null,
+          },
+        ],
+        tableNames: async () => ["idx_api"],
+        tableColumns: async () => FRESH_COLUMNS,
+        rowCount: async () => 4258,
+        tableIndices: async () => [
+          { columns: ["vector"], indexType: "IvfPq", indexedRows: 4258, unindexedRows: 0 },
+          { columns: ["content"], indexType: "Inverted", indexedRows: 40, unindexedRows: 4218 },
+          { columns: ["doc"], indexType: "Inverted", indexedRows: 4258, unindexedRows: 0 },
+        ],
+      }),
+    );
+
+    const project = byId(report.checks, "project:api");
+    expect(project?.status).toBe("warn");
+    expect(project?.detail).toContain("BM25 index on 'content' covers 40/4258");
+    expect(project?.hint).toContain("cidx compact api");
+  });
+
+  test("the coverage threshold is config-driven (a lax threshold silences the warn)", async () => {
+    const report = await runDoctor(
+      ports({
+        indexes: () => [
+          {
+            name: "api",
+            path: "/home/dev/api",
+            tableName: "idx_api",
+            status: "ready",
+            fileCount: 12,
+            chunkCount: 1000,
+            embedModel: "qwen3-embedding",
+            embedDim: null,
+            lastIndexedAt: 1,
+            createdAt: 1,
+            error: null,
+          },
+        ],
+        tableNames: async () => ["idx_api"],
+        tableColumns: async () => FRESH_COLUMNS,
+        rowCount: async () => 1000,
+        tableIndices: async () => [
+          { columns: ["vector"], indexType: "IvfPq", indexedRows: 1000, unindexedRows: 0 },
+          { columns: ["content"], indexType: "Inverted", indexedRows: 900, unindexedRows: 100 },
+          { columns: ["doc"], indexType: "Inverted", indexedRows: 1000, unindexedRows: 0 },
+        ],
+        settings: {
+          ...ports().settings,
+          autoMaintenanceUnindexedRatio: 0.2,
+        },
+      }),
+    );
+
+    expect(byId(report.checks, "project:api")?.status).toBe("ok");
   });
 
   test("a legacy-schema project and an orphan table surface their hints", async () => {

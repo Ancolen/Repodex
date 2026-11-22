@@ -24,6 +24,27 @@ Version-by-version implementation history, **newest first**. For the current don
 - Tests: `tests/registry.test.ts` (free-page reclaim, opt-out, tiny-DB floor),
   `tests/config.test.ts` (defaults + `META_VACUUM_*` overrides).
 
+### Added — coverage gaps are visible before a sync repairs them
+
+- **Doctor + stats coverage warnings** (`src/core/doctor.ts`, `src/core/stats.ts`,
+  `src/server/control-api.ts`, `src/services/db.ts`). A silent coverage gap
+  (hybrid search quietly losing the rows written after the index was built) is
+  now reported without waiting for a sync. `GET /doctor` reads the per-index
+  native coverage (`indexedRows`/`unindexedRows`, via `tableStats` — the
+  doctor's second read-only LanceDB connection is gone) and warns per project
+  when any search leg misses more than `maintenance.unindexedRatio` (default
+  5%) of the table: *"BM25 index on 'content' covers 375/9258 rows — 96% of the
+  table is invisible to that search leg"*, hint `cidx compact <name>` (the next
+  sync auto-repairs it too). Two native indexes on one column get a separate
+  duplicate warn (coverage is counted once per column — duplicates are never
+  summed). Coverage warnings are suppressed while the project is `indexing`
+  (transient). `cidx stats` carries the same coverage + duplicate notes in the
+  project block; the threshold is the same config value (`StatsOpts.coverageGapRatio`
+  defaults to 5%).
+- Tests: `tests/doctor.test.ts` (uncovered index, duplicate index, best-of
+  duplicates, `indexing` suppression, indices without stats), `tests/stats.test.ts`
+  (note wording, duplicate note, threshold override).
+
 ### Fixed — ANN/FTS indexes stay in step with incremental writes
 
 - **Post-job auto-maintenance + dead-index repair** (`src/services/db.ts`,

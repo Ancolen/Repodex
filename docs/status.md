@@ -25,6 +25,7 @@
 ### Search
 - ✅ Hybrid search (vector + BM25 + RRF, k=60); `hybrid` / `vector` / `text` modes.
 - ✅ **ANN/FTS coverage maintenance** (2.10.0) — after each successful index/sync, ONE native `optimize()` runs when an existing index has uncovered rows > `maintenance.unindexedRatio` (5%) or the table has ≥ `maintenance.minSmallFragments` (20) small fragments; an index with 0 indexed rows over a non-empty table is rebuilt via `createIndex(..., { replace: true })`. Runs before `ready` (watcher deferred), via `compactTable` directly, never fails the job. This closes the measured coverage gaps (`llm-lab` BM25 0/41,574; `horizon` 81%; `unsloth` 66%). Tests: `tests/db-coverage.test.ts`, `tests/index-auto-maintain.test.ts`, `tests/maintenance.test.ts`.
+- ✅ **Coverage visibility in `doctor` / `stats`** (2.10.0) — doctor warns when an existing ANN/FTS index misses more than `maintenance.unindexedRatio` (5%) of the table's rows (per-column best coverage, never a sum) and when one column carries duplicate native indexes; `stats` mirrors both as project notes. Suppressed while a project is `indexing`. Tests: `tests/doctor.test.ts`, `tests/stats.test.ts`.
 - ✅ Filters: `language` / `symbolType` / `pathGlob` (project-relative globs match anywhere in the absolute stored path).
 - ✅ `search_codebase_batch` — several queries in one round-trip, results grouped per query.
 - ✅ `find_symbol` (exact + prefix, model-independent).
