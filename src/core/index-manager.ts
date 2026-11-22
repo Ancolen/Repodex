@@ -43,6 +43,7 @@ import { startWatcher } from "../services/watcher";
 import {
   countTableRows,
   compactTable,
+  dropRedundantIndexes,
   dropTable,
   searchTable,
   searchTableText,
@@ -53,9 +54,11 @@ import {
   tableSymbolsWithContent,
   tableColumns,
   ensureFtsIndex,
+  ensureVectorIndex,
   indexCoverage,
   buildWhere,
   type CompactResult,
+  type DuplicateIndexFixReport,
   type SearchResult,
   type SearchFilters,
 } from "../services/db";
@@ -909,6 +912,22 @@ function cachedForwardImports(
   return promise;
 }
 
+/** One project's `doctor --fix` outcome (2.10.1). */
+export interface IndexFixProjectResult extends DuplicateIndexFixReport {
+  /** The registered project name the table belongs to. */
+  name: string;
+  /** True when the fix built a missing `vector` ANN index (rows ≥ threshold). */
+  annBuilt?: boolean;
+}
+
+/** Result of `IndexManager.fixIndexes` — `cidx doctor --fix`. */
+export interface IndexFixResult {
+  /** Every table inspected (only repair/error groups need rendering). */
+  projects: IndexFixProjectResult[];
+  /** Projects skipped because a job owns their table (fix would race it). */
+  skipped: { name: string; reason: string }[];
+}
+
 /**
  * The hub that manages multiple projects.
  * - Each project has an IndexRecord in the registry + its own `idx_<name>` LanceDB table.
@@ -1346,6 +1365,65 @@ export class IndexManager {
       throw new Error(compactBusyMessage(name, { type: job?.type ?? "index", status: job?.status ?? "running" }));
     }
     return await compactTable(tableNameFor(rec), opts);
+  }
+
+  /**
+   * Repairs a project's native indexes in place — the work behind
+   * `cidx doctor --fix` (2.10.1): duplicate indexes (same column set + index
+   * type) are dropped when their names are distinct and rebuilt once when
+   * they share a name, and a missing ANN `vector` index is built at/above
+   * `vectorIndexThreshold`. Search keeps serving throughout; a project whose
+   * table is owned by an active index/sync/migrate job is skipped rather than
+   * raced (same rule as `compactIndex`).
+   */
+  async fixIndexes(name?: string): Promise<IndexFixResult> {
+    const records = name === undefined ? this.registry.listIndexes() : (() => {
+      const rec = this.registry.getIndex(name);
+      if (!rec) throw this.indexNotFound(name);
+      return [rec];
+    })();
+
+    const projects: IndexFixProjectResult[] = [];
+    const skipped: { name: string; reason: string }[] = [];
+    for (const rec of records) {
+      if (this.isIndexing(rec.name)) {
+        const job = this.activeJob(rec.name);
+        skipped.push({
+          name: rec.name,
+          reason: compactBusyMessage(rec.name, { type: job?.type ?? "index", status: job?.status ?? "running" }),
+        });
+        continue;
+      }
+      try {
+        const report = await dropRedundantIndexes(tableNameFor(rec));
+        // A missing ANN index is the other in-place repair `doctor` warns
+        // about (and the shape a legacy same-name duplicate collapses to when
+        // its manifest entries were already lost). Index build only — the
+        // `vectorIndexThreshold` rule is the same one the index job uses.
+        let annBuilt = false;
+        let annError: string | undefined;
+        try {
+          annBuilt = await ensureVectorIndex(report.table, CONFIG.VECTOR_INDEX_THRESHOLD, "vector", 300);
+        } catch (err) {
+          annError = err instanceof Error ? err.message : String(err);
+        }
+        const merged: IndexFixProjectResult = { name: rec.name, ...report };
+        if (annBuilt) merged.annBuilt = true;
+        if (annError !== undefined) {
+          merged.error = report.error ? `${report.error}; ANN rebuild failed: ${annError}` : `ANN rebuild failed: ${annError}`;
+        }
+        projects.push(merged);
+      } catch (err) {
+        projects.push({
+          name: rec.name,
+          table: tableNameFor(rec),
+          groups: [],
+          failed: [],
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return { projects, skipped };
   }
 
   getIndex(name: string): IndexRecord | null {

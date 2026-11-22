@@ -15,6 +15,8 @@ import { describe, test, expect, beforeAll } from "bun:test";
 import type { CodeRecord } from "../src/services/db";
 
 const db = await import("../src/services/db");
+const lancedb = await import("@lancedb/lancedb");
+const { CONFIG } = await import("../src/config");
 const { isolatedHome } = await import("./helpers/isolated-cidx-home");
 
 function record(file: string, chunk: number): CodeRecord {
@@ -102,5 +104,52 @@ describe("indexCoverage / auto-repair (real temp LanceDB)", () => {
 
   test("a missing table returns null (honest absence, not zeros)", async () => {
     expect(await db.indexCoverage("cov_does_not_exist")).toBeNull();
+  });
+});
+
+describe("dropRedundantIndexes (real temp LanceDB)", () => {
+  test("drops the legacy duplicate, keeps a covered index, and doctor sees one", async () => {
+    const table = "cov_dup";
+    await db.insertChunks(table, rows("dup", 20));
+    await db.ensureFtsIndex(table);
+
+    // Legacy shape: a second native FTS index on the same column, under its
+    // own name (modern `createIndex` dedupes by name, so this needs an
+    // explicit name — exactly how the live duplicates survived).
+    const conn = await lancedb.connect(CONFIG.DB_DIR);
+    const raw = await conn.openTable(table);
+    await raw.createIndex("content", {
+      config: lancedb.Index.fts(),
+      name: "legacy_content_dup",
+      waitTimeoutSeconds: 30,
+    });
+    await raw.close();
+
+    const before = await db.tableStats(table);
+    const dupBefore = before!.indices.find((ix) => ix.columns.includes("content"));
+    expect(dupBefore?.count).toBe(2);
+    expect(dupBefore?.indexNames).toContain("legacy_content_dup");
+
+    const report = await db.dropRedundantIndexes(table);
+    expect(report.failed).toEqual([]);
+    const group = report.groups.find((g) => g.columns.includes("content"));
+    expect(group?.action).toBe("drop");
+    expect(group?.dropped.map((d) => d.name)).toContain("legacy_content_dup");
+    // The kept index is the one with the same coverage (either is valid here).
+    expect(group?.kept).not.toBe("legacy_content_dup");
+
+    const after = await db.tableStats(table);
+    const dupAfter = after!.indices.find((ix) => ix.columns.includes("content"));
+    expect(dupAfter?.count).toBe(1);
+    expect(dupAfter?.indexedRows).toBe(20);
+
+    // Nothing left to drop — a second run is a read-only no-op.
+    const again = await db.dropRedundantIndexes(table);
+    expect(again.groups).toEqual([]);
+    expect(again.failed).toEqual([]);
+  }, 30_000);
+
+  test("a missing table is an honest error, not a silent success", async () => {
+    await expect(db.dropRedundantIndexes("cov_does_not_exist")).rejects.toThrow(/does not exist/);
   });
 });

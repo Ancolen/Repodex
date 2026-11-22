@@ -7,7 +7,7 @@ import { daemonCommand, bridgeCommand } from "./runtime";
 import { DAEMON_PING_TIMEOUT_MS, probeDaemon, portAccepts } from "./daemon-probe";
 import { daemonCheck, type DoctorCheck, type DoctorReport } from "./core/doctor";
 import { resolveEditor, buildEditorArgs } from "./utils/editor";
-import type { QueryLogStats, SearchEnvelope, UsageStats } from "./core/index-manager";
+import type { IndexFixResult, QueryLogStats, SearchEnvelope, UsageStats } from "./core/index-manager";
 import type { StatsReport } from "./core/stats";
 import type { CompactResult } from "./services/db";
 import { formatContextPack, formatReferences, formatApiDiff, formatImpact, formatDocCheck, formatDocCheckStored, formatBlameNote, formatEnvelopeNotes, formatQueryLogStats, formatCoupling, formatStatsSections, formatCompactResult, formatHotspots, formatUsageStats } from "./server/format";
@@ -1512,14 +1512,15 @@ const COMMANDS: Record<string, CmdDoc> = {
     ],
   },
   doctor: {
-    usage: "doctor",
+    usage: "doctor [--fix [project]]",
     summary: "One read-only diagnostic pass: daemon, embedding backend, models, tables, schema, config, disk.",
     details: [
       "Every check reports ok / warn / fail with a one-line fix hint.",
       "Checks the daemon, the embedding backend (Ollama or llama-server) + the configured embed model, the reranker probe, each project's table and schema freshness (pre-2.4.0 tables get the reindex hint), ANN/FTS index presence, file-cache sanity, orphan tables, config-file validity, and the disk usage of the data root.",
-      "Read-only — doctor never mutates anything. Exits 1 only when a check fails.",
+      "--fix applies the safe in-place repairs: redundant native indexes (same column set AND index type) are dropped when their names are distinct, or rebuilt once when they share a name (drop-by-name would remove the only physical index); a missing ANN vector index is built when the table is at/above vectorIndexThreshold. No re-embed; search keeps serving throughout. A project whose table is owned by an active job is skipped.",
+      "Without --fix it is read-only — doctor never mutates anything. Exits 1 only when a check fails.",
     ],
-    examples: ["cidx doctor"],
+    examples: ["cidx doctor", "cidx doctor --fix", "cidx doctor --fix unsloth"],
   },
   stats: {
     usage: "stats [project] [--usage [--days n]]",
@@ -1723,13 +1724,66 @@ function printDoctor(checks: DoctorCheck[]): void {
   }
 }
 
+/** Prints the `doctor --fix` repair summary (drops, rebuilds, failures, skipped projects). */
+function printDoctorFix(r: IndexFixResult): void {
+  let repaired = 0;
+  const lines: string[] = [];
+  for (const p of r.projects) {
+    for (const g of p.groups) {
+      if (g.action === "rebuild") {
+        if (g.error) {
+          lines.push(
+            `  warn   ${p.name}: rebuild of the ${g.indexType} index on ${g.columns.join(", ")} failed — ${g.error}`,
+          );
+        } else {
+          repaired++;
+          lines.push(
+            `  fixed  ${p.name}: rebuilt the duplicate ${g.indexType} index on ${g.columns.join(", ")} — one clean index`,
+          );
+        }
+        continue;
+      }
+      for (const d of g.dropped) {
+        repaired++;
+        lines.push(
+          `  fixed  ${p.name}: dropped redundant ${d.indexType} index '${d.name}' on ${d.columns.join(", ")} — kept '${g.kept}'`,
+        );
+      }
+      if (g.error) lines.push(`  warn   ${p.name}: ${g.error}`);
+    }
+    for (const f of p.failed) {
+      lines.push(`  warn   ${p.name}: could not drop index '${f.name}' — ${f.error}`);
+    }
+    if (p.annBuilt) {
+      repaired++;
+      lines.push(`  fixed  ${p.name}: built the missing ANN vector index`);
+    }
+    if (p.error) lines.push(`  warn   ${p.name}: ${p.error}`);
+  }
+  for (const s of r.skipped) lines.push(`  skip   ${s.name}: ${s.reason}`);
+
+  if (lines.length === 0) {
+    console.log("\ndoctor --fix: nothing to repair — every table carries one native index per column/type.\n");
+    return;
+  }
+  console.log(
+    repaired > 0
+      ? `\ndoctor --fix: ${repaired} repair${repaired === 1 ? "" : "s"} applied\n`
+      : "\ndoctor --fix: nothing repaired\n",
+  );
+  for (const line of lines) console.log(line);
+  console.log("");
+}
+
 /**
- * `cidx doctor` — one read-only diagnostic pass (proposal O1).
+ * `cidx doctor` — one read-only diagnostic pass (proposal O1). `--fix` first
+ * runs the in-place duplicate-native-index repair (`POST /doctor/fix`), then
+ * the normal report reflects the repaired state.
  * The daemon-owning checks come from `GET /doctor`; the daemon-reachability +
  * version-match check is the only one evaluated here (an unreachable daemon is
  * the one thing the daemon cannot report itself). Exit 0 unless a check fails.
  */
-async function cmdDoctor(): Promise<void> {
+async function cmdDoctor(flags: Record<string, string | boolean> = {}): Promise<void> {
   let daemonVersion: string | undefined;
   let pid: number | undefined;
   // A listening control port means the daemon exists even when /ping is slow
@@ -1763,6 +1817,22 @@ async function cmdDoctor(): Promise<void> {
       ...(pid !== undefined ? { pid } : {}),
     }),
   ];
+  const fix = flags.fix;
+  if (reachable && (fix === true || typeof fix === "string")) {
+    const target = typeof fix === "string" ? { name: fix } : {};
+    try {
+      printDoctorFix(await api<IndexFixResult>("POST", "/doctor/fix", target));
+    } catch (err) {
+      checks.push({
+        id: "doctor:fix",
+        title: "doctor --fix",
+        status: "fail",
+        detail: `the duplicate-index repair failed: ${err instanceof Error ? err.message : String(err)}`,
+        hint: "check the daemon log (~/.cidx/daemon.log) — `cidx reindex <name>` rebuilds a single index",
+      });
+    }
+  }
+
   let report: DoctorReport | null = null;
   if (reachable) {
     try {
@@ -1935,7 +2005,7 @@ async function main(): Promise<void> {
     case "doccheck": case "check-docs": case "checkdocs": await cmdDoccheck(positionals, flags); break;
     case "commits": case "git-log": case "gitlog": await cmdCommits(positionals, flags); break;
     case "apidiff": case "api-diff": await cmdApiDiff(positionals, flags); break;
-    case "doctor": await cmdDoctor(); break;
+    case "doctor": await cmdDoctor(flags); break;
     case "stats": case "analytics": await cmdStats(positionals, flags); break;
     case "compact": await cmdCompact(positionals, flags); break;
     case "config": await cmdConfig(positionals); break;

@@ -28,7 +28,7 @@ A single long-lived daemon manages **multiple projects**. By sending commands to
 - 🌿 **Git awareness** — respects `.gitignore`, optional git-tracked-only files, automatic incremental sync on branch change.
 - 💾 **Persistent state** — registry, file cache and job state with `bun:sqlite`; resumes where it left off even if the daemon restarts.
 - 🔌 **Multiple transports** — **Streamable HTTP** (`/mcp`, recommended) + **SSE** (`/sse`, legacy) for AI agents; a **stdio bridge** (`cidx mcp`) for clients that expect stdio like Claude Desktop (it forwards index-completion notifications + exposes MCP resources).
-- 🛰️ **Ops built in** — `cidx doctor` (one read-only diagnostic pass), `cidx stats` (table sizes + query analytics: zero-hit queries as an index-gap signal), `cidx compact` (reclaim table space), **zero-downtime model migration** (change the embedding model without taking search down), optional idle shutdown, and a job queue with priority ordering.
+- 🛰️ **Ops built in** — `cidx doctor` (one read-only diagnostic pass; `--fix` repairs redundant native indexes in place), `cidx stats` (table sizes + query analytics: zero-hit queries as an index-gap signal), `cidx compact` (reclaim table space), **zero-downtime model migration** (change the embedding model without taking search down), optional idle shutdown, and a job queue with priority ordering.
 - 🔒 **Secure** — both servers listen only on `127.0.0.1`; CORS restricted to localhost + Host-header (DNS-rebinding) protection on every endpoint.
 - 📦 **Single binary** — standalone executable via `bun build --compile` (`dist/cidx`); grammars embedded.
 

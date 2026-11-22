@@ -425,7 +425,7 @@ export function projectFindings(s: ProjectDoctorState): Finding[] {
       finding(
         "warn",
         `${rows} rows but no ANN vector index — semantic search scans the whole table`,
-        `${reindex} — builds the ANN index`,
+        `cidx doctor --fix ${s.name} — builds the ANN index in place (no re-embed); ${reindex} also works`,
       ),
     );
   } else if (rows > 0 && !ann) {
@@ -462,7 +462,7 @@ export function projectFindings(s: ProjectDoctorState): Finding[] {
         finding(
           "warn",
           `${c.count} native indexes on '${column}' — one is redundant (coverage is counted once)`,
-          `${reindex} — rebuilds a single index`,
+          `cidx doctor --fix — drops the redundant copy in place (no re-embed); ${reindex} also rebuilds a single index`,
         ),
       );
     }

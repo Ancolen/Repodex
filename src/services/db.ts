@@ -4,6 +4,7 @@ import type { Table } from "@lancedb/lancedb";
 import { Field, FixedSizeList, Float32, Float64, Schema, Utf8 } from "apache-arrow";
 import type { DataType } from "apache-arrow";
 import { CONFIG } from "../config";
+import { planDuplicateIndexDrops, type DuplicateIndexAction } from "../core/index-dedupe";
 
 /**
  * The DB record of a code chunk.
@@ -1015,6 +1016,180 @@ export async function compactTable(
   });
 }
 
+/** One native index removed by `dropRedundantIndexes`. */
+export interface DroppedDuplicateIndex {
+  name: string;
+  indexType: string;
+  columns: string[];
+  /** Rows the dropped index covered (null when its native stats were unavailable). */
+  indexedRows: number | null;
+}
+
+/** One redundant (column set, index type) group acted on by `dropRedundantIndexes`. */
+export interface DedupedIndexGroup {
+  columns: string[];
+  indexType: string;
+  /** `drop` = extras removed; `rebuild` = one clean index recreated. */
+  action: DuplicateIndexAction;
+  /** The native index kept as-is (`drop`) or rebuilt (`rebuild`). */
+  kept: string;
+  dropped: DroppedDuplicateIndex[];
+  /** Rebuild failure — reported honestly, never hidden. */
+  error?: string;
+}
+
+/** Result of the duplicate-native-index cleanup for one table. */
+export interface DuplicateIndexFixReport {
+  table: string;
+  groups: DedupedIndexGroup[];
+  /** `dropIndex` failures — reported honestly, never hidden. */
+  failed: { name: string; error: string }[];
+  /** Whole-table read/inspection failure (the table could not be opened). */
+  error?: string;
+}
+
+/**
+ * The native index config a rebuild uses — mirrors what the project's own
+ * builders create (`ensureVectorIndex` → default IVF_PQ; `ensureFtsIndex` →
+ * default FTS, except the `symbolName` n-gram leg, whose tokenizer must never
+ * be downgraded to the default).
+ */
+function rebuildIndexConfig(column: string, indexType: string): lancedb.Index | undefined {
+  if (!/fts|inverted/i.test(indexType)) return undefined;
+  if (column === "symbolName") {
+    return lancedb.Index.fts({
+      baseTokenizer: "ngram",
+      ngramMinLength: SYMBOL_NGRAM_SIZE,
+      ngramMaxLength: SYMBOL_NGRAM_SIZE,
+      lowercase: true,
+    });
+  }
+  return lancedb.Index.fts();
+}
+
+/**
+ * Drops redundant native indexes of one table (2.10.1, `cidx doctor --fix`):
+ * a LanceDB table may carry several native indexes over the same column set
+ * (legacy data — modern LanceDB dedupes on create). The kept index is the
+ * best-covered one, so search quality never regresses; indexes of a different
+ * type on the same column are left alone (they serve different search legs).
+ *
+ * Runs inside the per-table write lock like every other table write, so a drop
+ * cannot interleave with an index job's write. Read-only when there is nothing
+ * redundant.
+ */
+export async function dropRedundantIndexes(table: string): Promise<DuplicateIndexFixReport> {
+  return await lockTable(table, async () => {
+    const conn = getDB();
+    const names = await conn.tableNames();
+    if (!names.includes(table)) {
+      throw new Error(`Table '${table}' does not exist on disk — index the project first.`);
+    }
+    const t = await conn.openTable(table);
+    const indices = await t.listIndices();
+
+    // Coverage per native index — the keeper is chosen from these. An
+    // unreadable stat stays null (never trusted as "0 rows").
+    const coverage = new Map<string, number | null>();
+    for (const ix of indices) {
+      try {
+        const st = await t.indexStats(ix.name);
+        coverage.set(ix.name, st && typeof st.numIndexedRows === "number" ? st.numIndexedRows : null);
+      } catch {
+        coverage.set(ix.name, null);
+      }
+    }
+
+    const plans = planDuplicateIndexDrops(
+      indices.map((ix) => ({ name: ix.name, columns: [...ix.columns], indexType: ix.indexType })),
+      coverage,
+    );
+
+    const groups: DedupedIndexGroup[] = [];
+    const failed: { name: string; error: string }[] = [];
+    for (const plan of plans) {
+      if (plan.action === "rebuild") {
+        // The duplicate entries share ONE native name — `dropIndex(name)` would
+        // remove the only physical index. Drop and recreate once instead, with
+        // the same config the project's own builders use.
+        const column = plan.columns[0];
+        if (plan.columns.length !== 1 || column === undefined) {
+          groups.push({
+            columns: plan.columns,
+            indexType: plan.indexType,
+            action: "rebuild",
+            kept: plan.keep,
+            dropped: [],
+            error: "multi-column duplicate indexes cannot be rebuilt automatically — reindex the project",
+          });
+          continue;
+        }
+        try {
+          // A manifest duplicate may already be gone (a previous run) — the
+          // rebuild must still produce exactly one index.
+          try {
+            await t.dropIndex(plan.keep);
+          } catch {
+            // Absent already — fine; createIndex below re-establishes it.
+          }
+          const config = rebuildIndexConfig(column, plan.indexType);
+          await t.createIndex(
+            column,
+            config
+              ? { config, replace: true, waitTimeoutSeconds: 300 }
+              : { replace: true, waitTimeoutSeconds: 300 },
+          );
+          const after = await t.listIndices();
+          const onColumn = after.filter((ix) => ix.columns.includes(column));
+          groups.push({
+            columns: plan.columns,
+            indexType: plan.indexType,
+            action: "rebuild",
+            kept: plan.keep,
+            dropped: [],
+            ...(onColumn.length === 1
+              ? {}
+              : { error: `rebuild left ${onColumn.length} native indexes on '${column}' — reindex the project` }),
+          });
+        } catch (err) {
+          groups.push({
+            columns: plan.columns,
+            indexType: plan.indexType,
+            action: "rebuild",
+            kept: plan.keep,
+            dropped: [],
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        continue;
+      }
+
+      const dropped: DroppedDuplicateIndex[] = [];
+      for (const name of plan.drop) {
+        try {
+          await t.dropIndex(name);
+          dropped.push({
+            name,
+            indexType: plan.indexType,
+            columns: plan.columns,
+            indexedRows: coverage.get(name) ?? null,
+          });
+        } catch (err) {
+          failed.push({ name, error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+      groups.push({
+        columns: plan.columns,
+        indexType: plan.indexType,
+        action: "drop",
+        kept: plan.keep,
+        dropped,
+      });
+    }
+    return { table, groups, failed };
+  });
+}
+
 /**
  * If the table exceeds `minRows` rows and does not yet have a vector index,
  * builds an ANN index on the given vector column (default `vector`; pass
@@ -1022,9 +1197,18 @@ export async function compactTable(
  * i.e. legacy tables). On small tables, brute-force is already fast enough,
  * so no index is built (training cost + memory).
  *
+ * `waitTimeoutSeconds` makes the build synchronous (the explicit
+ * `cidx doctor --fix` path wants the index to exist when it reports success);
+ * omitted, LanceDB starts the build and returns (the index-job behavior).
+ *
  * @returns true if an index was built.
  */
-export async function ensureVectorIndex(table: string, minRows: number, column = "vector"): Promise<boolean> {
+export async function ensureVectorIndex(
+  table: string,
+  minRows: number,
+  column = "vector",
+  waitTimeoutSeconds?: number,
+): Promise<boolean> {
   const conn = getDB();
   const names = await conn.tableNames();
   if (!names.includes(table)) return false;
@@ -1035,6 +1219,8 @@ export async function ensureVectorIndex(table: string, minRows: number, column =
   const rows = await t.countRows();
   if (rows < minRows) return false;
 
+  const wait = waitTimeoutSeconds !== undefined ? { waitTimeoutSeconds } : {};
+
   const existing = await t.listIndices();
   const hasVectorIndex = existing.some((ix) => ix.columns.includes(column));
   if (hasVectorIndex) {
@@ -1043,14 +1229,14 @@ export async function ensureVectorIndex(table: string, minRows: number, column =
     // PARTIAL coverage is the job's auto-maintenance path (`optimize()` adds
     // new rows to an existing index).
     if (await indexColumnIsDead(t, existing, column, rows)) {
-      await t.createIndex(column, { replace: true });
+      await t.createIndex(column, { replace: true, ...wait });
       console.error(`[db] rebuilt dead vector index on '${column}' for '${table}'.`);
       return true;
     }
     return false;
   }
 
-  await t.createIndex(column);
+  await t.createIndex(column, wait);
   return true;
 }
 

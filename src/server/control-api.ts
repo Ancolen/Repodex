@@ -960,6 +960,34 @@ export function startControlApi(
     }
   });
 
+  /**
+   * In-place repair for `cidx doctor --fix` (2.10.1): redundant native indexes
+   * (same column set AND index type; best-covered kept) are dropped when their
+   * names are distinct and rebuilt once when they share a name, and a missing
+   * ANN `vector` index is built — for one project's table (`name`) or every
+   * registered project. Projects whose table is owned by an active
+   * index/sync/migrate job are reported under `skipped` rather than raced.
+   * Unknown `name` → self-healing 404.
+   */
+  app.post("/doctor/fix", async (req, res) => {
+    const { name } = (req.body ?? {}) as { name?: unknown };
+    if (name !== undefined && typeof name !== "string") {
+      res.status(400).json({ error: "'name' must be a project name string when given" });
+      return;
+    }
+    if (typeof name === "string" && !deps.manager.getIndex(name)) {
+      res
+        .status(404)
+        .json({ error: indexNotFoundMessage(name, deps.manager.listIndexes().map((r) => r.name)) });
+      return;
+    }
+    try {
+      res.json(await deps.manager.fixIndexes(typeof name === "string" ? name : undefined));
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   // ------------------------------------------------- query log (proposal A3)
 
   /**
