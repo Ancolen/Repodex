@@ -14,6 +14,7 @@ import {
   configCheck,
   daemonCheck,
   diskCheck,
+  duplicatePathsCheck,
   formatBytes,
   inspectConfigFile,
   measureDiskUsage,
@@ -433,6 +434,29 @@ describe("doctor — projectCheck (native index coverage)", () => {
   });
 });
 
+// ------------------------------------------------------------ duplicate paths
+
+describe("doctor — duplicatePathsCheck", () => {
+  test("every path registered once is ok", () => {
+    const c = duplicatePathsCheck([
+      { name: "a", path: "/repo/a" },
+      { name: "b", path: "/repo/b" },
+    ]);
+    expect(c.status).toBe("ok");
+    expect(c.detail).toContain("every path registered once");
+  });
+
+  test("two names on one resolved path are a warn naming both", () => {
+    const c = duplicatePathsCheck([
+      { name: "gamepad", path: "/repo/gamepad" },
+      { name: "gamepad-wt", path: "/repo/gamepad/" },
+    ]);
+    expect(c.status).toBe("warn");
+    expect(c.detail).toContain("gamepad + gamepad-wt");
+    expect(c.hint).toContain("cidx remove");
+  });
+});
+
 // ------------------------------------------------------------ orphan tables
 
 describe("doctor — orphanTablesCheck", () => {
@@ -707,7 +731,7 @@ describe("doctor — runDoctor (collector over fake ports)", () => {
 
     expect(report.status).toBe("ok");
     expect(report.checks.map((c) => c.id)).toEqual([
-      "backend", "reranker", "project:api", "tables", "config", "disk", "resources",
+      "backend", "reranker", "project:api", "tables", "duplicates", "config", "disk", "resources",
     ]);
     for (const c of report.checks) expect(c.status).toBe("ok");
     expect(byId(report.checks, "project:api")?.detail).toContain("schema current");

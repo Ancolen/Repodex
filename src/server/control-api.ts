@@ -192,7 +192,7 @@ export function startControlApi(
       const rec = deps.manager.createIndex(dir, name);
       // Duplicate-scope catch BEFORE the disk work happens: an overlapping
       // note is computed at start time and rides the response.
-      const warningNote = deps.manager.pathOverlapWarning(rec.path);
+      const warningNote = deps.manager.pathOverlapWarning(rec.path, name);
       const settled = await deps.manager.waitForIndexSettle(rec.name, wait);
       const view = viewIndex(deps.manager, settled.rec);
       res.json({ ...view, ...(warningNote ? { warning: warningNote } : {}), ...(settled.timedOut ? { timedOut: true } : {}) });

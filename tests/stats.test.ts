@@ -371,6 +371,13 @@ describe("collectStats — the /stats payload shape (fake ports)", () => {
     expect(strict.projects[0]!.notes.some((n) => n.includes("'vector' index covers 40/42"))).toBe(true);
   });
 
+  test("a path indexed under two names gets a note on both projects", async () => {
+    const dupB = { ...recB, path: "/tmp/a/" };
+    const r = await collectStats(ports({ indexes: () => [recA, dupB] }));
+    expect(r.projects[0]!.notes.some((n) => n.includes("also indexed as 'b'"))).toBe(true);
+    expect(r.projects[1]!.notes.some((n) => n.includes("also indexed as 'a'"))).toBe(true);
+  });
+
   test("global stats: data-root total, meta.db (incl. WAL), cache, unreadable entries", async () => {
     const r = await collectStats(ports());
     expect(r.global.rootExists).toBe(true);

@@ -413,7 +413,7 @@ export function buildServer(deps: McpDeps): Server {
       }
       try {
         const ix = deps.manager.createIndex(args.path, args.name);
-        const warning = deps.manager.pathOverlapWarning(ix.path);
+        const warning = deps.manager.pathOverlapWarning(ix.path, args.name);
         const settled = await deps.manager.waitForIndexSettle(ix.name, args.wait);
         const statusLine = `Indexing ${settled.timedOut ? "still running" : "started"}: '${ix.name}' [${settled.rec.status}] → ${ix.path}`;
         const lines = [statusLine];

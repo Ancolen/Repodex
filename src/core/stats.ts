@@ -21,6 +21,7 @@
  * per-table write lock) behind `IndexManager.compactIndex` (the busy rule).
  */
 
+import * as path from "node:path";
 import { tableNameFor, type EmbedCacheStats, type IndexRecord } from "./registry";
 import type { Job } from "./types";
 import type { DiskEntry, DiskUsageState } from "./doctor";
@@ -253,6 +254,23 @@ export async function collectStats(ports: StatsPorts, opts: StatsOpts = {}): Pro
   const projects: ProjectStats[] = [];
   for (const rec of scoped) {
     projects.push(await projectStats(ports, disk, rec, coverageGapRatio));
+  }
+
+  // Legacy duplicate registrations (same resolved path, two names): surface it,
+  // never merge or remove — the cleanup is a human decision (2.10.0).
+  const byPath = new Map<string, ProjectStats[]>();
+  for (const p of projects) {
+    const resolved = path.resolve(p.path);
+    const group = byPath.get(resolved);
+    if (group) group.push(p);
+    else byPath.set(resolved, [p]);
+  }
+  for (const group of byPath.values()) {
+    if (group.length < 2) continue;
+    for (const p of group) {
+      const others = group.filter((x) => x !== p).map((x) => `'${x.name}'`).join(", ");
+      p.notes.push(`path is also indexed as ${others} — one record is redundant`);
+    }
   }
 
   return {

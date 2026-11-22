@@ -557,6 +557,34 @@ export function orphanTablesCheck(s: OrphanTablesState): DoctorCheck {
   return check("tables", "tables", "warn", parts.join(" · "), hints.join("; "));
 }
 
+/**
+ * Check 4b — the same resolved directory registered under two or more names
+ * (legacy data; `createIndex` now reuses the existing record instead). Warn
+ * only: cleanup is a human decision, and removing the wrong record drops its
+ * table with it.
+ */
+export function duplicatePathsCheck(indexes: ReadonlyArray<{ name: string; path: string }>): DoctorCheck {
+  const groups = new Map<string, string[]>();
+  for (const r of indexes) {
+    const resolved = path.resolve(r.path);
+    const names = groups.get(resolved);
+    if (names) names.push(r.name);
+    else groups.set(resolved, [r.name]);
+  }
+  const dups = [...groups.entries()].filter(([, names]) => names.length > 1);
+  if (dups.length === 0) {
+    return check("duplicates", "duplicate paths", "ok", `${indexes.length} project(s), every path registered once`);
+  }
+  const detail = dups.map(([resolved, names]) => `${names.join(" + ")} share ${resolved}`).join(" · ");
+  return check(
+    "duplicates",
+    "duplicate paths",
+    "warn",
+    detail,
+    "cidx list — remove the redundant record with cidx remove <name> (confirm which one is canonical first)",
+  );
+}
+
 /** One config file's verdict, computed by the collector. */
 export interface ConfigFileFinding {
   path: string;
@@ -971,6 +999,7 @@ export async function runDoctor(ports: DoctorPorts): Promise<DoctorReport> {
       dbDir: settings.dbDir,
     }),
   );
+  checks.push(duplicatePathsCheck(indexes));
 
   // 5 — config files (global YAML + one .cidx.json per project).
   const files: ConfigFileFinding[] = [];

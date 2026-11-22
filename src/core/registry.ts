@@ -1,4 +1,5 @@
 import { mkdirSync, statfsSync, statSync } from "node:fs";
+import * as path from "node:path";
 import { Database } from "bun:sqlite";
 import { CONFIG } from "../config";
 
@@ -516,6 +517,36 @@ export class Registry {
       .query(`SELECT * FROM indexes ORDER BY created_at DESC`)
       .all() as Record<string, unknown>[];
     return rows.map((r) => this.rowToIndex(r));
+  }
+
+  /**
+   * The project registered at EXACTLY this resolved directory (2.10.0): a path
+   * indexed twice under different names would otherwise create a second table
+   * and watcher. Legacy duplicate rows are tolerated — the newest wins (the
+   * doctor reports them; no UNIQUE constraint is added).
+   */
+  getIndexByPath(dir: string): IndexRecord | null {
+    const target = path.resolve(dir);
+    const matches = this.listIndexes().filter((r) => path.resolve(r.path) === target);
+    if (matches.length === 0) return null;
+    // listIndexes is created_at DESC already; keep the first (newest).
+    return matches[0] ?? null;
+  }
+
+  /** Resolved paths registered more than once (legacy data) — doctor/stats warn. */
+  listDuplicatePaths(): { path: string; names: string[] }[] {
+    const groups = new Map<string, string[]>();
+    for (const r of this.listIndexes()) {
+      const resolved = path.resolve(r.path);
+      const names = groups.get(resolved);
+      if (names) names.push(r.name);
+      else groups.set(resolved, [r.name]);
+    }
+    const out: { path: string; names: string[] }[] = [];
+    for (const [resolved, names] of groups) {
+      if (names.length > 1) out.push({ path: resolved, names });
+    }
+    return out;
   }
 
   setIndexStatus(name: string, status: IndexStatus, error: string | null = null): void {

@@ -38,6 +38,20 @@ describe("pathOverlapNote — the duplicate-scope catch at index start", () => {
     expect(note).toContain("inside this directory");
   });
 
+  test("a different requested name on the same path says the name is ignored", () => {
+    const note = pathOverlapNote(
+      "/home/duldul/robot/server",
+      [{ name: "server", path: "/home/duldul/robot/server" }],
+      "server-alt",
+    );
+    expect(note).toContain("already indexed as 'server'");
+    expect(note).toContain("'server-alt' is ignored");
+    // No requested name (or the same one) → still the silent reindex path.
+    expect(
+      pathOverlapNote("/home/duldul/robot/server", [{ name: "server", path: "/home/duldul/robot/server" }], "server"),
+    ).toBeNull();
+  });
+
   test("the same directory itself and unrelated directories yield null", () => {
     expect(pathOverlapNote("/home/duldul/robot/server", [{ name: "server", path: "/home/duldul/robot/server" }])).toBeNull();
     expect(pathOverlapNote("/home/duldul/oyun", existing)).toBeNull();

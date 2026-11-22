@@ -1070,12 +1070,18 @@ export class IndexManager {
     const baseDir = path.resolve(dir);
     let name = explicitName ?? path.basename(baseDir);
 
+    // Same PATH, any name → reuse the existing project (2.10.0). Without this,
+    // `cidx index <dir> alt-name` registered a second project + table + watcher
+    // over the same files, doubling disk work and splitting search results.
+    const byPath = this.registry.getIndexByPath(baseDir);
+    if (byPath) {
+      const ignored = explicitName !== undefined && explicitName !== byPath.name ? ` (requested name '${explicitName}' ignored)` : "";
+      console.error(`[index] '${baseDir}' is already indexed as '${byPath.name}'${ignored} — reindexing that project instead of creating a duplicate.`);
+      return this.reindex(byPath.name);
+    }
+
     const existing = this.registry.getIndex(name);
     if (existing) {
-      if (path.resolve(existing.path) === baseDir) {
-        // The same project was added again → refresh.
-        return this.reindex(name);
-      }
       // Name conflict, different path → generate a unique name.
       name = this.uniqueName(name);
     }
@@ -1244,8 +1250,12 @@ export class IndexManager {
    * indexed project (null = no overlap) — attached to the index-start
    * response so duplicate/inner projects are caught before the disk work.
    */
-  pathOverlapWarning(baseDir: string): string | null {
-    return pathOverlapNote(baseDir, this.registry.listIndexes().map((r) => ({ name: r.name, path: r.path })));
+  pathOverlapWarning(baseDir: string, requestedName?: string): string | null {
+    return pathOverlapNote(
+      baseDir,
+      this.registry.listIndexes().map((r) => ({ name: r.name, path: r.path })),
+      requestedName,
+    );
   }
 
   /**

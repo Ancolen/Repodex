@@ -51,6 +51,21 @@ describe("Registry", () => {
     }
   });
 
+  test("getIndexByPath resolves the exact path, newest record first", () => {
+    reg.upsertIndex(makeIndex("old", { path: "/repo/app", createdAt: 100 }));
+    reg.upsertIndex(makeIndex("new", { path: "/repo/app/", createdAt: 200 }));
+    expect(reg.getIndexByPath("/repo/app")?.name).toBe("new");
+    expect(reg.getIndexByPath("/repo/app/sub")?.name).toBeUndefined();
+    expect(reg.getIndexByPath("/elsewhere")).toBeNull();
+  });
+
+  test("listDuplicatePaths groups only paths registered twice", () => {
+    reg.upsertIndex(makeIndex("a", { path: "/repo/x" }));
+    reg.upsertIndex(makeIndex("b", { path: "/repo/x/" }));
+    reg.upsertIndex(makeIndex("c", { path: "/repo/y" }));
+    expect(reg.listDuplicatePaths()).toEqual([{ path: "/repo/x", names: expect.arrayContaining(["a", "b"]) }]);
+  });
+
   test("upsert + get + list", () => {
     reg.upsertIndex(makeIndex("alpha"));
     reg.upsertIndex(makeIndex("beta"));

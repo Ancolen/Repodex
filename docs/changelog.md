@@ -45,6 +45,23 @@ Version-by-version implementation history, **newest first**. For the current don
   duplicates, `indexing` suppression, indices without stats), `tests/stats.test.ts`
   (note wording, duplicate note, threshold override).
 
+### Fixed — one path can no longer become two projects
+
+- **Duplicate-path reuse** (`src/core/registry.ts`, `src/core/index-manager.ts`,
+  `src/utils/pathtools.ts`, `src/core/doctor.ts`, `src/core/stats.ts`,
+  `src/server/mcp.ts`, `src/server/control-api.ts`). `cidx index <dir> alt-name`
+  on an already-indexed directory registered a SECOND project, table and
+  watcher over the same files (duplicate disk work, split search results).
+  `createIndex` now looks the resolved path up first (`getIndexByPath`, newest
+  wins for legacy duplicates) and reindexes that record; a different requested
+  name returns an explicit "already indexed as '<x>' — '<y>' is ignored" note.
+  No UNIQUE constraint is added (it would break existing duplicate rows): the
+  doctor gets a global `duplicates` warn and `stats` notes the shared path on
+  every affected project. Cleanup stays manual.
+- Tests: `tests/duplicate-path.test.ts`, `tests/registry.test.ts` (`getIndexByPath`
+  / `listDuplicatePaths`), `tests/pathtools.test.ts`, `tests/doctor.test.ts`,
+  `tests/stats.test.ts`.
+
 ### Added — status waits for the final state in one round-trip
 
 - **`get_index_status { wait, waitMs }` + a safer wait budget**

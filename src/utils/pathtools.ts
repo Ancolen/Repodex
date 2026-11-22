@@ -20,11 +20,23 @@ export function isWithinDir(parent: string, child: string): boolean {
 export function pathOverlapNote(
   dir: string,
   existing: ReadonlyArray<{ name: string; path: string }>,
+  /** The name the caller asked for (2.10.0): a different name on the SAME path is reported. */
+  requestedName?: string | undefined,
 ): string | null {
   const base = path.resolve(dir);
   for (const rec of existing) {
     const other = path.resolve(rec.path);
-    if (other === base) continue; // same project (the reindex path) — no note
+    if (other === base) {
+      // The same directory is already a project (createIndex reuses it). With a
+      // different requested name, say so instead of silently ignoring it.
+      if (requestedName !== undefined && requestedName !== rec.name) {
+        return (
+          `this path is already indexed as '${rec.name}' — the requested name '${requestedName}' ` +
+          "is ignored and the existing project is reused (rename it first to use another name)"
+        );
+      }
+      continue;
+    }
     if (isWithinDir(other, base)) {
       return (
         `project '${rec.name}' (${other}) already indexes a parent directory of this path — ` +
