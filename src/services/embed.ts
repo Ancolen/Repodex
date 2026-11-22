@@ -173,6 +173,49 @@ export function isTransientEmbedError(err: unknown): boolean {
   return /\bHTTP 503\b|Loading model/i.test(msg);
 }
 
+/** Socket/connection error codes that mean the backend is not reachable at all. */
+const CONNECTION_ERROR_CODES = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "EPIPE",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+/**
+ * True for an error that means "the embedding backend is unreachable" (process
+ * down, wrong URL, DNS failure, reset/timeout) — as opposed to a reachable
+ * server that rejected the request. Bun throws `Unable to connect. Is the
+ * computer able to access the url?`, Node/undici wraps a `TypeError: fetch
+ * failed` with a `cause` carrying the code, so both shapes (and the chain) are
+ * inspected. A 503 "Loading model" is deliberately NOT in this class: that is
+ * `isTransientEmbedError`, handled by the transparent retry.
+ */
+export function isBackendUnavailableError(err: unknown): boolean {
+  if (isTransientEmbedError(err)) return false;
+  let current: unknown = err;
+  for (let depth = 0; depth < 4 && current !== null && current !== undefined; depth++) {
+    if (typeof current === "object") {
+      const code = (current as { code?: unknown }).code;
+      if (typeof code === "string" && CONNECTION_ERROR_CODES.has(code)) return true;
+    }
+    const msg = current instanceof Error ? current.message : String(current);
+    if (
+      /\bfetch failed\b|Unable to connect|ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|ENETUNREACH|ECONNRESET|ETIMEDOUT|connection refused|socket hang up|ConnectTimeout|UND_ERR_SOCKET/i.test(
+        msg,
+      )
+    ) {
+      return true;
+    }
+    current = typeof current === "object" ? (current as { cause?: unknown }).cause : undefined;
+  }
+  return false;
+}
+
 /**
  * Waits until the resolved embedding backend answers a readiness probe.
  * llama.cpp: `/health` (200 ready, 503 loading; an unknown endpoint counts as

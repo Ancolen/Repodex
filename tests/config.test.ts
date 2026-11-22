@@ -175,6 +175,27 @@ describe("config — defaults and environment variable overrides", () => {
     expect(invalid.CONFIG.EMBED_READY_TIMEOUT_MS).toBe(20000);
   });
 
+  test("embedding failFast defaults to true; EMBED_FAIL_FAST and YAML override it", async () => {
+    const def = await runConfig({});
+    expect(def.CONFIG.EMBED_FAIL_FAST).toBe(true);
+    const off = await runConfig({ EMBED_FAIL_FAST: "false" });
+    expect(off.CONFIG.EMBED_FAIL_FAST).toBe(false);
+    const one = await runConfig({ EMBED_FAIL_FAST: "1" });
+    expect(one.CONFIG.EMBED_FAIL_FAST).toBe(true);
+    const junk = await runConfig({ EMBED_FAIL_FAST: "yes" });
+    expect(junk.CONFIG.EMBED_FAIL_FAST).toBe(true);
+
+    const yamlPath = join(tmpdir(), `cidx-failfast-${crypto.randomUUID()}.yml`);
+    writeFileSync(yamlPath, "embedding:\n  failFast: false\n");
+    try {
+      const y = await runConfig({ CIDX_CONFIG: yamlPath });
+      expect(y.CONFIG.EMBED_FAIL_FAST).toBe(false);
+    } finally {
+      rmSync(yamlPath, { force: true });
+    }
+    expect(DEFAULT_CONFIG_YAML).toContain("failFast: true");
+  });
+
   test("watcher polling is off by default; WATCH_POLLING / WATCH_POLL_INTERVAL_MS override it", async () => {
     const def = await runConfig({});
     expect(def.CONFIG.WATCH_POLLING).toBe(false);

@@ -5,6 +5,7 @@ import {
   setEmbedBackend,
   resetEmbedBackend,
   getEmbedding,
+  isBackendUnavailableError,
   isTransientEmbedError,
   waitForEmbedBackend,
 } from "../src/services/embed";
@@ -184,6 +185,21 @@ describe("embedding backend readiness and 503 retry", () => {
     expect(isTransientEmbedError(new Error("Unable to connect. Is the computer able to access the url?"))).toBe(false);
     expect(isTransientEmbedError(new Error("llama-server /v1/embeddings HTTP 400"))).toBe(false);
     expect(isTransientEmbedError("boom")).toBe(false);
+  });
+
+  test("isBackendUnavailableError: only unreachable-backend failures qualify", () => {
+    expect(isBackendUnavailableError(new Error("Unable to connect. Is the computer able to access the url?"))).toBe(true);
+    expect(isBackendUnavailableError(new Error("fetch failed"))).toBe(true);
+    expect(isBackendUnavailableError(Object.assign(new Error("fetch failed"), { code: "ECONNREFUSED" }))).toBe(true);
+    const wrapped = Object.assign(new TypeError("fetch failed"), {
+      cause: Object.assign(new Error("socket closed"), { code: "ECONNRESET" }),
+    });
+    expect(isBackendUnavailableError(wrapped)).toBe(true);
+    expect(isBackendUnavailableError(new Error("getaddrinfo ENOTFOUND llama.local"))).toBe(true);
+    // Reachable-but-loading / request errors are NOT connection failures.
+    expect(isBackendUnavailableError(new Error('llama-server /v1/embeddings HTTP 503: Loading model'))).toBe(false);
+    expect(isBackendUnavailableError(new Error("llama-server /v1/embeddings HTTP 400"))).toBe(false);
+    expect(isBackendUnavailableError("boom")).toBe(false);
   });
 
   test("probeLlamaHealth: 200 ready, 503 loading, unknown status does not block", async () => {

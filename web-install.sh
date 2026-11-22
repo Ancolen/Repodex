@@ -23,6 +23,8 @@
 #   ASSUME_YES=1           -> automatically answer "yes" to interactive prompts
 #   CIDX_HOME=...    -> explicitly set the data root (passed to the service + CLI)
 #   OLLAMA_MODEL=...        -> embedding model (default: qwen3-embedding:0.6b)
+#   EMBED_SERVICE=llamacpp-eg2 -> also add Wants=/After= for that user unit, so
+#                       the embedding backend starts before the daemon
 #   REPODEX_REPO=owner/name -> source repo (default: Ancolen/repodex)
 #
 set -euo pipefail
@@ -191,6 +193,11 @@ setup_systemd() {
   mkdir -p "$unit_dir"
   local home_env=""
   [ -n "$HOME_OVERRIDE" ] && home_env="Environment=CIDX_HOME=$HOME_OVERRIDE"
+  # Optional: tie this unit to the embedding backend's own user unit (e.g.
+  # EMBED_SERVICE=llamacpp-eg2), so it starts first and is wanted by the daemon.
+  local embed_lines=""
+  [ -n "${EMBED_SERVICE:-}" ] && embed_lines="Wants=$EMBED_SERVICE.service
+After=$EMBED_SERVICE.service"
   # The compiled binary starts the daemon with the hidden `__daemon` sub-command.
   cat > "$unit" <<EOF
 [Unit]
@@ -198,6 +205,7 @@ Description=cidx daemon (repodex)
 Documentation=https://github.com/$REPO
 After=network-online.target
 Wants=network-online.target
+$embed_lines
 
 [Service]
 Type=simple

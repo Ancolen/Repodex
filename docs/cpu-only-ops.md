@@ -102,3 +102,26 @@ Point cidx at it with `embedding.provider: llamacpp` + `embedding.llamacppUrl` (
 just those and leave other projects on Ollama). One llama-server serves one model; a
 llama.cpp **reranker** similarly needs its own server via `search.rerank.url` (an
 `--embedding` server cannot compute logits).
+
+## Keeping the backend and the daemon in sync
+
+If the embedding server runs as its own systemd **user** unit (e.g. a
+`llamacpp-eg2.service`), tell the installer to wire the dependency:
+
+```bash
+EMBED_SERVICE=llamacpp-eg2 ./install.sh        # or ... | bash for web-install.sh
+```
+
+The generated `cidx.service` then carries `Wants=llamacpp-eg2.service` +
+`After=llamacpp-eg2.service`, so the backend is started first. Without it the
+daemon may boot before the backend and hit the fail-fast path below.
+
+**Fail-fast (default on).** If the backend is unreachable after
+`embedding.readyTimeoutMs` (default 20 s), an index job now aborts *before*
+the deleted-file cleanup and any write — the existing index is preserved, and
+the error names the backend and suggests `cidx doctor`. Three consecutive
+connection-level failures **mid-job** stop new work, commit the slice already
+prepared, then fail the job instead of grinding through every file. A 503
+"Loading model" is not a connection failure and keeps its transparent retry.
+Set `embedding.failFast: false` (or `EMBED_FAIL_FAST=false`) to restore the
+legacy per-file attempt/count behavior.

@@ -7,7 +7,12 @@ import { readProjectConfig, extToLanguage, languageAllowSet, type ProjectConfig 
 import { resolveFraming, frameDoc } from "../core/framing";
 import { chunkCode } from "../chunking/chunker";
 import { extractIdTerms } from "../core/idterms";
-import { getEmbeddings, waitForEmbedBackend } from "./embed";
+import {
+  getEmbeddings,
+  waitForEmbedBackend,
+  isBackendUnavailableError,
+  resolveEmbedBackend,
+} from "./embed";
 import {
   insertChunks,
   replaceFileRecords,
@@ -555,6 +560,20 @@ async function hasFilesToEmbed(
   return false;
 }
 
+/** Consecutive connection-level embed failures that trip the fail-fast breaker. */
+const BACKEND_FAILURE_THRESHOLD = 3;
+
+/** Best-effort "provider at URL" label for the fail-fast error (never throws). */
+async function backendLabel(): Promise<string> {
+  try {
+    const backend = await resolveEmbedBackend();
+    return `${backend.provider} at ${backend.url}`;
+  } catch {
+    // `auto` found nothing reachable — name both candidates instead of throwing.
+    return `no reachable backend (Ollama ${CONFIG.OLLAMA_URL}, llama-server ${CONFIG.LLAMACPP_URL})`;
+  }
+}
+
 /**
  * Indexes a directory from scratch.
  * - Progress is reported via onProgress (0..total).
@@ -635,6 +654,44 @@ export async function indexDirectory(
     );
   }
 
+  // BACKEND READINESS: a login-time startup sync regularly begins while
+  // llama-server is still loading the model — its first files failed with
+  // ConnectionRefused/503, kept no mtime cache entry, and stayed stale until a
+  // manual reindex (the "124 files failed to index" note). Wait (bounded) for
+  // the backend before the first embed; with the default 20 s a cold BF16 load
+  // finishes in time on the maintainer's install.
+  //
+  // This gate runs BEFORE the deleted-file cleanup: with `embedding.failFast`
+  // (default) a dead backend aborts the job here, before ANY write, so the
+  // existing index is preserved untouched (a 27-hour outage once churned
+  // through every file and left hundreds of failed-file lines).
+  const readyTimeoutMs = opts.embedReadyTimeoutMs ?? CONFIG.EMBED_READY_TIMEOUT_MS;
+  const failFast = CONFIG.EMBED_FAIL_FAST;
+  if (total > 0 && !opts.signal?.aborted) {
+    // A ready backend answers the first probe, so the pending-work scan below
+    // only runs during an actual outage. The gate matters: a no-op sync (the
+    // startup restore re-enqueues EVERY ready project) must not block for the
+    // readiness budget when it has nothing to embed.
+    const initiallyReady = await waitForEmbedBackend(0);
+    if (!initiallyReady && (await hasFilesToEmbed(files, target, opts.registry))) {
+      const ready = await waitForEmbedBackend(readyTimeoutMs);
+      if (!ready) {
+        if (failFast) {
+          throw new Error(
+            `embedding backend unreachable (${await backendLabel()}) after ${readyTimeoutMs} ms — ` +
+              `${total} file(s) need embedding, so the index job was aborted BEFORE any write; ` +
+              "the existing index is preserved. Start the embedding service and retry; " +
+              "run 'cidx doctor' to diagnose (set embedding.failFast: false to restore per-file attempts).",
+          );
+        }
+        console.error(
+          `[indexer] '${target.indexName}' embedding backend not ready after ${readyTimeoutMs} ms — ` +
+            "attempting the files anyway (failures are retried once at the end of the job).",
+        );
+      }
+    }
+  }
+
   // --- Clean up deleted/ignored files (incremental sync) ---
   let deleted = 0;
   if (opts.registry) {
@@ -655,30 +712,6 @@ export async function indexDirectory(
 
   opts.onProgress?.(0, total);
 
-  // BACKEND READINESS: a login-time startup sync regularly begins while
-  // llama-server is still loading the model — its first files failed with
-  // ConnectionRefused/503, kept no mtime cache entry, and stayed stale until a
-  // manual reindex (the "124 files failed to index" note). Wait (bounded) for
-  // the backend before the first embed; with the default 20 s a cold BF16 load
-  // finishes in time on the maintainer's install.
-  const readyTimeoutMs = opts.embedReadyTimeoutMs ?? CONFIG.EMBED_READY_TIMEOUT_MS;
-  if (total > 0 && !opts.signal?.aborted) {
-    // A ready backend answers the first probe, so the pending-work scan below
-    // only runs during an actual outage. The gate matters: a no-op sync (the
-    // startup restore re-enqueues EVERY ready project) must not block for the
-    // readiness budget when it has nothing to embed.
-    const initiallyReady = await waitForEmbedBackend(0);
-    if (!initiallyReady && (await hasFilesToEmbed(files, target, opts.registry))) {
-      const ready = await waitForEmbedBackend(readyTimeoutMs);
-      if (!ready) {
-        console.error(
-          `[indexer] '${target.indexName}' embedding backend not ready after ${readyTimeoutMs} ms — ` +
-            "attempting the files anyway (failures are retried once at the end of the job).",
-        );
-      }
-    }
-  }
-
   let processed = 0;
   let chunks = 0;
   let dim: number | null = null;
@@ -686,6 +719,13 @@ export async function indexDirectory(
   let failed = 0;
   /** Files whose embed/write threw; retried ONCE after the main loop. */
   const failedFiles: string[] = [];
+  /**
+   * Fail-fast circuit breaker: consecutive connection-level failures. Once it
+   * trips, no NEW file is planned; the slice already prepared still commits (a
+   * durable partial write), then the job throws instead of failing every file.
+   */
+  let consecutiveBackendFailures = 0;
+  let circuitBroken = false;
 
   // Full-index pipeline (see `indexing.fileConcurrency` / `writeBatchFiles`):
   //   - a small worker pool prepares files concurrently, so chunking/CPU of one
@@ -700,11 +740,11 @@ export async function indexDirectory(
   const embedLimiter = createSemaphore(CONFIG.EMBED_CONCURRENCY);
 
   for (let start = 0; start < files.length; start += writeBatchFiles) {
-    if (opts.signal?.aborted) break;
+    if (opts.signal?.aborted || circuitBroken) break;
     const slice = files.slice(start, start + writeBatchFiles);
 
     const prepared = await mapWithConcurrency(slice, fileConcurrency, async (file) => {
-      if (opts.signal?.aborted) return null;
+      if (opts.signal?.aborted || circuitBroken) return null;
       try {
         const p = await prepareFile(
           target,
@@ -723,6 +763,19 @@ export async function indexDirectory(
         failed++;
         failedFiles.push(file);
         console.error(`[indexer] failed to index '${file}':`, err);
+        if (failFast && isBackendUnavailableError(err)) {
+          consecutiveBackendFailures++;
+          if (consecutiveBackendFailures >= BACKEND_FAILURE_THRESHOLD && !circuitBroken) {
+            circuitBroken = true;
+            console.error(
+              `[indexer] '${target.indexName}' embedding backend unreachable — ` +
+                `${consecutiveBackendFailures} consecutive connection failures; ` +
+                "stopping new work after the slice in flight.",
+            );
+          }
+        } else {
+          consecutiveBackendFailures = 0;
+        }
         processed++;
         opts.onProgress?.(processed, total, file);
         return null;
@@ -768,6 +821,21 @@ export async function indexDirectory(
         err,
       );
     }
+  }
+
+  if (circuitBroken) {
+    // The backend died mid-job: slices already prepared were committed above
+    // (and their mtime cache written only after the durable commit), the rest
+    // were never attempted. Fail the job so it is visible, leaving the partial
+    // — but self-consistent — write in place.
+    const pending = files.length - processed;
+    throw new Error(
+      `embedding backend unreachable mid-job (${await backendLabel()}) — ` +
+        `stopped after ${consecutiveBackendFailures} consecutive connection failures. ` +
+        `${chunks} chunk(s) were committed from ${processed - failed} file(s) before the stop; ` +
+        `${failed} file(s) failed and ${pending} were left pending. ` +
+        "Start the embedding service and retry (cidx sync); run 'cidx doctor' to diagnose.",
+    );
   }
 
   // RETRY PASS (once): a backend that was down/loading for part of the run is

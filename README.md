@@ -78,6 +78,7 @@ curl -fsSL https://raw.githubusercontent.com/Ancolen/repodex/main/web-install.sh
 NO_SERVICE=1 ... | bash    # don't install the systemd service (manual only: cidx start)
 ASSUME_YES=1 ... | bash    # auto-confirm prompts (headless install)
 BIN_DIR=~/bin ... | bash   # choose the directory where cidx/repodex go
+EMBED_SERVICE=llamacpp-eg2 ... | bash   # also Wants=/After= that user unit (embedding backend)
 ```
 
 > For the one-line install to work, at least one **release** (a `v*` tag) must be published in the repo — see [Releases](#releases).
@@ -112,6 +113,7 @@ Optional environment variables:
 NO_SERVICE=1 ./install.sh     # don't install automatic startup (manual only: cidx start)
 ASSUME_YES=1 ./install.sh     # auto-confirm prompts (CI / headless install)
 BIN_DIR=~/bin ./install.sh    # choose the directory where cidx/repodex go
+EMBED_SERVICE=llamacpp-eg2 ./install.sh   # also Wants=/After= that user unit (embedding backend)
 ```
 
 ### Manual installation
@@ -499,7 +501,7 @@ watcher:
   debounceMs: 300
 ```
 
-**Priority:** in-code defaults < YAML < environment variables. Environment variables can also be used for a quick temporary override: `CIDX_HOME`, `EMBED_PROVIDER`, `LLAMACPP_URL`, `EMBEDDING_FRAMING`, `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX`, `MCP_PORT`, `CONTROL_PORT`, `EMBED_BATCH_SIZE`, `EMBED_CONCURRENCY`, `EMBED_CACHE_MAX`, `MAX_CHUNK_TOKENS`, `MAX_FILE_SIZE_BYTES`, `VECTOR_INDEX_THRESHOLD`, `JOB_CONCURRENCY`, `INDEX_FILE_CONCURRENCY`, `INDEX_WRITE_BATCH_FILES`, `QUERY_LOG_SIZE`, `EXPAND_MODEL`, `EXPAND_URL`, `EXPAND_MAX_VARIANTS`, `EXPAND_TIMEOUT_MS`, `BOOST_ENABLED`, `BOOST_SHORT_PATH`, `BOOST_SOURCE_ROOT`, `BOOST_TEST_DEMOTION`, `BOOST_GENERATED_DEMOTION`, `RERANK_MODEL`, `RERANK_URL`, `RERANK_TOP_K`, `RERANK_CONCURRENCY`, `RERANK_NUM_CTX`, `MMR_LAMBDA`, `MMR_TOP_K`, `DOC_CHECK_JUDGE_MODEL`, `DOC_CHECK_JUDGE_URL`, `DOC_CHECK_WATCH`, `DAEMON_IDLE_TIMEOUT_MINUTES`. You can define additional ignore rules by placing a `.cidxignore` at a project root (`.gitignore` is also obeyed).
+**Priority:** in-code defaults < YAML < environment variables. Environment variables can also be used for a quick temporary override: `CIDX_HOME`, `EMBED_PROVIDER`, `LLAMACPP_URL`, `EMBEDDING_FRAMING`, `EMBED_FAIL_FAST`, `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX`, `MCP_PORT`, `CONTROL_PORT`, `EMBED_BATCH_SIZE`, `EMBED_CONCURRENCY`, `EMBED_CACHE_MAX`, `MAX_CHUNK_TOKENS`, `MAX_FILE_SIZE_BYTES`, `VECTOR_INDEX_THRESHOLD`, `JOB_CONCURRENCY`, `INDEX_FILE_CONCURRENCY`, `INDEX_WRITE_BATCH_FILES`, `QUERY_LOG_SIZE`, `EXPAND_MODEL`, `EXPAND_URL`, `EXPAND_MAX_VARIANTS`, `EXPAND_TIMEOUT_MS`, `BOOST_ENABLED`, `BOOST_SHORT_PATH`, `BOOST_SOURCE_ROOT`, `BOOST_TEST_DEMOTION`, `BOOST_GENERATED_DEMOTION`, `RERANK_MODEL`, `RERANK_URL`, `RERANK_TOP_K`, `RERANK_CONCURRENCY`, `RERANK_NUM_CTX`, `MMR_LAMBDA`, `MMR_TOP_K`, `DOC_CHECK_JUDGE_MODEL`, `DOC_CHECK_JUDGE_URL`, `DOC_CHECK_WATCH`, `DAEMON_IDLE_TIMEOUT_MINUTES`. You can define additional ignore rules by placing a `.cidxignore` at a project root (`.gitignore` is also obeyed).
 
 > 💡 **Exclude large data folders.** Since `allowedExtensions` includes `.json`, generated/very large JSON data files (e.g. HuggingFace `tokenizer.json`, fixture/static data) get split into thousands of chunks and embedded — this slows down indexing and pollutes search results. Exclude such folders by placing a `.cidxignore` at the project root:
 > ```gitignore

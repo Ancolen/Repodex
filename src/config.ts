@@ -66,6 +66,17 @@ export interface IndexerConfig {
      * end of the job (again after a readiness check).
      */
     readyTimeoutMs: number;
+    /**
+     * Abort an index job instead of grinding through every file when the
+     * embedding backend is unreachable (connection refused / DNS / reset).
+     * After the readiness wait fails, the job throws BEFORE the deleted-file
+     * cleanup and any write (the existing index is preserved). During the run,
+     * three consecutive connection-level failures stop new work, commit the
+     * slices already prepared, then throw. HTTP 503 "loading" is NOT this
+     * class — it keeps its transparent retry. Default true (a 27-hour silent
+     * outage once produced hundreds of "failed file" lines).
+     */
+    failFast: boolean;
   };
   indexing: {
     maxChunkSize: number;
@@ -304,6 +315,8 @@ const DEFAULTS: IndexerConfig = {
     llamacppUrl: "http://127.0.0.1:8080",
     framing: "none",
     readyTimeoutMs: 20000,
+    // Default ON: a dead backend must fail the job, not fail every file.
+    failFast: true,
   },
   indexing: {
     maxChunkSize: 1500,
@@ -395,6 +408,7 @@ embedding:
   llamacppUrl: ${DEFAULTS.embedding.llamacppUrl}  # base URL of llama-server; start it: llama-server -m <model.gguf> -a <model> --ctx-size <numCtx> --embedding
   framing: ${DEFAULTS.embedding.framing}               # none | auto; auto = per-model task prefixes (EmbeddingGemma 2 docs/queries, qwen3 query instruction); unknown models stay unframed; a change re-embeds via migration
   readyTimeoutMs: ${DEFAULTS.embedding.readyTimeoutMs}          # how long an index job waits for the embedding backend to load (llama-server /health) before its first embed; 0 = probe once, never wait. Failed files are retried once at the end of the job
+  failFast: ${DEFAULTS.embedding.failFast}             # unreachable backend aborts the index job (index preserved) instead of failing every file; 503 "loading" still retries transparently
 
 indexing:
   maxChunkSize: ${DEFAULTS.indexing.maxChunkSize}
@@ -586,6 +600,9 @@ export const RESOLVED: IndexerConfig = {
       num(process.env.EMBED_READY_TIMEOUT_MS) ??
       y.embedding?.readyTimeoutMs ??
       DEFAULTS.embedding.readyTimeoutMs,
+    failFast:
+      envBool(process.env.EMBED_FAIL_FAST) ??
+      (typeof y.embedding?.failFast === "boolean" ? y.embedding.failFast : DEFAULTS.embedding.failFast),
     framing: (() => {
       const raw = process.env.EMBEDDING_FRAMING ?? y.embedding?.framing ?? DEFAULTS.embedding.framing;
       if (raw === "none" || raw === "auto") return raw;
@@ -793,6 +810,7 @@ export const CONFIG = {
   EMBED_PROVIDER: RESOLVED.embedding.provider,
   LLAMACPP_URL: RESOLVED.embedding.llamacppUrl,
   EMBED_READY_TIMEOUT_MS: RESOLVED.embedding.readyTimeoutMs,
+  EMBED_FAIL_FAST: RESOLVED.embedding.failFast,
   EMBEDDING_FRAMING: RESOLVED.embedding.framing,
 
   ALLOWED_EXTENSIONS: RESOLVED.indexing.allowedExtensions,

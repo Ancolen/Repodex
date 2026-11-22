@@ -45,6 +45,28 @@ Version-by-version implementation history, **newest first**. For the current don
   duplicates, `indexing` suppression, indices without stats), `tests/stats.test.ts`
   (note wording, duplicate note, threshold override).
 
+### Fixed — an unreachable embedding backend fails the job instead of every file
+
+- **Embedding fail-fast** (`src/services/embed.ts`, `src/services/indexer.ts`,
+  `src/config.ts`, `install.sh`, `web-install.sh`). A backend that was simply
+  not running (connection refused / DNS / reset) used to fail every file one by
+  one — a 27-hour outage churned through the whole tree and left hundreds of
+  "failed file" lines (an HTTP 503 "loading" was already a separate, retried
+  class). Now `isBackendUnavailableError` classifies connection-level failures,
+  and the readiness gate runs **before** the deleted-file cleanup: when it
+  cannot reach the backend after `embedding.readyTimeoutMs` (default 20 s) and
+  files actually need embedding, the job throws *before any write* — the
+  existing index is preserved and the error names the backend + `cidx doctor`.
+  Mid-run, three consecutive connection failures stop planning new files, commit
+  the slice already prepared (a valid partial write), and then fail the job.
+  `embedding.failFast` / `EMBED_FAIL_FAST` (default on) restores the legacy
+  per-file counting when off. The installers take `EMBED_SERVICE=<unit>` to add
+  `Wants=`/`After=` for the embedding backend's own user unit.
+- Tests: `tests/embed-backend.test.ts` (error classification incl. wrapped
+  `cause`), `tests/index-failures.test.ts` (abort before any write with an empty
+  mtime cache, mid-job breaker committing the prepared slice, legacy mode),
+  `tests/config.test.ts` (`EMBED_FAIL_FAST` env/YAML).
+
 ### Fixed — ANN/FTS indexes stay in step with incremental writes
 
 - **Post-job auto-maintenance + dead-index repair** (`src/services/db.ts`,
