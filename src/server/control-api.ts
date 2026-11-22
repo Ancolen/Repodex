@@ -18,7 +18,7 @@ import type { BridgeSessionRegistry } from "../core/bridgesessions";
 import type { DaemonEventRing } from "../core/events";
 import { viewIndex } from "./resource-defs";
 import { overviewPickOneNote, type OverviewPickOne } from "./format";
-import type { IndexRecord, QueryLogStatsOpts } from "../core/registry";
+import type { IndexRecord, QueryLogStatsOpts, UsageStatsOpts } from "../core/registry";
 
 export interface ControlDeps {
   manager: IndexManager;
@@ -35,6 +35,42 @@ export interface ControlDeps {
   bridgeSessions: BridgeSessionRegistry;
   /** A2 — the in-memory daemon event ring behind `GET /events`. */
   events: DaemonEventRing;
+}
+
+// ------------------------------------------------------- usage analytics (2.10.0)
+
+/**
+ * Control-API routes that mirror an MCP tool — the usage log records them under
+ * the tool's name, so a CLI/bridge call and an MCP call are the same unit.
+ * Routes without a tool equivalent (/ping, /doctor, /stats, /compact, …) are
+ * deliberately absent.
+ */
+const CONTROL_ROUTE_TO_TOOL: Record<string, string> = {
+  "POST /index": "index_project",
+  "POST /sync": "sync_project",
+  "POST /search": "search_codebase",
+  "POST /search/batch": "search_codebase_batch",
+  "POST /pack": "get_context_pack",
+  "POST /find": "find_symbol",
+  "POST /outline": "get_file_outline",
+  "POST /references": "find_references",
+  "POST /overview": "get_repo_overview",
+  "POST /dependencies": "get_dependencies",
+  "POST /callgraph": "get_call_graph",
+  "POST /commits": "search_commits",
+  "POST /deadcode": "find_dead_code",
+  "POST /apidiff": "get_api_diff",
+  "POST /impact": "get_change_impact",
+  "POST /doccheck": "check_docs",
+  "POST /coupling": "get_coupling",
+  "POST /hotspots": "get_hotspots",
+};
+
+/** The tool name behind a request, or null (not a tool-equivalent route). */
+function controlToolFor(method: string, pathname: string): string | null {
+  if (method === "GET" && pathname === "/indexes") return "list_indexes";
+  if (method === "GET" && /^\/indexes\/[^/]+$/.test(pathname)) return "get_index_status";
+  return CONTROL_ROUTE_TO_TOOL[`${method} ${pathname}`] ?? null;
 }
 
 // -------------------------------------------------------------------- doctor
@@ -128,6 +164,36 @@ export function startControlApi(
   const app = express();
   app.use(hostGuard(host, port));
   app.use(express.json());
+  // Usage analytics (2.10.0): every tool-equivalent route records ONE row,
+  // measured on the JSON response. Registered here (post-json, pre-routes) so
+  // the CLI and the stdio bridge are counted once; the MCP HTTP server is a
+  // separate app and records from its own dispatcher (no double count).
+  app.use((req, res, next) => {
+    const tool = controlToolFor(req.method, req.path);
+    if (tool === null) {
+      next();
+      return;
+    }
+    const startedAt = Date.now();
+    const originalJson = res.json.bind(res);
+    res.json = ((body?: unknown) => {
+      try {
+        const anchor = (req.body ?? {}) as { project?: unknown };
+        deps.manager.recordToolUsage({
+          tool,
+          project: typeof anchor.project === "string" ? anchor.project : null,
+          ok: res.statusCode < 400,
+          latencyMs: Date.now() - startedAt,
+          structured: body,
+          startedAt,
+        });
+      } catch {
+        // Analytics are best-effort: never fail the request they measure.
+      }
+      return originalJson(body);
+    }) as typeof res.json;
+    next();
+  });
   // Idle shutdown (proposal O4): ANY request handled here counts as activity,
   // including /ping and /bridge-session traffic (the bridge's heartbeat keeps
   // an open MCP session alive — that is the guardrail, not noise).
@@ -924,6 +990,31 @@ export function startControlApi(
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
+  });
+
+  /**
+   * Local tool-usage analytics (2.10.0, `cidx stats --usage`): call counts,
+   * estimated returned tokens and "tokens avoided vs reading the files whole"
+   * per tool. Query params: `project` (unknown → self-healing 404), `days`
+   * (window) and `topTools`. Nothing leaves `~/.cidx`.
+   */
+  app.get("/usage", (req, res) => {
+    const opts: UsageStatsOpts = {};
+    const project = req.query.project;
+    if (typeof project === "string" && project.length > 0) {
+      if (!deps.manager.listIndexes().some((r) => r.name === project)) {
+        res
+          .status(404)
+          .json({ error: indexNotFoundMessage(project, deps.manager.listIndexes().map((r) => r.name)) });
+        return;
+      }
+      opts.project = project;
+    }
+    const days = typeof req.query.days === "string" ? Number(req.query.days) : NaN;
+    if (Number.isFinite(days) && days > 0) opts.days = Math.floor(days);
+    const top = typeof req.query.topTools === "string" ? Number(req.query.topTools) : NaN;
+    if (Number.isFinite(top) && top > 0) opts.topTools = Math.floor(top);
+    res.json(deps.manager.usageStats(opts));
   });
 
   // ----------------------------------------- table stats / compact (O3)

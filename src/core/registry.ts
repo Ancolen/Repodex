@@ -154,6 +154,54 @@ export interface QueryLogStats {
   repeatRate: number;
 }
 
+/** One recorded tool call (2.10.0 local usage analytics). */
+export interface UsageLogRow {
+  ts: number;
+  /** MCP tool name or the Control-API route's tool equivalent. */
+  tool: string;
+  /** The project anchor the call named, or null (all projects / global tools). */
+  project: string | null;
+  ok: boolean;
+  returnedChars: number;
+  estReturnedTokens: number;
+  estAvoidedTokens: number;
+  latencyMs: number;
+}
+
+/** Options of `Registry.usageStats`. */
+export interface UsageStatsOpts {
+  /** Only rows recorded for this project. */
+  project?: string | undefined;
+  /** Only the last N days (default: all rows). */
+  days?: number | undefined;
+  /** How many tools to report (default 25; the rest are counted in the totals). */
+  topTools?: number | undefined;
+}
+
+/** Per-tool aggregate of the usage log. */
+export interface UsageToolEntry {
+  tool: string;
+  calls: number;
+  ok: number;
+  failed: number;
+  returnedTokens: number;
+  avoidedTokens: number;
+  avgLatencyMs: number;
+}
+
+/** Aggregated usage analytics — local only, never leaves `~/.cidx`. */
+export interface UsageStats {
+  totalCalls: number;
+  okCalls: number;
+  failedCalls: number;
+  estReturnedTokens: number;
+  estAvoidedTokens: number;
+  avgLatencyMs: number;
+  tools: UsageToolEntry[];
+  /** The day window actually applied (null = every stored row). */
+  days: number | null;
+}
+
 /** Row count + estimated size of the embedding cache (proposal O3 table stats). */
 export interface EmbedCacheStats {
   rows: number;
@@ -368,6 +416,24 @@ export class Registry {
         latency_ms   INTEGER NOT NULL
       );
     `);
+
+    // Tool-usage analytics (2.10.0): one bounded row per MCP / Control-API
+    // call. Same contract as query_log — local only, write-time pruning,
+    // failures never propagate to the caller.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS usage_log (
+        id                  INTEGER PRIMARY KEY,
+        ts                  INTEGER NOT NULL,
+        tool                TEXT NOT NULL,
+        project             TEXT,
+        ok                  INTEGER NOT NULL,
+        returned_chars      INTEGER NOT NULL,
+        est_returned_tokens INTEGER NOT NULL,
+        est_avoided_tokens  INTEGER NOT NULL,
+        latency_ms          INTEGER NOT NULL
+      );
+    `);
+    this.db.run(`CREATE INDEX IF NOT EXISTS idx_usage_log_ts ON usage_log(ts);`);
 
     // Latest stored doc–code conformance report per project (proposal D1c watch
     // mode): the `doccheck` job UPSERTs on every run, `cidx doccheck --last`
@@ -937,6 +1003,149 @@ export class Registry {
       avgLatencyMs: round(summary.avgLatencyMs, 1),
       maxLatencyMs: round(summary.maxLatencyMs, 0),
       repeatRate: round((summary.total - summary.distinctQueries) / summary.total, 3),
+    };
+  }
+
+  // ----------------------------------------------------------- usage analytics
+
+  /**
+   * Records one tool call (2.10.0). Contract identical to `recordQueryLog`:
+   * `usage.logSize` <= 0 turns analytics OFF (no write, no prune), and a write
+   * failure is logged — it can never fail the tool call that is being measured.
+   */
+  recordUsage(row: UsageLogRow, size: number = CONFIG.USAGE_LOG_SIZE): void {
+    if (!(size >= 1)) return; // off (also rejects NaN/negative)
+    try {
+      this.db
+        .query(
+          `INSERT INTO usage_log
+             (ts, tool, project, ok, returned_chars, est_returned_tokens, est_avoided_tokens, latency_ms)
+           VALUES ($ts, $tool, $project, $ok, $chars, $returned, $avoided, $latency)`,
+        )
+        .run({
+          $ts: row.ts,
+          $tool: row.tool,
+          $project: row.project,
+          $ok: row.ok ? 1 : 0,
+          $chars: row.returnedChars,
+          $returned: row.estReturnedTokens,
+          $avoided: row.estAvoidedTokens,
+          $latency: row.latencyMs,
+        });
+      this.pruneUsageLog(size);
+    } catch (err) {
+      console.error("[registry] usage log write failed (the tool call is unaffected):", err);
+    }
+  }
+
+  /** Current row count of the usage log. */
+  countUsageLog(): number {
+    const row = this.db.query(`SELECT COUNT(*) AS n FROM usage_log`).get() as { n: number };
+    return row.n;
+  }
+
+  /** Deletes the oldest usage rows beyond `keepRows`; returns the deleted count. */
+  pruneUsageLog(keepRows: number): number {
+    const keep = Math.floor(keepRows);
+    if (!(keep >= 0)) return 0;
+    const total = this.countUsageLog();
+    if (total <= keep) return 0;
+    const res = this.db
+      .query(
+        `DELETE FROM usage_log WHERE id IN (
+           SELECT id FROM usage_log ORDER BY id ASC LIMIT $n
+         )`,
+      )
+      .run({ $n: total - keep });
+    return Number(res.changes);
+  }
+
+  /** Aggregates the usage log (local sqlite; `days`/`project` narrow the window). */
+  usageStats(opts: UsageStatsOpts = {}): UsageStats {
+    const topLimit = Math.max(0, Math.floor(opts.topTools ?? 25));
+    const days = typeof opts.days === "number" && Number.isFinite(opts.days) && opts.days > 0
+      ? Math.floor(opts.days)
+      : null;
+    const params: Record<string, string | number> = {};
+    if (typeof opts.project === "string" && opts.project.length > 0) params.$p = opts.project;
+    if (days !== null) params.$since = Date.now() - days * 86_400_000;
+    const where: string[] = [];
+    if ("$p" in params) where.push("project = $p");
+    if ("$since" in params) where.push("ts >= $since");
+    const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+
+    const summary = this.db
+      .query(
+        `SELECT COUNT(*) AS total,
+                COALESCE(SUM(ok), 0) AS okCalls,
+                COALESCE(SUM(est_returned_tokens), 0) AS returnedTokens,
+                COALESCE(SUM(est_avoided_tokens), 0) AS avoidedTokens,
+                AVG(latency_ms) AS avgLatencyMs
+           FROM usage_log
+           ${whereSql}`,
+      )
+      .get(params) as
+      | {
+          total: number;
+          okCalls: number;
+          returnedTokens: number;
+          avoidedTokens: number;
+          avgLatencyMs: number | null;
+        }
+      | undefined;
+    if (!summary || summary.total === 0) {
+      return {
+        totalCalls: 0,
+        okCalls: 0,
+        failedCalls: 0,
+        estReturnedTokens: 0,
+        estAvoidedTokens: 0,
+        avgLatencyMs: 0,
+        tools: [],
+        days,
+      };
+    }
+
+    const toolRows = this.db
+      .query(
+        `SELECT tool,
+                COUNT(*) AS calls,
+                COALESCE(SUM(ok), 0) AS okCalls,
+                COALESCE(SUM(est_returned_tokens), 0) AS returnedTokens,
+                COALESCE(SUM(est_avoided_tokens), 0) AS avoidedTokens,
+                AVG(latency_ms) AS avgLatencyMs
+           FROM usage_log
+           ${whereSql}
+          GROUP BY tool
+          ORDER BY calls DESC, tool ASC
+          LIMIT $top`,
+      )
+      .all({ ...params, $top: topLimit }) as {
+        tool: string;
+        calls: number;
+        okCalls: number;
+        returnedTokens: number;
+        avoidedTokens: number;
+        avgLatencyMs: number | null;
+      }[];
+
+    return {
+      totalCalls: summary.total,
+      okCalls: summary.okCalls,
+      failedCalls: summary.total - summary.okCalls,
+      estReturnedTokens: summary.returnedTokens,
+      estAvoidedTokens: summary.avoidedTokens,
+      avgLatencyMs: round(summary.avgLatencyMs, 1),
+      tools: toolRows.map((r) => ({
+        tool: r.tool,
+        calls: r.calls,
+        ok: r.okCalls,
+        failed: r.calls - r.okCalls,
+        returnedTokens: r.returnedTokens,
+        avoidedTokens: r.avoidedTokens,
+        avgLatencyMs: round(r.avgLatencyMs, 1),
+      })),
+      days,
     };
   }
 

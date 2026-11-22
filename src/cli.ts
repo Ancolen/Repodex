@@ -7,10 +7,10 @@ import { daemonCommand, bridgeCommand } from "./runtime";
 import { DAEMON_PING_TIMEOUT_MS, probeDaemon, portAccepts } from "./daemon-probe";
 import { daemonCheck, type DoctorCheck, type DoctorReport } from "./core/doctor";
 import { resolveEditor, buildEditorArgs } from "./utils/editor";
-import type { QueryLogStats, SearchEnvelope } from "./core/index-manager";
+import type { QueryLogStats, SearchEnvelope, UsageStats } from "./core/index-manager";
 import type { StatsReport } from "./core/stats";
 import type { CompactResult } from "./services/db";
-import { formatContextPack, formatReferences, formatApiDiff, formatImpact, formatDocCheck, formatDocCheckStored, formatBlameNote, formatEnvelopeNotes, formatQueryLogStats, formatCoupling, formatStatsSections, formatCompactResult, formatHotspots } from "./server/format";
+import { formatContextPack, formatReferences, formatApiDiff, formatImpact, formatDocCheck, formatDocCheckStored, formatBlameNote, formatEnvelopeNotes, formatQueryLogStats, formatCoupling, formatStatsSections, formatCompactResult, formatHotspots, formatUsageStats } from "./server/format";
 
 const BASE = `http://${CONFIG.HOST}:${CONFIG.CONTROL_PORT}`;
 
@@ -1522,17 +1522,18 @@ const COMMANDS: Record<string, CmdDoc> = {
     examples: ["cidx doctor"],
   },
   stats: {
-    usage: "stats [project]",
-    summary: "Table/disk stats + search analytics: fragments, cache, data-root usage, queries.",
+    usage: "stats [project] [--usage [--days n]]",
+    summary: "Table/disk stats + search analytics: fragments, cache, data-root usage, queries; --usage shows tool/token analytics.",
     aliases: ["analytics"],
     details: [
       "Table/disk sections (read-only): per project — registry row count, file-cache count, measured table size, ANN/FTS index presence, lastIndexedAt, pending job; global — data-root total, per-table sizes, meta.db size, embedding-cache rows + estimated size.",
       "Query-log sections (proposal A3): aggregates the daemon's local query log (capped by search.queryLogSize, default 10k rows; 0 = off). Every searchIndex/searchAll call writes one row — batch and context-pack queries log per query.",
+      "Usage analytics (2.10.0): --usage reports per-tool call counts, estimated returned tokens and the 'avoided vs reading the referenced files whole' estimate (bounded by usage.logSize, default 20k rows; 0 = off). --days <n> narrows the window.",
       "Zero-hit queries are flagged as possible index gaps: either a bad query or nothing relevant indexed.",
       "Cross-project (searchAll) queries are logged without a project and count toward the global stats only.",
       "Local-only data — nothing leaves ~/.cidx. Many small fragments on a project are the table-maintenance signal: run 'cidx compact <name>'.",
     ],
-    examples: ["cidx stats", "cidx stats api"],
+    examples: ["cidx stats", "cidx stats api", "cidx stats --usage --days 7"],
   },
   compact: {
     usage: "compact <name> [--prune-days <n>]",
@@ -1817,10 +1818,28 @@ async function cmdVersion(): Promise<void> {
  * `GET /querylog` (unchanged; rendered by `formatQueryLogStats`). A failed
  * half is reported but does not hide the other half.
  */
-async function cmdStats(positionals: string[]): Promise<void> {
+async function cmdStats(
+  positionals: string[],
+  flags: Record<string, string | boolean> = {},
+): Promise<void> {
   await requireDaemon();
   const project = positionals[0];
   const query = project ? `?project=${encodeURIComponent(project)}` : "";
+  if (flags.usage === true) {
+    const raw = flags.days;
+    const days = typeof raw === "string" ? Number(raw) : NaN;
+    const parts: string[] = [];
+    if (project) parts.push(`project=${encodeURIComponent(project)}`);
+    if (Number.isFinite(days) && days > 0) parts.push(`days=${Math.floor(days)}`);
+    const uq = parts.length > 0 ? `?${parts.join("&")}` : "";
+    try {
+      console.log(formatUsageStats(await api<UsageStats>("GET", `/usage${uq}`)));
+    } catch (err) {
+      console.error("Error:", err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+    return;
+  }
   let failed = false;
   try {
     const stats = await api<StatsReport>("GET", `/stats${query}`);
@@ -1917,7 +1936,7 @@ async function main(): Promise<void> {
     case "commits": case "git-log": case "gitlog": await cmdCommits(positionals, flags); break;
     case "apidiff": case "api-diff": await cmdApiDiff(positionals, flags); break;
     case "doctor": await cmdDoctor(); break;
-    case "stats": case "analytics": await cmdStats(positionals); break;
+    case "stats": case "analytics": await cmdStats(positionals, flags); break;
     case "compact": await cmdCompact(positionals, flags); break;
     case "config": await cmdConfig(positionals); break;
     case "mcp": case "stdio": await cmdMcp(); break;

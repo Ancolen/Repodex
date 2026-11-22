@@ -145,6 +145,16 @@ export interface IndexerConfig {
      */
     shrinkWarnMinFiles: number;
   };
+  usage: {
+    /**
+     * Max rows kept in the local tool-usage log (`cidx stats --usage`); one row
+     * per MCP / Control-API tool call. 0 (or any non-positive value) turns the
+     * analytics OFF entirely — no write, no prune.
+     */
+    logSize: number;
+    /** Divisor for the chars→tokens estimate (4 ≈ English/source code). */
+    charsPerToken: number;
+  };
   watcher: {
     /** Reindex delay after a file change. */
     debounceMs: number;
@@ -371,6 +381,8 @@ const DEFAULTS: IndexerConfig = {
     shrinkWarnRatio: 0.5,
     shrinkWarnMinFiles: 10,
   },
+  // Usage analytics are local-only; the log is bounded like the query log.
+  usage: { logSize: 20000, charsPerToken: 4 },
   watcher: { debounceMs: 300, polling: false, pollIntervalMs: 1000 },
   search: {
     queryLogSize: 10000,
@@ -476,6 +488,10 @@ doccheck:
   judgeModel: "${DEFAULTS.doccheck.judgeModel}"                # local instruct model that re-judges uncertain claims via yes/no logprobs; empty = off
   judgeUrl: "${DEFAULTS.doccheck.judgeUrl}"                    # judge base URL; empty = same server as the embedding backend
   watch: ${DEFAULTS.doccheck.watch}                    # after each successful index/migrate job, re-run the deterministic check and store the report (cidx doccheck <project> --last reads it)
+
+usage:
+  logSize: ${DEFAULTS.usage.logSize}              # max rows in the local tool-usage log (one per MCP / Control-API call; cidx stats --usage); 0 = off
+  charsPerToken: ${DEFAULTS.usage.charsPerToken}               # chars→tokens divisor for the usage estimates (4 ≈ source code)
 
 watcher:
   debounceMs: ${DEFAULTS.watcher.debounceMs}        # reindexing delay after a file change
@@ -681,6 +697,15 @@ export const RESOLVED: IndexerConfig = {
       y.indexing?.shrinkWarnMinFiles ??
       DEFAULTS.indexing.shrinkWarnMinFiles,
   },
+  usage: {
+    logSize: num(process.env.USAGE_LOG_SIZE) ?? y.usage?.logSize ?? DEFAULTS.usage.logSize,
+    charsPerToken: Math.max(
+      1,
+      num(process.env.USAGE_CHARS_PER_TOKEN) ??
+        y.usage?.charsPerToken ??
+        DEFAULTS.usage.charsPerToken,
+    ),
+  },
   watcher: {
     debounceMs: y.watcher?.debounceMs ?? DEFAULTS.watcher.debounceMs,
     polling:
@@ -852,6 +877,9 @@ export const CONFIG = {
   INDEX_WRITE_BATCH_FILES: RESOLVED.indexing.writeBatchFiles,
   INDEX_SHRINK_WARN_RATIO: RESOLVED.indexing.shrinkWarnRatio,
   INDEX_SHRINK_WARN_MIN_FILES: RESOLVED.indexing.shrinkWarnMinFiles,
+
+  USAGE_LOG_SIZE: RESOLVED.usage.logSize,
+  USAGE_CHARS_PER_TOKEN: RESOLVED.usage.charsPerToken,
 
   WATCH_DEBOUNCE_MS: RESOLVED.watcher.debounceMs,
   WATCH_POLLING: RESOLVED.watcher.polling,

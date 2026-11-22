@@ -29,6 +29,7 @@ import type { OutlineEntry } from "../chunking/chunker";
 import { formatBytes } from "../core/doctor";
 import type { CompactResult, TableIndexStat } from "../services/db";
 import type { StatsReport, ProjectStats } from "../core/stats";
+import type { UsageStats } from "../core/registry";
 
 /** Formats an epoch-ms timestamp as a compact ISO string (or "—"). */
 function fmtTime(ms: number | null | undefined): string {
@@ -772,6 +773,37 @@ export function formatQueryLogStats(s: QueryLogStats, opts?: { project?: string 
     return `${head}\n${note}`;
   }
   return [head, "", ...formatQueryLogSections(s)].join("\n");
+}
+
+// ------------------------------------------------- usage analytics (2.10.0)
+
+/**
+ * The `cidx stats --usage` block: per-tool call counts, estimated returned
+ * tokens and the "avoided vs reading the referenced files whole" estimate.
+ * Estimates are explicitly labelled — chars/4 and full file sizes.
+ */
+export function formatUsageStats(s: UsageStats): string {
+  const scope = s.days === null ? "all recorded calls" : `last ${s.days} day(s)`;
+  const head = `Tool usage — ${scope}: ${s.totalCalls} call(s) · ${s.okCalls} ok · ${s.failedCalls} failed · avg ${s.avgLatencyMs} ms`;
+  if (s.totalCalls === 0) {
+    return `${head}\nNo tool calls recorded yet (usage.logSize > 0 is required).`;
+  }
+  const lines = [
+    head,
+    `Estimated tokens: ${s.estReturnedTokens} returned · ${s.estAvoidedTokens} avoided vs reading the referenced files whole`,
+  ];
+  if (s.tools.length > 0) {
+    lines.push("  calls  ok/fail  returned  avoided  avg-ms  tool");
+    for (const t of s.tools) {
+      lines.push(
+        `  ${String(t.calls).padStart(5)}  ${String(t.ok).padStart(3)}/${String(t.failed).padEnd(4)} ` +
+          `${String(t.returnedTokens).padStart(9)} ${String(t.avoidedTokens).padStart(8)} ` +
+          `${String(t.avgLatencyMs).padStart(7)}  ${t.tool}`,
+      );
+    }
+  }
+  lines.push("Estimates only (chars/4 returned; full file sizes minus returned for the avoided figure). Local-only data.");
+  return lines.join("\n");
 }
 
 // --------------------------------------------- table stats / compact (O3)

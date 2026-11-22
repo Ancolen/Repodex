@@ -45,6 +45,25 @@ Version-by-version implementation history, **newest first**. For the current don
   duplicates, `indexing` suppression, indices without stats), `tests/stats.test.ts`
   (note wording, duplicate note, threshold override).
 
+### Added — local tool/token usage analytics
+
+- **`cidx stats --usage` + `GET /usage`** (`src/core/usage.ts`,
+  `src/core/registry.ts`, `src/core/index-manager.ts`, `src/server/mcp.ts`,
+  `src/server/control-api.ts`, `src/server/format.ts`, `src/cli.ts`,
+  `src/config.ts`). The 2026-10-25 "how much is cidx saving me?" request is
+  answered locally: one bounded `usage_log` row per MCP / Control-API tool call
+  (`usage.logSize`, default 20000; 0 = off) with the tool, project anchor,
+  success, latency, returned chars → estimated tokens (chars/4, text +
+  structured payload) and an **avoided-tokens estimate** for content-returning
+  tools (full sizes of ≤ 50 distinct payload files minus what was returned,
+  clamped at 0). The MCP dispatcher is wrapped once (no per-tool edits), and a
+  Control-API middleware records tool-equivalent routes under the same names —
+  CLI and stdio-bridge calls count once, MCP HTTP calls from their own server
+  (no double count). Env: `USAGE_LOG_SIZE`, `USAGE_CHARS_PER_TOKEN`.
+- Tests: `tests/usage.test.ts` (pure estimators, registry aggregate/prune/off,
+  formatter), `tests/config.test.ts`, the integration battery (batch = one row;
+  an MCP call appears under its tool name).
+
 ### Added — a shrinking project says so
 
 - **Unexpected-shrink note** (`src/utils/shrink.ts`, `src/core/index-manager.ts`,

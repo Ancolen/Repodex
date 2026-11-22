@@ -35,7 +35,7 @@ import type { OutlineEntry } from "../../src/chunking/chunker";
 import type { CouplingReport } from "../../src/core/coupling";
 import type { DaemonEventPage } from "../../src/core/events";
 import type { DoctorReport } from "../../src/core/doctor";
-import type { QueryLogStats } from "../../src/core/registry";
+import type { QueryLogStats, UsageStats } from "../../src/core/registry";
 import type { StatsReport } from "../../src/core/stats";
 import type { IndexView } from "../../src/server/resource-defs";
 import {
@@ -456,6 +456,28 @@ describe("db + control-api integration battery", () => {
 
     const scoped = await callApi<QueryLogStats>(daemon.controlUrl, `/querylog?project=${PROJECT_NAME}`);
     expect(scoped.total).toBeGreaterThanOrEqual(3);
+  });
+
+  test("tool-usage analytics count MCP + Control-API calls once", async () => {
+    if (!daemon) throw new Error("daemon not started");
+    const usage = await callApi<UsageStats>(daemon.controlUrl, "/usage");
+    expect(usage.totalCalls).toBeGreaterThan(0);
+    expect(usage.tools.some((t) => t.tool === "search_codebase")).toBe(true);
+
+    // One batch REQUEST is one usage row (the queries inside are not rows).
+    await callApi(daemon.controlUrl, "/search/batch", {
+      method: "POST",
+      body: { queries: ["greet", "soloMarker"], project: PROJECT_NAME },
+    });
+    const afterBatch = await callApi<UsageStats>(daemon.controlUrl, "/usage");
+    expect(afterBatch.totalCalls).toBe(usage.totalCalls + 1);
+    expect(afterBatch.tools.find((t) => t.tool === "search_codebase_batch")?.calls).toBeGreaterThanOrEqual(1);
+
+    // The MCP HTTP endpoint records under the tool name (its own dispatcher).
+    const mcp = await mcpToolCall(daemon.mcpUrl, "get_index_status", { project: PROJECT_NAME });
+    expect(mcp.result?.isError).not.toBe(true);
+    const afterMcp = await callApi<UsageStats>(daemon.controlUrl, "/usage");
+    expect(afterMcp.tools.some((t) => t.tool === "get_index_status")).toBe(true);
   });
 
   test("GET /stats reports the project and the data root honestly", async () => {

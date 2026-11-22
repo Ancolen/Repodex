@@ -294,6 +294,21 @@ describe("config — defaults and environment variable overrides", () => {
     expect(DEFAULT_CONFIG_YAML).toContain('- "app"');
   });
 
+  test("usage analytics defaults and overrides", async () => {
+    const def = await runConfig({});
+    expect(def.CONFIG.USAGE_LOG_SIZE).toBe(20000);
+    expect(def.CONFIG.USAGE_CHARS_PER_TOKEN).toBe(4);
+    const ovr = await runConfig({ USAGE_LOG_SIZE: "500", USAGE_CHARS_PER_TOKEN: "3" });
+    expect(ovr.CONFIG.USAGE_LOG_SIZE).toBe(500);
+    expect(ovr.CONFIG.USAGE_CHARS_PER_TOKEN).toBe(3);
+    const off = await runConfig({ USAGE_LOG_SIZE: "0" });
+    expect(off.CONFIG.USAGE_LOG_SIZE).toBe(0);
+    const clamped = await runConfig({ USAGE_CHARS_PER_TOKEN: "0" });
+    expect(clamped.CONFIG.USAGE_CHARS_PER_TOKEN).toBe(1);
+    expect(DEFAULT_CONFIG_YAML).toContain("logSize: 20000");
+    expect(DEFAULT_CONFIG_YAML).toContain("charsPerToken: 4");
+  });
+
   test("queryLogSize defaults to 10000; overridden with QUERY_LOG_SIZE (0 turns it off)", async () => {
     const def = await runConfig({});
     expect(def.CONFIG.QUERY_LOG_SIZE).toBe(10000);

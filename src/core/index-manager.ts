@@ -7,11 +7,14 @@ import { deriveTableName, tableNameFor, type IndexRecord, type Registry } from "
 import type {
   QueryLogStats,
   QueryLogStatsOpts,
+  UsageStats,
+  UsageStatsOpts,
 } from "./registry";
+import { estimateToolUsage } from "./usage";
 // A3 — search analytics: the query-log surface passes through IndexManager like
 // every other report tool.
 import type { EmbedCacheStats } from "./registry";
-export type { QueryLogStats, QueryLogStatsOpts, EmbedCacheStats } from "./registry";
+export type { QueryLogStats, QueryLogStatsOpts, EmbedCacheStats, UsageStats, UsageStatsOpts } from "./registry";
 import type { JobQueue } from "./job-queue";
 import type { Job } from "./types";
 import {
@@ -1784,6 +1787,55 @@ export class IndexManager {
    */
   queryLogStats(opts?: QueryLogStatsOpts): QueryLogStats {
     return this.registry.queryLogStats(opts);
+  }
+
+  /**
+   * Records one tool call for `cidx stats --usage` (2.10.0). Estimates the
+   * returned tokens (text + structured payload) and, for content-returning
+   * tools, how many tokens the distinct files in the payload would cost to read
+   * whole. Best-effort by contract — never throws into the tool path.
+   */
+  recordToolUsage(entry: {
+    tool: string;
+    project: string | null;
+    ok: boolean;
+    latencyMs: number;
+    text?: string | undefined;
+    structured?: unknown;
+    startedAt?: number | undefined;
+  }): void {
+    try {
+      const estimate = estimateToolUsage({
+        tool: entry.tool,
+        text: entry.text,
+        structured: entry.structured,
+        charsPerToken: CONFIG.USAGE_CHARS_PER_TOKEN,
+        sizeOfFile: (filePath) => {
+          try {
+            return statSync(filePath).size;
+          } catch {
+            return null;
+          }
+        },
+      });
+      this.registry.recordUsage({
+        ts: entry.startedAt ?? Date.now(),
+        tool: entry.tool,
+        project: entry.project,
+        ok: entry.ok,
+        returnedChars: estimate.returnedChars,
+        estReturnedTokens: estimate.estReturnedTokens,
+        estAvoidedTokens: estimate.estAvoidedTokens,
+        latencyMs: Math.max(0, Math.round(entry.latencyMs)),
+      });
+    } catch (err) {
+      console.error("[usage] record failed (the tool call is unaffected):", err);
+    }
+  }
+
+  /** Aggregated tool-usage analytics — read-only pass-through to the registry. */
+  usageStats(opts?: UsageStatsOpts): UsageStats {
+    return this.registry.usageStats(opts);
   }
 
   // ------------------------------------------------------- table stats (O3)

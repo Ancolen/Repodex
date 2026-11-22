@@ -93,6 +93,33 @@ function managerResourceTargets(manager: IndexManager): ResourceReadTargets {
  * Builds a configured MCP Server instance for each connection. Exported so the
  * tests can drive the same handlers over the SDK's in-memory transport.
  */
+/** Best-effort usage-log record for one MCP tool call (2.10.0; never throws). */
+function recordMcpToolUsage(
+  manager: IndexManager,
+  name: string,
+  rawArgs: unknown,
+  result: unknown,
+  startedAt: number,
+  ok: boolean,
+): void {
+  const args = (rawArgs ?? {}) as Record<string, unknown>;
+  const project = typeof args.project === "string" ? args.project : null;
+  const content = (result as { content?: { text?: string }[] } | null)?.content;
+  const text = Array.isArray(content)
+    ? content.map((c) => (typeof c?.text === "string" ? c.text : "")).join("\n")
+    : "";
+  const structured = (result as { structuredContent?: unknown } | null)?.structuredContent;
+  manager.recordToolUsage({
+    tool: name,
+    project,
+    ok,
+    latencyMs: Date.now() - startedAt,
+    text,
+    structured,
+    startedAt,
+  });
+}
+
 export function buildServer(deps: McpDeps): Server {
   const server = new Server(
     { name: "cidx", version: "2.9.5" },
@@ -125,9 +152,9 @@ export function buildServer(deps: McpDeps): Server {
     return { contents: [content] };
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: rawArgs } = request.params;
-
+  // The dispatcher is one function so every tool call can be measured in ONE
+  // wrapper (`recordMcpToolUsage`) without touching 20 return sites.
+  const dispatchTool = async (name: string, rawArgs: unknown) => {
     if (name === "search_codebase") {
       const args = rawArgs as {
         query: string;
@@ -825,6 +852,19 @@ export function buildServer(deps: McpDeps): Server {
     }
 
     throw new Error(`Unknown tool: ${name}`);
+  };
+
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: rawArgs } = request.params;
+    const startedAt = Date.now();
+    try {
+      const result = await dispatchTool(name, rawArgs);
+      recordMcpToolUsage(deps.manager, name, rawArgs, result, startedAt, true);
+      return result;
+    } catch (err) {
+      recordMcpToolUsage(deps.manager, name, rawArgs, null, startedAt, false);
+      throw err;
+    }
   });
 
   return server;
