@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, statfsSync, statSync } from "node:fs";
 import { Database } from "bun:sqlite";
 import { CONFIG } from "../config";
 
@@ -191,6 +191,27 @@ function round(x: number | null | undefined, digits: number): number {
   return Math.round(x * f) / f;
 }
 
+/** Options for the registry connection (tests inject tighter/deterministic thresholds). */
+export interface RegistryOptions {
+  /** Set false to skip the boot-time meta.db VACUUM (tests, manual control). */
+  vacuum?: boolean | undefined;
+  /** Free-page share that triggers VACUUM (default `CONFIG.META_VACUUM_FREE_RATIO`). */
+  vacuumFreeRatio?: number | undefined;
+  /** Minimum meta.db file size before VACUUM is considered (default `CONFIG.META_VACUUM_MIN_BYTES`). */
+  vacuumMinBytes?: number | undefined;
+}
+
+/** Read-only PRAGMA view used by the boot-time VACUUM decision. */
+export interface MetaDbStats {
+  pageCount: number;
+  freelistCount: number;
+  pageSize: number;
+  /** Free pages / total pages (0 when the DB is empty). */
+  freeRatio: number;
+  /** Main DB file size in bytes (the WAL is excluded). */
+  fileBytes: number;
+}
+
 /**
  * Central meta store (bun:sqlite).
  * - indexes:      indexed projects
@@ -201,13 +222,79 @@ function round(x: number | null | undefined, digits: number): number {
  */
 export class Registry {
   private db: Database;
+  private readonly dbPath: string;
 
-  constructor(dbPath: string = CONFIG.META_DB_PATH) {
+  constructor(dbPath: string = CONFIG.META_DB_PATH, opts: RegistryOptions = {}) {
     mkdirSync(CONFIG.ROOT_DIR, { recursive: true });
+    this.dbPath = dbPath;
     this.db = new Database(dbPath, { create: true });
+    // Concurrent readers/writers (CLI preflight, watcher, jobs) share this
+    // file; without a busy timeout a momentary writer collision surfaced as
+    // `SQLiteError: database is locked (SQLITE_BUSY)` and failed a file.
+    this.db.run("PRAGMA busy_timeout = 5000;");
     this.db.run("PRAGMA journal_mode = WAL;");
     this.db.run("PRAGMA foreign_keys = ON;");
     this.migrate();
+    this.maybeVacuum(opts);
+  }
+
+  /** Page/free-page statistics of meta.db (read-only; used by the doctor and boot VACUUM). */
+  metaStats(): MetaDbStats {
+    const pageCount = Number((this.db.query("PRAGMA page_count").get() as { page_count: number }).page_count);
+    const freelistCount = Number(
+      (this.db.query("PRAGMA freelist_count").get() as { freelist_count: number }).freelist_count,
+    );
+    const pageSize = Number((this.db.query("PRAGMA page_size").get() as { page_size: number }).page_size);
+    let fileBytes = 0;
+    try {
+      fileBytes = statSync(this.dbPath).size;
+    } catch {
+      // The file may not exist yet on a fresh open.
+    }
+    return {
+      pageCount,
+      freelistCount,
+      pageSize,
+      freeRatio: pageCount > 0 ? freelistCount / pageCount : 0,
+      fileBytes,
+    };
+  }
+
+  /**
+   * Boot-time VACUUM when free pages dominate meta.db. Runs before the daemon
+   * opens its servers and before jobs/watchers exist, so there is no
+   * concurrent writer. Never fails boot; skips tiny DBs, low free-page ratios,
+   * and filesystems without enough headroom for the rewrite.
+   */
+  private maybeVacuum(opts: RegistryOptions): void {
+    if (opts.vacuum === false) return;
+    const ratio = opts.vacuumFreeRatio ?? CONFIG.META_VACUUM_FREE_RATIO;
+    const minBytes = opts.vacuumMinBytes ?? CONFIG.META_VACUUM_MIN_BYTES;
+    if (!(ratio > 0)) return;
+    try {
+      const before = this.metaStats();
+      if (before.fileBytes < minBytes) return;
+      if (before.freeRatio < ratio) return;
+      // VACUUM rewrites the whole file; require ~25% headroom over its size.
+      let avail = 0;
+      try {
+        const fsStat = statfsSync(this.dbPath);
+        avail = fsStat.bavail * fsStat.bsize;
+      } catch {
+        return; // unknown headroom: never risk a half-written VACUUM
+      }
+      if (avail < before.fileBytes * 1.25) return;
+      this.db.run("PRAGMA wal_checkpoint(TRUNCATE)");
+      this.db.run("VACUUM");
+      this.db.run("PRAGMA wal_checkpoint(TRUNCATE)");
+      const after = this.metaStats();
+      console.error(
+        `[registry] meta.db VACUUM: ${before.fileBytes} → ${after.fileBytes} bytes` +
+          ` (free pages ${before.freelistCount} → ${after.freelistCount})`,
+      );
+    } catch (err) {
+      console.error("[registry] meta.db VACUUM skipped:", err);
+    }
   }
 
   private migrate(): void {
@@ -945,6 +1032,11 @@ export class Registry {
   }
 
   close(): void {
+    try {
+      this.db.run("PRAGMA wal_checkpoint(TRUNCATE)");
+    } catch {
+      // Best-effort: a failed checkpoint must not hide a close error.
+    }
     this.db.close();
   }
 }

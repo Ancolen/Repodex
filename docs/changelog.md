@@ -6,6 +6,26 @@ Version-by-version implementation history, **newest first**. For the current don
 
 ---
 
+## Unreleased (2.10.0)
+
+### Fixed — meta.db free pages are reclaimed at boot
+
+- **Boot VACUUM + busy timeout** (`src/core/registry.ts`, `src/config.ts`).
+  SQLite never returns free pages to the OS without `VACUUM`; a long-lived
+  registry accumulated them from job/file-cache churn (measured install:
+  `meta.db` 957.5 MB with ~741 MB free). `Registry` now opens with
+  `PRAGMA busy_timeout = 5000` (the `SQLITE_BUSY` class that used to fail a
+  file under concurrent writers) and runs ONE `VACUUM` at construction when
+  free pages exceed `maintenance.vacuumFreeRatio` (default 0.30) AND the file
+  is at least `maintenance.vacuumMinBytes` (default 50 MB), with a free-disk
+  headroom check. It runs before the daemon opens servers/jobs/watchers, so
+  no concurrent writer exists; every failure is logged and never blocks boot.
+  `close()` checkpoints the WAL (`TRUNCATE`).
+- Tests: `tests/registry.test.ts` (free-page reclaim, opt-out, tiny-DB floor),
+  `tests/config.test.ts` (defaults + `META_VACUUM_*` overrides).
+
+---
+
 ## 2.9.5 (2026-11-03)
 
 ### Performance — a full index no longer pays one LanceDB commit per file

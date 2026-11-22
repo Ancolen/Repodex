@@ -66,6 +66,18 @@ describe("config — defaults and environment variable overrides", () => {
     expect(CONFIG.VECTOR_INDEX_THRESHOLD).toBe(99999);
   });
 
+  test("boot VACUUM thresholds default and honour META_VACUUM_* overrides", async () => {
+    const def = await runConfig({});
+    expect(def.CONFIG.META_VACUUM_FREE_RATIO).toBe(0.3);
+    expect(def.CONFIG.META_VACUUM_MIN_BYTES).toBe(50 * 1024 * 1024);
+    const ovr = await runConfig({ META_VACUUM_FREE_RATIO: "0.1", META_VACUUM_MIN_BYTES: "1048576" });
+    expect(ovr.CONFIG.META_VACUUM_FREE_RATIO).toBe(0.1);
+    expect(ovr.CONFIG.META_VACUUM_MIN_BYTES).toBe(1048576);
+    const off = await runConfig({ META_VACUUM_FREE_RATIO: "-1", META_VACUUM_MIN_BYTES: "-5" });
+    expect(off.CONFIG.META_VACUUM_FREE_RATIO).toBe(0);
+    expect(off.CONFIG.META_VACUUM_MIN_BYTES).toBe(0);
+  });
+
   test("OLLAMA_NUM_CTX / RERANK_NUM_CTX environment variables override defaults", async () => {
     const { CONFIG } = await runConfig({ OLLAMA_NUM_CTX: "2048", RERANK_NUM_CTX: "512" });
     expect(CONFIG.OLLAMA_NUM_CTX).toBe(2048);
@@ -88,6 +100,8 @@ describe("config — defaults and environment variable overrides", () => {
     // The backend-readiness wait ships in the template too (an existing
     // install pins whatever the template says).
     expect(DEFAULT_CONFIG_YAML).toContain("readyTimeoutMs: 20000");
+    expect(DEFAULT_CONFIG_YAML).toContain("vacuumFreeRatio: 0.3");
+    expect(DEFAULT_CONFIG_YAML).toContain("vacuumMinBytes: 52428800");
   });
 
   test("CIDX_HOME expands '~' and derived paths are located under home", async () => {

@@ -488,3 +488,89 @@ describe("index note — zero-file explanation (lazy migration)", () => {
     }
   });
 });
+
+describe("Registry boot VACUUM", () => {
+  function cleanup(dbPath: string): void {
+    for (const p of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+      try {
+        rmSync(p, { force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  /** Grow meta.db with a bulk table, then empty it so most pages become free. */
+  function growThenDelete(dbPath: string): void {
+    const raw = new Database(dbPath, { create: true });
+    raw.run("PRAGMA journal_mode = WAL;");
+    raw.run("CREATE TABLE IF NOT EXISTS bulk (a TEXT);");
+    const ins = raw.query("INSERT INTO bulk VALUES (?)");
+    for (let i = 0; i < 2000; i++) ins.run("x".repeat(400));
+    raw.run("DELETE FROM bulk");
+    raw.close();
+  }
+
+  test("metaStats reports pages, free pages and the file size", () => {
+    const dbPath = tempDbPath();
+    growThenDelete(dbPath);
+    const reg = new Registry(dbPath, { vacuum: false });
+    try {
+      const s = reg.metaStats();
+      expect(s.pageCount).toBeGreaterThan(0);
+      expect(s.pageSize).toBeGreaterThan(0);
+      expect(s.freelistCount).toBeGreaterThan(0);
+      expect(s.freeRatio).toBeGreaterThan(0);
+      expect(s.freeRatio).toBeLessThanOrEqual(1);
+      expect(s.fileBytes).toBeGreaterThan(0);
+    } finally {
+      reg.close();
+      cleanup(dbPath);
+    }
+  });
+
+  test("boot VACUUM reclaims free pages above the ratio", () => {
+    const dbPath = tempDbPath();
+    growThenDelete(dbPath);
+    const probe = new Registry(dbPath, { vacuum: false });
+    const before = probe.metaStats();
+    probe.close();
+    expect(before.freelistCount).toBeGreaterThan(0);
+
+    const reg = new Registry(dbPath, { vacuumFreeRatio: 0.1, vacuumMinBytes: 0 });
+    try {
+      const after = reg.metaStats();
+      expect(after.freelistCount).toBe(0);
+      expect(after.fileBytes).toBeLessThan(before.fileBytes);
+    } finally {
+      reg.close();
+      cleanup(dbPath);
+    }
+  });
+
+  test("vacuum:false leaves the free pages in place", () => {
+    const dbPath = tempDbPath();
+    growThenDelete(dbPath);
+    const reg = new Registry(dbPath, { vacuum: false });
+    try {
+      expect(reg.metaStats().freelistCount).toBeGreaterThan(0);
+    } finally {
+      reg.close();
+      cleanup(dbPath);
+    }
+  });
+
+  test("the default 50 MB floor skips a tiny test database", () => {
+    const dbPath = tempDbPath();
+    growThenDelete(dbPath);
+    // No explicit thresholds: CONFIG's vacuumMinBytes (50 MB) applies. The test
+    // DB is far smaller, so nothing is rewritten.
+    const reg = new Registry(dbPath, { vacuum: true });
+    try {
+      expect(reg.metaStats().freelistCount).toBeGreaterThan(0);
+    } finally {
+      reg.close();
+      cleanup(dbPath);
+    }
+  });
+});

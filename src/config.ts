@@ -252,6 +252,19 @@ export interface IndexerConfig {
      */
     watchdogMinutes: number;
   };
+  maintenance: {
+    /**
+     * Boot-time `VACUUM` of `meta.db` when free pages dominate the file. A
+     * long-lived registry accumulates free pages from job/file-cache churn (a
+     * measured install sat at 957 MB with ~741 MB free), and SQLite never
+     * returns them to the OS without VACUUM. The daemon runs it once at boot,
+     * before servers/jobs/watchers, only above `vacuumMinBytes` and
+     * `vacuumFreeRatio`, and only when the filesystem has headroom.
+     */
+    vacuumFreeRatio: number;
+    /** Minimum meta.db size before boot VACUUM is considered (bytes). */
+    vacuumMinBytes: number;
+  };
 }
 
 const DEFAULTS: IndexerConfig = {
@@ -332,6 +345,7 @@ const DEFAULTS: IndexerConfig = {
   },
   doccheck: { maxChars: 12000, undocumentedLimit: 25, judgeModel: "", judgeUrl: "", watch: false },
   daemon: { idleTimeoutMinutes: 0, watchdogMinutes: 5 },
+  maintenance: { vacuumFreeRatio: 0.3, vacuumMinBytes: 50 * 1024 * 1024 },
 };
 
 /** Editable default YAML template (written if the file does not exist). */
@@ -419,6 +433,10 @@ watcher:
 daemon:
   idleTimeoutMinutes: ${DEFAULTS.daemon.idleTimeoutMinutes}        # exit the daemon after N minutes without activity (requests, index jobs, open MCP sessions); 0 = off. Every cidx command / MCP entry point restarts it on demand.
   watchdogMinutes: ${DEFAULTS.daemon.watchdogMinutes}           # if the event loop stops beating for this many minutes, an in-process watchdog thread exits the process so the supervisor restarts it; 0 = off. The shipped systemd unit ALSO sets WatchdogSec=300 (external, survives a runtime-wide deadlock) — keep the two aligned
+
+maintenance:
+  vacuumFreeRatio: ${DEFAULTS.maintenance.vacuumFreeRatio}          # boot VACUUM of meta.db when this share of its pages is free (0 = off)
+  vacuumMinBytes: ${DEFAULTS.maintenance.vacuumMinBytes}       # only consider boot VACUUM for a meta.db at least this large (bytes)
 `;
 
 // ---- helpers ----
@@ -695,6 +713,21 @@ export const RESOLVED: IndexerConfig = {
       y.daemon?.watchdogMinutes ??
       DEFAULTS.daemon.watchdogMinutes,
   },
+  maintenance: {
+    // 0 (or negative/NaN) disables the boot VACUUM; > 1 can never trigger.
+    vacuumFreeRatio: Math.max(
+      0,
+      num(process.env.META_VACUUM_FREE_RATIO) ??
+        y.maintenance?.vacuumFreeRatio ??
+        DEFAULTS.maintenance.vacuumFreeRatio,
+    ),
+    vacuumMinBytes: Math.max(
+      0,
+      num(process.env.META_VACUUM_MIN_BYTES) ??
+        y.maintenance?.vacuumMinBytes ??
+        DEFAULTS.maintenance.vacuumMinBytes,
+    ),
+  },
 };
 
 /**
@@ -772,6 +805,9 @@ export const CONFIG = {
 
   IDLE_TIMEOUT_MINUTES: RESOLVED.daemon.idleTimeoutMinutes,
   WATCHDOG_MINUTES: RESOLVED.daemon.watchdogMinutes,
+
+  META_VACUUM_FREE_RATIO: RESOLVED.maintenance.vacuumFreeRatio,
+  META_VACUUM_MIN_BYTES: RESOLVED.maintenance.vacuumMinBytes,
 } as const;
 
 export type Config = typeof CONFIG;
