@@ -45,6 +45,18 @@ Version-by-version implementation history, **newest first**. For the current don
   duplicates, `indexing` suppression, indices without stats), `tests/stats.test.ts`
   (note wording, duplicate note, threshold override).
 
+### Fixed — CLI help works for `--help`, `-h` and every alias
+
+- **Help dispatch** (`src/cli.ts`). `cidx --help` / `cidx -h` fell through to
+  "Unknown command" with exit 1, and `cidx hotspot --help` was unknown because
+  `printCommandHelp` carried a second, hardcoded alias list that had drifted
+  from the dispatch switch. `parseArgs` now understands `-h` / `-v` / `-x value`;
+  the top-level flags render the general help; per-command help resolves through
+  `ALIAS_TO_COMMAND`, built from each `COMMANDS` entry's declared aliases
+  (`hotspot` and `dead-code` are now declared).
+- Tests: `tests/cli-help.test.ts` (`--help`, `-h`, `hotspot --help`,
+  `help hotspot`, `ls --help`, `search -h`).
+
 ### Fixed — `check_docs` enforces ONE shared `maxChars` budget
 
 - **Shared report budget** (`src/core/doccheck.ts`, `src/server/tool-defs.ts`).

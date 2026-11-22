@@ -158,7 +158,7 @@ PURGE_DATA=1 ./uninstall.sh   # also deletes the ~/.cidx data
 
 ## Usage
 
-> You can always reach the full list and details of all commands with `cidx help` (or `repodex help`). For the details of a command: `cidx help <command>` or `cidx <command> --help`.
+> You can always reach the full list and details of all commands with `cidx help`, `cidx --help` / `cidx -h` (or `repodex help`). For the details of a command: `cidx help <command>` or `cidx <command> --help` / `-h`. Aliases work in help too (`cidx hotspot --help`, `cidx ls --help`).
 
 ### Commands (summary)
 

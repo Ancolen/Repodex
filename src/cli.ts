@@ -29,6 +29,20 @@ function parseArgs(argv: string[]): { positionals: string[]; flags: Record<strin
       } else {
         flags[key] = true;
       }
+    } else if (a === "-h") {
+      flags.help = true;
+    } else if (a === "-v") {
+      flags.version = true;
+    } else if (a.startsWith("-") && a.length > 1) {
+      // Single-dash flags (`-x`, `-x value`) — same shape as the long form.
+      const key = a.slice(1);
+      const next = argv[i + 1];
+      if (next !== undefined && !next.startsWith("-")) {
+        flags[key] = next;
+        i++;
+      } else {
+        flags[key] = true;
+      }
     } else {
       positionals.push(a);
     }
@@ -1384,6 +1398,7 @@ const COMMANDS: Record<string, CmdDoc> = {
   hotspots: {
     usage: "hotspots [project|dir] [flags]",
     summary: "Hotspot report: churn x size (a proxy), banded critical/warm/review with debt signals.",
+    aliases: ["hotspot"],
     flags: [
       ["--path <dir>", "Alternative to the positional: a dir/file inside the project."],
       ["--since <date>", "Churn window, git date syntax (default: '90 days ago')."],
@@ -1456,6 +1471,7 @@ const COMMANDS: Record<string, CmdDoc> = {
   deadcode: {
     usage: "deadcode [project|dir] [flags]",
     summary: "Potential dead code: zero-reference symbols, scored conservatively (candidates to verify).",
+    aliases: ["dead-code"],
     flags: [
       ["--language <lang>", "Only this language."],
       ["--type <type>", "Only this symbol type (function, method, class, ...)."],
@@ -1560,6 +1576,19 @@ const COMMANDS: Record<string, CmdDoc> = {
   },
 };
 
+/**
+ * Alias → canonical command, built from each entry's `aliases` (never a second
+ * hardcoded list — the two drifted apart: `hotspot --help` said "Unknown
+ * command"). Every alias the dispatch switch accepts must be declared here.
+ */
+const ALIAS_TO_COMMAND: Record<string, string> = (() => {
+  const map: Record<string, string> = {};
+  for (const [name, doc] of Object.entries(COMMANDS)) {
+    for (const alias of doc.aliases ?? []) map[alias] = name;
+  }
+  return map;
+})();
+
 const HELP_ORDER = [
   "start", "index", "list", "status", "reindex", "sync", "remove",
   "search", "open", "batch", "pack", "find", "refs", "overview", "deps", "deadcode", "callgraph", "commits", "apidiff", "impact", "coupling", "hotspots", "doccheck", "doctor", "stats", "compact", "config", "mcp", "stop", "version", "help",
@@ -1567,20 +1596,8 @@ const HELP_ORDER = [
 
 /** Detailed help for a single command. */
 function printCommandHelp(name: string): void {
-  const key =
-    name === "ls" ? "list"
-    : name === "rm" ? "remove"
-    : name === "stdio" ? "mcp"
-    : name === "references" ? "refs"
-    : name === "dependencies" ? "deps"
-    : name === "dead-code" ? "deadcode"
-    : name === "call-graph" ? "callgraph"
-    : name === "change-impact" ? "impact"
-    : name === "git-log" || name === "gitlog" ? "commits"
-    : name === "api-diff" ? "apidiff"
-    : name === "check-docs" || name === "checkdocs" ? "doccheck"
-    : name === "analytics" ? "stats"
-    : name;
+  // A canonical command resolves to itself; any declared alias maps through.
+  const key = COMMANDS[name] ? name : (ALIAS_TO_COMMAND[name] ?? name);
   const doc = COMMANDS[key];
   if (!doc) {
     console.error(`Unknown command: ${name}\n`);
@@ -1859,13 +1876,19 @@ async function main(): Promise<void> {
   const [, , command, ...rest] = process.argv;
   const { positionals, flags } = parseArgs(rest);
 
-  // Global flags: --help/-h on any command shows that command's details.
-  if ((flags.help || flags.h) && command && command !== "help") {
-    printCommandHelp(command);
+  // `cidx --help` / `cidx -h` / bare `cidx` → the general help, exit 0.
+  if (command === undefined || command === "--help" || command === "-h") {
+    printHelp();
     return;
   }
   if (command === "--version" || command === "-v") {
     await cmdVersion();
+    return;
+  }
+  // `--help` / `-h` on any command shows that command's details.
+  if (flags.help === true || flags.h === true) {
+    if (command === "help") printHelp();
+    else printCommandHelp(command);
     return;
   }
 

@@ -30,6 +30,32 @@ async function runCli(args: string[]): Promise<string> {
   return out + err;
 }
 
+describe("CLI help — top-level flags and aliases (2.10.0)", () => {
+  test("`cidx --help` and `cidx -h` render the general help (exit 0)", async () => {
+    for (const flag of ["--help", "-h"]) {
+      const out = await runCli([flag]);
+      expect(out).toContain("USAGE");
+      expect(out).toContain("COMMANDS");
+      expect(out).toContain("cidx <command> [arguments]");
+    }
+  });
+
+  test("aliases resolve in the per-command help, including `hotspot` and `ls`", async () => {
+    const hotspot = await runCli(["hotspot", "--help"]);
+    expect(hotspot).toContain("Hotspot report");
+    const viaHelp = await runCli(["help", "hotspot"]);
+    expect(viaHelp).toContain("Hotspot report");
+    const ls = await runCli(["ls", "--help"]);
+    expect(ls).toContain("Lists all projects");
+  });
+
+  test("single-dash `-h` on a command shows that command's help", async () => {
+    const out = await runCli(["search", "-h"]);
+    expect(out).toContain("Hybrid search");
+    expect(out).toContain("--mode");
+  });
+});
+
 describe("CLI help — the reindex embedding-cache wording", () => {
   test("`cidx reindex --help` says the embedding cache is kept and the file cache is cleared", async () => {
     const out = await runCli(["reindex", "--help"]);
