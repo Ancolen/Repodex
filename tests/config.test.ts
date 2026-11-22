@@ -87,6 +87,17 @@ describe("config — defaults and environment variable overrides", () => {
     expect(clamped.CONFIG.AUTO_MAINTENANCE_MIN_SMALL_FRAGMENTS).toBe(0);
   });
 
+  test("shrink-warning thresholds default and honour INDEX_SHRINK_* overrides", async () => {
+    const def = await runConfig({});
+    expect(def.CONFIG.INDEX_SHRINK_WARN_RATIO).toBe(0.5);
+    expect(def.CONFIG.INDEX_SHRINK_WARN_MIN_FILES).toBe(10);
+    const ovr = await runConfig({ INDEX_SHRINK_WARN_RATIO: "0.25", INDEX_SHRINK_WARN_MIN_FILES: "3" });
+    expect(ovr.CONFIG.INDEX_SHRINK_WARN_RATIO).toBe(0.25);
+    expect(ovr.CONFIG.INDEX_SHRINK_WARN_MIN_FILES).toBe(3);
+    expect(DEFAULT_CONFIG_YAML).toContain("shrinkWarnRatio: 0.5");
+    expect(DEFAULT_CONFIG_YAML).toContain("shrinkWarnMinFiles: 10");
+  });
+
   test("boot VACUUM thresholds default and honour META_VACUUM_* overrides", async () => {
     const def = await runConfig({});
     expect(def.CONFIG.META_VACUUM_FREE_RATIO).toBe(0.3);

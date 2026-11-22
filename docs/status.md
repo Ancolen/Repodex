@@ -34,6 +34,7 @@
 - ✅ **Nested-root exclusion** (2.10.0) — an umbrella index skips every registered project root nested inside it (`collectFiles` subtree skip, watcher predicate + late-event drop); the next sync prunes stale duplicate rows/cache entries as `nestedRemoved` (not a deletion). Tests: `tests/pathtools.test.ts`, `tests/indexer.test.ts`, `tests/watcher-ignore.test.ts`, `tests/nested-index.test.ts`.
 - ✅ **One `check_docs` budget** (2.10.0) — `maxChars` is a single budget across findings, needsReview and undocumented (findings first; undocumented dropped whole when it does not fit); one omission note; `verdict.undocumented` is the kept count. Tests: `tests/doccheck.test.ts`, `tests/budget.test.ts`.
 - ✅ **CLI help flags/aliases** (2.10.0) — `cidx --help` / `-h` render the general help (exit 0); `-h` / `--help` on a command show its details; aliases resolve through one map built from the declared aliases (`hotspot`, `ls`, …). Tests: `tests/cli-help.test.ts`.
+- ✅ **Unexpected-shrink note** (2.10.0) — a sync losing more than `indexing.shrinkWarnRatio` (50%) of a project's files (with ≥ `shrinkWarnMinFiles`, default 10, before the run) writes a registry note with a move hint; nested-root pruning is subtracted and a clean run clears the note. Tests: `tests/shrink-note.test.ts`, `tests/config.test.ts`.
 - ✅ Filters: `language` / `symbolType` / `pathGlob` (project-relative globs match anywhere in the absolute stored path).
 - ✅ `search_codebase_batch` — several queries in one round-trip, results grouped per query.
 - ✅ `find_symbol` (exact + prefix, model-independent).

@@ -45,6 +45,23 @@ Version-by-version implementation history, **newest first**. For the current don
   duplicates, `indexing` suppression, indices without stats), `tests/stats.test.ts`
   (note wording, duplicate note, threshold override).
 
+### Added — a shrinking project says so
+
+- **Unexpected-shrink note** (`src/utils/shrink.ts`, `src/core/index-manager.ts`,
+  `src/config.ts`). A moved/unmounted/emptied project directory made the next
+  sync prune almost every file and still report `ready`; the counters collapsed
+  silently. `runIndexJob` now compares the pre-job registry count with the true
+  post-job count (via the pure `detectShrink`) and writes a registry note when
+  the project lost more than `indexing.shrinkWarnRatio` (default 50%) of its
+  files with at least `indexing.shrinkWarnMinFiles` (default 10) before the run:
+  *"file count dropped 20 → 5 (75% fewer) — the directory may have moved…"*.
+  Nested-root removals are subtracted (`nestedRemoved`) so an umbrella's first
+  sync never looks like data loss; the note clears on the next clean run, and
+  the zero-file explanation now carries the same move hint.
+  Env: `INDEX_SHRINK_WARN_RATIO`, `INDEX_SHRINK_WARN_MIN_FILES` (0 = off).
+- Tests: `tests/shrink-note.test.ts` (pure thresholds + real jobs: note, clear,
+  nested-only), `tests/config.test.ts`.
+
 ### Fixed — CLI help works for `--help`, `-h` and every alias
 
 - **Help dispatch** (`src/cli.ts`). `cidx --help` / `cidx -h` fell through to

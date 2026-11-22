@@ -132,6 +132,18 @@ export interface IndexerConfig {
      * the old per-file behavior.
      */
     writeBatchFiles: number;
+    /**
+     * A sync that leaves a project with fewer than `(1 - shrinkWarnRatio)` of
+     * its previous files writes a registry note (a moved/unmounted/emptied
+     * directory used to shrink silently and still report `ready`). <= 0
+     * disables the warning.
+     */
+    shrinkWarnRatio: number;
+    /**
+     * Minimum previous file count before the shrink note can fire (small
+     * projects legitimately churn). <= 0 disables the warning.
+     */
+    shrinkWarnMinFiles: number;
   };
   watcher: {
     /** Reindex delay after a file change. */
@@ -356,6 +368,8 @@ const DEFAULTS: IndexerConfig = {
     jobConcurrency: 2,
     fileConcurrency: 4,
     writeBatchFiles: 64,
+    shrinkWarnRatio: 0.5,
+    shrinkWarnMinFiles: 10,
   },
   watcher: { debounceMs: 300, polling: false, pollIntervalMs: 1000 },
   search: {
@@ -426,6 +440,8 @@ ${DEFAULTS.indexing.ignoredDirs.map((d) => `    - "${d}"`).join("\n")}
   jobConcurrency: ${DEFAULTS.indexing.jobConcurrency}              # number of indexing jobs running at the same time (worker pool)
   fileConcurrency: ${DEFAULTS.indexing.fileConcurrency}              # files a full index prepares concurrently (overlaps chunking with embedding I/O); total embed requests still capped by ollama.concurrency
   writeBatchFiles: ${DEFAULTS.indexing.writeBatchFiles}              # files committed per LanceDB write batch during a full index; 1 = one commit per file (the old, quadratic-version behavior)
+  shrinkWarnRatio: ${DEFAULTS.indexing.shrinkWarnRatio}             # a sync losing more than this share of a project's files writes a note (a moved/unmounted directory used to shrink silently); 0 = off
+  shrinkWarnMinFiles: ${DEFAULTS.indexing.shrinkWarnMinFiles}            # minimum previous file count for the shrink note; 0 = off
 
 search:
   queryLogSize: ${DEFAULTS.search.queryLogSize}          # max rows kept in the local query log (search analytics via 'cidx stats'); 0 = off
@@ -656,6 +672,14 @@ export const RESOLVED: IndexerConfig = {
         y.indexing?.writeBatchFiles ??
         DEFAULTS.indexing.writeBatchFiles,
     ),
+    shrinkWarnRatio:
+      num(process.env.INDEX_SHRINK_WARN_RATIO) ??
+      y.indexing?.shrinkWarnRatio ??
+      DEFAULTS.indexing.shrinkWarnRatio,
+    shrinkWarnMinFiles:
+      num(process.env.INDEX_SHRINK_WARN_MIN_FILES) ??
+      y.indexing?.shrinkWarnMinFiles ??
+      DEFAULTS.indexing.shrinkWarnMinFiles,
   },
   watcher: {
     debounceMs: y.watcher?.debounceMs ?? DEFAULTS.watcher.debounceMs,
@@ -826,6 +850,8 @@ export const CONFIG = {
   JOB_CONCURRENCY: RESOLVED.indexing.jobConcurrency,
   INDEX_FILE_CONCURRENCY: RESOLVED.indexing.fileConcurrency,
   INDEX_WRITE_BATCH_FILES: RESOLVED.indexing.writeBatchFiles,
+  INDEX_SHRINK_WARN_RATIO: RESOLVED.indexing.shrinkWarnRatio,
+  INDEX_SHRINK_WARN_MIN_FILES: RESOLVED.indexing.shrinkWarnMinFiles,
 
   WATCH_DEBOUNCE_MS: RESOLVED.watcher.debounceMs,
   WATCH_POLLING: RESOLVED.watcher.polling,

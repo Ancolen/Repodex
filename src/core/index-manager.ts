@@ -25,6 +25,7 @@ import {
   type DocCheckJobPayload,
 } from "./types";
 import { nestedRegisteredRoots, pathOverlapNote } from "../utils/pathtools";
+import { detectShrink } from "../utils/shrink";
 // Per-model embedding task framing: the pure resolution + the prefix helpers.
 import { resolveFraming, frameQuery } from "./framing";
 import {
@@ -3855,6 +3856,9 @@ export class IndexManager {
     ctx: { signal: AbortSignal; isCancelled: () => boolean; updateProgress: (p: number, t?: number, m?: string) => void },
   ): Promise<IndexResult> {
     const t = payload.target;
+    // The pre-job count the shrink check compares against (a moved/unmounted
+    // directory used to prune almost everything and still report `ready`).
+    const beforeFiles = this.registry.getIndex(t.indexName)?.fileCount ?? 0;
     if (payload.fresh) {
       await dropTable(t.tableName);
       this.registry.clearFileCache(t.indexName);
@@ -3910,7 +3914,28 @@ export class IndexManager {
         // never outlives the condition.
         const noteParts: string[] = [];
         if (fileCount === 0) {
-          noteParts.push(`collected 0 files — ${describeFilterStats(result.filterStats)}`);
+          noteParts.push(
+            `collected 0 files — ${describeFilterStats(result.filterStats)} ` +
+              "(if the project was moved, index it at the new path and remove this record)",
+          );
+        } else {
+          // A big unexpected drop is a moved/unmounted/emptied directory, not a
+          // clean sync. Nested removals are subtracted so an umbrella's first
+          // sync does not look like data loss.
+          const shrink = detectShrink({
+            beforeFiles,
+            afterFiles: fileCount,
+            nestedRemoved: result.nestedRemoved,
+            ratio: CONFIG.INDEX_SHRINK_WARN_RATIO,
+            minFiles: CONFIG.INDEX_SHRINK_WARN_MIN_FILES,
+          });
+          if (shrink.shrunk) {
+            noteParts.push(
+              `file count dropped ${shrink.adjustedBefore} → ${fileCount} ` +
+                `(${Math.round(shrink.ratio * 100)}% fewer) — the directory may have moved or been emptied; ` +
+                `if it moved, index the new path (cidx index <new path> --name ${t.indexName}) and remove this record`,
+            );
+          }
         }
         if (result.failed > 0) {
           noteParts.push(`${result.failed} file(s) failed to index — see the daemon log (embedding provider?)`);
@@ -3924,6 +3949,7 @@ export class IndexManager {
           `[index] '${t.indexName}' ready: ${fileCount} files, ${chunkCount} chunks in table` +
             ` (this run: ${result.files} processed, ${result.chunks} chunks written` +
             (result.deleted > 0 ? `, ${result.deleted} deleted cleaned up` : "") +
+            (result.nestedRemoved > 0 ? `, ${result.nestedRemoved} nested-root file(s) pruned` : "") +
             (result.skippedOversized > 0 ? `, ${result.skippedOversized} oversized skipped` : "") +
             (result.failed > 0 ? `, ${result.failed} failed` : "") +
             `) → ${t.tableName}` +
