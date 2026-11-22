@@ -213,6 +213,8 @@ describe("doccheck job type + watch mode (D1c)", () => {
     expect(found!.ts).toBe(registry.getDocCheckReport("d1cw")!.ts);
     expect(found!.consistent).toBe(true);
     expect(found!.report.project).toBe("d1cw");
+    // A single indexed project answers the anchorless form too (2.10.0).
+    expect((await manager.lastDocCheckReport({}))?.project).toBe("d1cw");
 
     // Unknown project → the self-healing error naming the projects.
     await expect(manager.lastDocCheckReport({ project: "ghost" })).rejects.toThrow("Index not found");

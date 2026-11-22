@@ -4032,6 +4032,16 @@ export class IndexManager {
   }
 
   /**
+   * Public form of the doccheck anchor rule (same resolution `checkDocs` and
+   * `lastDocCheckReport` use): the stored-snapshot HTTP route needs the
+   * resolved name for its "no report yet" message when the caller passed
+   * neither `project` nor `path` (single indexed project).
+   */
+  resolveDocCheckProject(project?: string, path?: string): IndexRecord {
+    return this.resolveDocCheckTarget(project, path);
+  }
+
+  /**
    * Doc–code conformance check (proposal D1): assemble the pure engine's
    * state (docs from disk, code chunks from the cached snapshot, the path
    * universe from the indexed file set + root listing + manifest) and run it.

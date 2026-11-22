@@ -686,12 +686,6 @@ export function buildServer(deps: McpDeps): Server {
         judge?: boolean;
         last?: boolean;
       };
-      if (!args.project && !args.path) {
-        return {
-          content: [{ type: "text", text: "Provide a 'project' name and/or a 'path' (at least one is required)." }],
-          isError: true,
-        };
-      }
       const opts: {
         project?: string;
         path?: string;

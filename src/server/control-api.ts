@@ -689,10 +689,6 @@ export function startControlApi(
       window?: boolean;
       judge?: boolean;
     };
-    if (!project && !filePath) {
-      res.status(400).json({ error: "Provide a 'project' name and/or a 'path' (at least one is required)." });
-      return;
-    }
     const opts: {
       project?: string;
       path?: string;
@@ -731,26 +727,26 @@ export function startControlApi(
    * doccheck --last`): the snapshot the `doccheck` job last wrote after a
    * successful index/sync/migrate run. A SNAPSHOT — its `ts` says when it was
    * stored, and the caller must surface that; this route never runs a fresh
-   * check (that is POST /doccheck). Query params: `project` or `path` (at
-   * least one — the same anchor rule as POST /doccheck). Unknown project →
+   * check (that is POST /doccheck). Query params: `project` or `path`; neither
+   * → the single indexed project (the same anchor rule as POST /doccheck; 0
+   * or 2+ projects is the self-healing pick-one error). Unknown project →
    * self-healing 404; a known project without a stored report → 404 with the
    * "enable doccheck.watch / run doccheck first" hint.
    */
   app.get("/doccheck/last", async (req, res) => {
     const project = typeof req.query.project === "string" ? req.query.project : undefined;
     const filePath = typeof req.query.path === "string" ? req.query.path : undefined;
-    if (!project && !filePath) {
-      res.status(400).json({ error: "Provide a 'project' name and/or a 'path' (at least one is required)." });
-      return;
-    }
     const opts: { project?: string; path?: string } = {};
     if (project) opts.project = project;
     if (filePath) opts.path = filePath;
     try {
-      const found = await deps.manager.lastDocCheckReport(opts);
+      // Resolve first so the "nothing stored yet" message always names the
+      // project the anchor rule picked (the anchorless single-project case).
+      const rec = deps.manager.resolveDocCheckProject(opts.project, opts.path);
+      const found = await deps.manager.lastDocCheckReport({ project: rec.name });
       if (!found) {
         res.status(404).json({
-          error: `No stored doccheck report for '${opts.project ?? opts.path}' — enable doccheck.watch or run a doccheck job first (fresh check: POST /doccheck).`,
+          error: `No stored doccheck report for '${rec.name}' — enable doccheck.watch or run a doccheck job first (fresh check: POST /doccheck).`,
         });
         return;
       }

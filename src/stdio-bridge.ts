@@ -578,17 +578,18 @@ async function main(): Promise<void> {
           if (args.last === true) {
             const project = typeof args.project === "string" ? args.project : undefined;
             const filePath = typeof args.path === "string" ? args.path : undefined;
+            // No anchor → the server's single-project rule resolves it (0 or
+            // 2+ projects is the self-healing pick-one error).
             const q = project
               ? `project=${encodeURIComponent(project)}`
               : filePath
                 ? `path=${encodeURIComponent(filePath)}`
                 : "";
-            if (!q) return fail("Provide a 'project' name and/or a 'path' (at least one is required).");
             const found = await api<{
               project: string;
               ts: number;
               report: Parameters<typeof formatDocCheck>[0];
-            }>("GET", `/doccheck/last?${q}`);
+            }>("GET", q ? `/doccheck/last?${q}` : "/doccheck/last");
             return ok(formatDocCheckStored(found.project, found.ts, found.report));
           }
           const report = await api<Parameters<typeof formatDocCheck>[0]>("POST", "/doccheck", {

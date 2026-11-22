@@ -614,6 +614,23 @@ export function watcherFreshProbe(): string {
     expect(second.findings.some((f) => f.message.includes("watcherFreshProbe"))).toBe(false);
   }, 45_000);
 
+  test("doccheck resolves the single indexed project without an anchor", async () => {
+    if (!daemon) throw new Error("daemon not started");
+    // POST /doccheck with no project/path → the only indexed project.
+    const fresh = await callApi<DocCheckReport>(daemon.controlUrl, "/doccheck", {
+      method: "POST",
+      body: { noUndocumented: true },
+    });
+    expect(fresh.project).toBe(PROJECT_NAME);
+
+    // GET /doccheck/last with no anchor: watch mode is off, so this is the
+    // "nothing stored yet" 404 — and it must name the resolved project.
+    const resp = await fetch(`${daemon.controlUrl}/doccheck/last`);
+    expect(resp.status).toBe(404);
+    const body = (await resp.json()) as { error: string };
+    expect(body.error).toContain(`'${PROJECT_NAME}'`);
+  }, 45_000);
+
   test("a sync prunes a deleted file (deleted-file cleanup)", async () => {
     if (!daemon) throw new Error("daemon not started");
     rmSync(abs("src/util.ts"));

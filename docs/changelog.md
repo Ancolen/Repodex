@@ -45,6 +45,22 @@ Version-by-version implementation history, **newest first**. For the current don
   duplicates, `indexing` suppression, indices without stats), `tests/stats.test.ts`
   (note wording, duplicate note, threshold override).
 
+### Fixed — `check_docs` works without an anchor on a single-project install
+
+- **Doccheck anchor rule** (`src/core/index-manager.ts`, `src/server/mcp.ts`,
+  `src/server/control-api.ts`, `src/stdio-bridge.ts`). The tool schema already
+  documented `project`/`path` as optional ("or the single indexed project"), but
+  every layer rejected an anchorless call with *"Provide a 'project' name and/or
+  a 'path'"*. The shared resolution — explicit project → path anchor → the
+  single indexed project (0 or 2+ projects = the pick-one error naming them) —
+  already existed; it is now exposed as `resolveDocCheckProject` (the HTTP
+  route needs the resolved name) and the four guards are gone. `GET
+  /doccheck/last` without a stored report now names the **resolved** project
+  instead of printing `'undefined'`.
+- Tests: `tests/doccheck-scope.test.ts` (0 / 1 / 2+ projects, path anchor,
+  anchorless stored read), `tests/doccheck-watch.test.ts`, and the integration
+  battery (anchorless `POST /doccheck` + the named 404).
+
 ### Fixed — an unreachable embedding backend fails the job instead of every file
 
 - **Embedding fail-fast** (`src/services/embed.ts`, `src/services/indexer.ts`,
