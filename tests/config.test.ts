@@ -66,6 +66,27 @@ describe("config — defaults and environment variable overrides", () => {
     expect(CONFIG.VECTOR_INDEX_THRESHOLD).toBe(99999);
   });
 
+  test("auto-maintenance defaults and overrides", async () => {
+    const def = await runConfig({});
+    expect(def.CONFIG.AUTO_MAINTENANCE).toBe(true);
+    expect(def.CONFIG.AUTO_MAINTENANCE_UNINDEXED_RATIO).toBe(0.05);
+    expect(def.CONFIG.AUTO_MAINTENANCE_MIN_SMALL_FRAGMENTS).toBe(20);
+    const off = await runConfig({
+      AUTO_MAINTENANCE: "false",
+      AUTO_COMPACT_UNINDEXED_RATIO: "0.2",
+      AUTO_COMPACT_MIN_SMALL_FRAGMENTS: "5",
+    });
+    expect(off.CONFIG.AUTO_MAINTENANCE).toBe(false);
+    expect(off.CONFIG.AUTO_MAINTENANCE_UNINDEXED_RATIO).toBe(0.2);
+    expect(off.CONFIG.AUTO_MAINTENANCE_MIN_SMALL_FRAGMENTS).toBe(5);
+    const clamped = await runConfig({
+      AUTO_COMPACT_UNINDEXED_RATIO: "2",
+      AUTO_COMPACT_MIN_SMALL_FRAGMENTS: "-1",
+    });
+    expect(clamped.CONFIG.AUTO_MAINTENANCE_UNINDEXED_RATIO).toBe(1);
+    expect(clamped.CONFIG.AUTO_MAINTENANCE_MIN_SMALL_FRAGMENTS).toBe(0);
+  });
+
   test("boot VACUUM thresholds default and honour META_VACUUM_* overrides", async () => {
     const def = await runConfig({});
     expect(def.CONFIG.META_VACUUM_FREE_RATIO).toBe(0.3);
@@ -102,6 +123,9 @@ describe("config — defaults and environment variable overrides", () => {
     expect(DEFAULT_CONFIG_YAML).toContain("readyTimeoutMs: 20000");
     expect(DEFAULT_CONFIG_YAML).toContain("vacuumFreeRatio: 0.3");
     expect(DEFAULT_CONFIG_YAML).toContain("vacuumMinBytes: 52428800");
+    expect(DEFAULT_CONFIG_YAML).toContain("auto: true");
+    expect(DEFAULT_CONFIG_YAML).toContain("unindexedRatio: 0.05");
+    expect(DEFAULT_CONFIG_YAML).toContain("minSmallFragments: 20");
   });
 
   test("CIDX_HOME expands '~' and derived paths are located under home", async () => {

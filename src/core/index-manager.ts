@@ -48,6 +48,7 @@ import {
   tableSymbolsWithContent,
   tableColumns,
   ensureFtsIndex,
+  indexCoverage,
   buildWhere,
   type CompactResult,
   type SearchResult,
@@ -65,6 +66,7 @@ import { expandQuery, mergeVariantRankings } from "../services/expand";
 import { selectMMR } from "../utils/mmr";
 import { applyPathBoost, type PathBoostConfig } from "../utils/boost";
 import { applyCharBudget, applyPackBudget } from "../utils/budget";
+import { shouldAutoMaintain } from "./maintenance";
 import { fileOutline, type OutlineEntry } from "../chunking/chunker";
 import { gitHeadPath, isGitRepo, searchGitLog, blameRange, churnCounts } from "../services/git";
 // C4 — blame/ownership: the pure porcelain parser (git lives in services/git).
@@ -3796,6 +3798,16 @@ export class IndexManager {
           t.indexName,
           resolveFraming(pcfg?.framing ?? CONFIG.EMBEDDING_FRAMING, usedModel),
         );
+        // Coverage maintenance runs BEFORE the status flips to ready: the
+        // watcher keeps deferring while `isIndexing` is true, so optimize()
+        // cannot race a per-file write. `compactTable` (not `compactIndex`)
+        // bypasses the user-facing busy guard while keeping the per-table
+        // write lock; `indexDirectory` has already returned, so no lock is
+        // held here (calling compactTable inside an existing lock would
+        // deadlock). Failure never fails the index job.
+        if (!ctx.isCancelled() && !ctx.signal.aborted) {
+          await this.maybeAutoMaintain(t.tableName, result.files, ctx);
+        }
         this.registry.setIndexStatus(t.indexName, "ready");
         // Explain an empty table where the emptiness was decided (the
         // filterStats describe which collector ate the candidates) and any
@@ -3831,6 +3843,47 @@ export class IndexManager {
         this.registry.setIndexStatus(t.indexName, "error", msg);
       }
       throw err;
+    }
+  }
+
+  /**
+   * Post-job index maintenance (2.10.0): LanceDB adds new rows to an existing
+   * FTS/ANN index only through native `optimize()`, so an incrementally-synced
+   * table otherwise keeps its indexes on the rows present when they were built.
+   * Called from `runIndexJob` after `indexDirectory` returns (no table lock is
+   * held) and before the status becomes `ready` (the watcher is still deferred).
+   *
+   * Thresholded and idempotent: a fully covered, compact table is a no-op.
+   * `cleanupOlderThan` is deliberately NOT passed — the native 7-day
+   * version-retention window stays in force (auto-pruning every sync would be
+   * aggressive and unnecessary).
+   */
+  private async maybeAutoMaintain(
+    table: string,
+    processedFiles: number,
+    ctx: { updateProgress: (p: number, t?: number, m?: string) => void },
+  ): Promise<void> {
+    if (!CONFIG.AUTO_MAINTENANCE) return;
+    try {
+      const cov = await indexCoverage(table);
+      const thresholds = {
+        enabled: CONFIG.AUTO_MAINTENANCE,
+        unindexedRatio: CONFIG.AUTO_MAINTENANCE_UNINDEXED_RATIO,
+        minSmallFragments: CONFIG.AUTO_MAINTENANCE_MIN_SMALL_FRAGMENTS,
+      };
+      if (!shouldAutoMaintain(cov, thresholds) || cov === null) return;
+      // Progress: keep the job's total, overwrite the message. `total` stays
+      // the file count from indexDirectory; processedFiles is its final value.
+      ctx.updateProgress(processedFiles, undefined, "optimizing indexes");
+      const res = await compactTable(table);
+      console.error(
+        `[maint] '${table}' optimized: coverage gap ${(cov.gapRatio * 100).toFixed(1)}%,` +
+          ` small fragments ${cov.smallFragments ?? 0} → removed ${res.compaction.fragmentsRemoved} fragments,` +
+          ` pruned ${res.prune.oldVersionsRemoved} old version(s)`,
+      );
+    } catch (err) {
+      // Optimization is a maintenance pass over already-valid data.
+      console.error(`[maint] '${table}' auto-maintenance skipped:`, err);
     }
   }
 

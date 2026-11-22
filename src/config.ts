@@ -254,6 +254,22 @@ export interface IndexerConfig {
   };
   maintenance: {
     /**
+     * Automatic index maintenance after a successful index/sync job. LanceDB
+     * only adds new rows to an existing index via `optimize()`; without this a
+     * table that is incrementally synced keeps its FTS/ANN indexes on the rows
+     * present at build time (a measured install had a project's BM25 index at
+     * 0/41,574 rows while hybrid search silently ran vector-only). When on,
+     * the job runs ONE native `optimize()` (compaction + prune + index
+     * maintenance) if any existing index is uncovered above
+     * `unindexedRatio`, or the table has at least `minSmallFragments` small
+     * fragments.
+     */
+    auto: boolean;
+    /** Unindexed-row share (0..1) that triggers the post-job `optimize()`. */
+    unindexedRatio: number;
+    /** Small-fragment count that triggers the post-job `optimize()`. */
+    minSmallFragments: number;
+    /**
      * Boot-time `VACUUM` of `meta.db` when free pages dominate the file. A
      * long-lived registry accumulates free pages from job/file-cache churn (a
      * measured install sat at 957 MB with ~741 MB free), and SQLite never
@@ -345,7 +361,13 @@ const DEFAULTS: IndexerConfig = {
   },
   doccheck: { maxChars: 12000, undocumentedLimit: 25, judgeModel: "", judgeUrl: "", watch: false },
   daemon: { idleTimeoutMinutes: 0, watchdogMinutes: 5 },
-  maintenance: { vacuumFreeRatio: 0.3, vacuumMinBytes: 50 * 1024 * 1024 },
+  maintenance: {
+    auto: true,
+    unindexedRatio: 0.05,
+    minSmallFragments: 20,
+    vacuumFreeRatio: 0.3,
+    vacuumMinBytes: 50 * 1024 * 1024,
+  },
 };
 
 /** Editable default YAML template (written if the file does not exist). */
@@ -435,6 +457,9 @@ daemon:
   watchdogMinutes: ${DEFAULTS.daemon.watchdogMinutes}           # if the event loop stops beating for this many minutes, an in-process watchdog thread exits the process so the supervisor restarts it; 0 = off. The shipped systemd unit ALSO sets WatchdogSec=300 (external, survives a runtime-wide deadlock) — keep the two aligned
 
 maintenance:
+  auto: ${DEFAULTS.maintenance.auto}                    # after each successful index/sync, run ONE native optimize() when an existing FTS/ANN index has uncovered rows or the table is fragmenting
+  unindexedRatio: ${DEFAULTS.maintenance.unindexedRatio}          # uncovered-row share (0..1) that triggers the post-job optimize
+  minSmallFragments: ${DEFAULTS.maintenance.minSmallFragments}       # small-fragment count that triggers the post-job optimize
   vacuumFreeRatio: ${DEFAULTS.maintenance.vacuumFreeRatio}          # boot VACUUM of meta.db when this share of its pages is free (0 = off)
   vacuumMinBytes: ${DEFAULTS.maintenance.vacuumMinBytes}       # only consider boot VACUUM for a meta.db at least this large (bytes)
 `;
@@ -714,6 +739,26 @@ export const RESOLVED: IndexerConfig = {
       DEFAULTS.daemon.watchdogMinutes,
   },
   maintenance: {
+    auto:
+      envBool(process.env.AUTO_MAINTENANCE) ??
+      (typeof y.maintenance?.auto === "boolean" ? y.maintenance.auto : DEFAULTS.maintenance.auto),
+    // Clamp the trigger to the [0,1] ratio domain; 0 still triggers on any
+    // uncovered row (the strictest setting), so use `auto: false` to opt out.
+    unindexedRatio: Math.min(
+      1,
+      Math.max(
+        0,
+        num(process.env.AUTO_COMPACT_UNINDEXED_RATIO) ??
+          y.maintenance?.unindexedRatio ??
+          DEFAULTS.maintenance.unindexedRatio,
+      ),
+    ),
+    minSmallFragments: Math.max(
+      0,
+      num(process.env.AUTO_COMPACT_MIN_SMALL_FRAGMENTS) ??
+        y.maintenance?.minSmallFragments ??
+        DEFAULTS.maintenance.minSmallFragments,
+    ),
     // 0 (or negative/NaN) disables the boot VACUUM; > 1 can never trigger.
     vacuumFreeRatio: Math.max(
       0,
@@ -806,6 +851,9 @@ export const CONFIG = {
   IDLE_TIMEOUT_MINUTES: RESOLVED.daemon.idleTimeoutMinutes,
   WATCHDOG_MINUTES: RESOLVED.daemon.watchdogMinutes,
 
+  AUTO_MAINTENANCE: RESOLVED.maintenance.auto,
+  AUTO_MAINTENANCE_UNINDEXED_RATIO: RESOLVED.maintenance.unindexedRatio,
+  AUTO_MAINTENANCE_MIN_SMALL_FRAGMENTS: RESOLVED.maintenance.minSmallFragments,
   META_VACUUM_FREE_RATIO: RESOLVED.maintenance.vacuumFreeRatio,
   META_VACUUM_MIN_BYTES: RESOLVED.maintenance.vacuumMinBytes,
 } as const;

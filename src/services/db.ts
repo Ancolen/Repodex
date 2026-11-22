@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import * as lancedb from "@lancedb/lancedb";
+import type { Table } from "@lancedb/lancedb";
 import { Field, FixedSizeList, Float32, Float64, Schema, Utf8 } from "apache-arrow";
 import type { DataType } from "apache-arrow";
 import { CONFIG } from "../config";
@@ -791,6 +792,141 @@ export async function tableStats(table: string): Promise<TableStatsReport | null
   return report;
 }
 
+/** One column's index coverage (metadata only — no row scan). */
+export interface IndexCoverageColumn {
+  column: string;
+  indexedRows: number;
+  unindexedRows: number;
+  /** Number of native indices covering this column ( >1 = duplicate index). */
+  indexCount: number;
+  indexNames: string[];
+}
+
+/** Whole-table coverage snapshot used by auto-maintenance and doctor/stats. */
+export interface IndexCoverageReport {
+  rows: number;
+  /** Small-fragment count (compaction signal); null when table stats were unavailable. */
+  smallFragments: number | null;
+  columns: IndexCoverageColumn[];
+  /** Worst uncovered share across existing indices (0..1); 0 = fully covered. */
+  gapRatio: number;
+  /** Columns whose `indexStats` was unavailable — never used to trigger maintenance. */
+  unknownColumns: string[];
+  /** Columns carrying more than one native index (hygiene warning, not a coverage trigger). */
+  duplicates: IndexCoverageColumn[];
+}
+
+/**
+ * Coverage snapshot for auto-maintenance and doctor/stats warnings. LanceDB
+ * appends new rows to an existing index only through `optimize()`; without a
+ * periodic optimize an incrementally-synced table keeps its FTS/ANN indexes on
+ * the rows present when they were built (a measured install: `llm-lab` BM25 at
+ * 0/41,574 rows while "hybrid" search ran vector-only).
+ *
+ * `gapRatio` is the worst uncovered share across the existing indices, with
+ * duplicate indices on one column folded to their BEST coverage (never summed —
+ * summing would double-count rows and understate the gap). Unknown
+ * `indexStats` never contributes a ratio.
+ */
+export async function indexCoverage(table: string): Promise<IndexCoverageReport | null> {
+  const conn = getDB();
+  const names = await conn.tableNames();
+  if (!names.includes(table)) return null;
+  const t = await conn.openTable(table);
+
+  const rows = await t.countRows();
+  const report: IndexCoverageReport = {
+    rows,
+    smallFragments: null,
+    columns: [],
+    gapRatio: 0,
+    unknownColumns: [],
+    duplicates: [],
+  };
+
+  try {
+    const s = await t.stats();
+    report.smallFragments = s.fragmentStats.numSmallFragments;
+  } catch {
+    // Coverage decisions still work without the fragment count.
+  }
+
+  let indices: { name: string; columns: string[] }[];
+  try {
+    indices = await t.listIndices();
+  } catch {
+    return report;
+  }
+
+  const byColumn = new Map<string, { names: string[]; indexed: number; unknown: boolean }>();
+  for (const ix of indices) {
+    const key = [...ix.columns].sort().join("+");
+    let entry = byColumn.get(key);
+    if (!entry) {
+      entry = { names: [], indexed: 0, unknown: false };
+      byColumn.set(key, entry);
+    }
+    entry.names.push(ix.name);
+    try {
+      const st = await t.indexStats(ix.name);
+      if (st && typeof st.numIndexedRows === "number") {
+        // Duplicates: best coverage wins, never a sum.
+        entry.indexed = Math.max(entry.indexed, st.numIndexedRows);
+      } else {
+        entry.unknown = true;
+      }
+    } catch {
+      entry.unknown = true;
+    }
+  }
+
+  for (const [column, entry] of byColumn) {
+    if (entry.unknown) {
+      report.unknownColumns.push(column);
+      continue;
+    }
+    const unindexedRows = Math.max(0, rows - entry.indexed);
+    const col: IndexCoverageColumn = {
+      column,
+      indexedRows: entry.indexed,
+      unindexedRows,
+      indexCount: entry.names.length,
+      indexNames: [...entry.names],
+    };
+    report.columns.push(col);
+    if (entry.names.length > 1) report.duplicates.push(col);
+    if (rows > 0) report.gapRatio = Math.max(report.gapRatio, unindexedRows / rows);
+  }
+  return report;
+}
+
+/**
+ * True when EVERY existing index on `column` reports zero indexed rows while
+ * the table has data — the pathological "index built against an emptied table"
+ * case that `optimize()` handles poorly but `createIndex(..., { replace: true })`
+ * repairs deterministically. Unknown stats / a healthy duplicate → false.
+ */
+async function indexColumnIsDead(
+  t: Table,
+  indices: { name: string; columns: string[] }[],
+  column: string,
+  rows: number,
+): Promise<boolean> {
+  if (rows === 0) return false;
+  const matches = indices.filter((ix) => ix.columns.includes(column));
+  if (matches.length === 0) return false;
+  for (const ix of matches) {
+    try {
+      const st = await t.indexStats(ix.name);
+      if (!st || typeof st.numIndexedRows !== "number") return false;
+      if (st.numIndexedRows > 0) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
 /** Native `optimize` result (structural copy of LanceDB's `OptimizeStats` —
  * the public API must not leak vendor types). */
 export interface CompactResult {
@@ -877,7 +1013,18 @@ export async function ensureVectorIndex(table: string, minRows: number, column =
 
   const existing = await t.listIndices();
   const hasVectorIndex = existing.some((ix) => ix.columns.includes(column));
-  if (hasVectorIndex) return false;
+  if (hasVectorIndex) {
+    // A completely dead index (0 indexed rows while the table has data — an
+    // index built before a full table rewrite) is rebuilt deterministically;
+    // PARTIAL coverage is the job's auto-maintenance path (`optimize()` adds
+    // new rows to an existing index).
+    if (await indexColumnIsDead(t, existing, column, rows)) {
+      await t.createIndex(column, { replace: true });
+      console.error(`[db] rebuilt dead vector index on '${column}' for '${table}'.`);
+      return true;
+    }
+    return false;
+  }
 
   await t.createIndex(column);
   return true;
@@ -912,59 +1059,53 @@ export async function ensureFtsIndex(table: string): Promise<number> {
   if (!names.includes(table)) return 0;
   const t = await conn.openTable(table);
 
-  if ((await t.countRows()) === 0) return 0;
+  const rows = await t.countRows();
+  if (rows === 0) return 0;
 
   const existing = await t.listIndices();
   const hasFtsOn = (col: string) => hasFtsOnColumn(existing, col);
   const cols = await tableColumns(table);
 
   let built = 0;
-  if (!hasFtsOn("content")) {
-    await t.createIndex("content", { config: lancedb.Index.fts() });
-    built++;
-  }
+  /** Build the index if missing; rebuild it with `replace` if it is completely dead. */
+  const ensureLeg = async (col: string, config: lancedb.Index, optional: boolean): Promise<void> => {
+    const missing = !hasFtsOn(col);
+    const dead = missing ? false : await indexColumnIsDead(t, existing, col, rows);
+    if (!missing && !dead) return;
+    try {
+      await t.createIndex(col, dead ? { config, replace: true } : { config });
+      built++;
+      if (dead) console.error(`[db] rebuilt dead FTS index on '${col}' for '${table}'.`);
+    } catch (err) {
+      if (!optional) throw err;
+      // Never fail the whole job over an optional leg.
+      console.error(`[db] failed to build FTS index on '${col}' for '${table}':`, err);
+    }
+  };
+
+  await ensureLeg("content", lancedb.Index.fts(), false);
   // The doc column duplicates docstring text only; BM25 over it gives the text
   // leg of the docstring search. Legacy tables without the column are skipped.
-  if (cols.has("doc") && !hasFtsOn("doc")) {
-    try {
-      await t.createIndex("doc", { config: lancedb.Index.fts() });
-      built++;
-    } catch (err) {
-      // Never fail the whole job over the optional doc leg.
-      console.error(`[db] failed to build FTS index on 'doc' for '${table}':`, err);
-    }
-  }
+  if (cols.has("doc")) await ensureLeg("doc", lancedb.Index.fts(), true);
   // The identifier-terms column holds compound identifiers split into subparts;
   // BM25 over it is the natural-language → identifier leg (no vectors involved).
   // Legacy tables without the column are skipped.
-  if (cols.has("id_terms") && !hasFtsOn("id_terms")) {
-    try {
-      await t.createIndex("id_terms", { config: lancedb.Index.fts() });
-      built++;
-    } catch (err) {
-      // Never fail the whole job over the optional identifier leg.
-      console.error(`[db] failed to build FTS index on 'id_terms' for '${table}':`, err);
-    }
-  }
+  if (cols.has("id_terms")) await ensureLeg("id_terms", lancedb.Index.fts(), true);
   // The symbol leg (S2): `symbolName` indexed as character trigrams — the
   // fallback tier of `find_symbol`, a pure BM25 match with no embedding
   // model. Tables from before S2 simply have no such index and are skipped
   // here; their NEXT index job (not only a full reindex) builds it.
-  if (cols.has("symbolName") && !hasFtsOn("symbolName")) {
-    try {
-      await t.createIndex("symbolName", {
-        config: lancedb.Index.fts({
-          baseTokenizer: "ngram",
-          ngramMinLength: SYMBOL_NGRAM_SIZE,
-          ngramMaxLength: SYMBOL_NGRAM_SIZE,
-          lowercase: true,
-        }),
-      });
-      built++;
-    } catch (err) {
-      // Never fail the whole job over the optional fuzzy leg.
-      console.error(`[db] failed to build FTS index on 'symbolName' for '${table}':`, err);
-    }
+  if (cols.has("symbolName")) {
+    await ensureLeg(
+      "symbolName",
+      lancedb.Index.fts({
+        baseTokenizer: "ngram",
+        ngramMinLength: SYMBOL_NGRAM_SIZE,
+        ngramMaxLength: SYMBOL_NGRAM_SIZE,
+        lowercase: true,
+      }),
+      true,
+    );
   }
   return built;
 }

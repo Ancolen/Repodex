@@ -24,6 +24,31 @@ Version-by-version implementation history, **newest first**. For the current don
 - Tests: `tests/registry.test.ts` (free-page reclaim, opt-out, tiny-DB floor),
   `tests/config.test.ts` (defaults + `META_VACUUM_*` overrides).
 
+### Fixed — ANN/FTS indexes stay in step with incremental writes
+
+- **Post-job auto-maintenance + dead-index repair** (`src/services/db.ts`,
+  `src/core/index-manager.ts`, `src/core/maintenance.ts`, `src/config.ts`).
+  LanceDB adds new rows to an existing index only through native `optimize()`;
+  incremental syncs/watcher writes left the FTS/ANN indexes on the rows present
+  when they were built (measured: `llm-lab` content BM25 at **0/41,574 rows**,
+  `llm-lab-1` 375/9,258, `hackerai` 0/160, `Repodex` 2,089/2,804, `unsloth`
+  66%, `horizon` 81% — "hybrid" silently ran vector-only). After every
+  successful index/sync, `runIndexJob` now calls ONE native `optimize()` when
+  any existing index has uncovered rows above `maintenance.unindexedRatio`
+  (default 5%) or the table has at least `maintenance.minSmallFragments` small
+  fragments (default 20). It runs after `indexDirectory` returns (no lock held)
+  and before the project flips to `ready` (the watcher stays deferred); it
+  calls `compactTable` directly, never `compactIndex` (whose busy guard would
+  refuse its own job), and never fails the index job. An index that reports
+  **zero** indexed rows over a non-empty table is rebuilt deterministically by
+  `ensureFtsIndex`/`ensureVectorIndex` via `createIndex(..., { replace: true })`.
+  Config/env: `maintenance.auto` / `AUTO_MAINTENANCE`,
+  `AUTO_COMPACT_UNINDEXED_RATIO`, `AUTO_COMPACT_MIN_SMALL_FRAGMENTS`.
+- Tests: `tests/db-coverage.test.ts` (gap appears behind the index → optimize
+  closes it; 0-row index rebuilt), `tests/index-auto-maintain.test.ts` (a
+  no-op sync repairs a real table), `tests/maintenance.test.ts` (pure
+  thresholds), `tests/config.test.ts`.
+
 ---
 
 ## 2.9.5 (2026-11-03)
