@@ -23,6 +23,13 @@ export interface WatchOptions {
    * watcher's table writes would otherwise leave stale.
    */
   onFileSettled?: (() => void) | undefined;
+  /**
+   * Resolved roots of OTHER registered projects nested inside this one
+   * (2.10.0). Read at each `ignored` call, so a project added/removed after the
+   * watcher started is honored. Their code is indexed by their own project —
+   * watching it here would duplicate rows (and fds).
+   */
+  excludeRoots?: (() => readonly string[]) | undefined;
 }
 
 type PendingAction = "index" | "remove";
@@ -65,6 +72,14 @@ export function startWatcher(target: IndexTarget, opts: WatchOptions = {}): FSWa
   // anyway, and this is the only place that can keep Bun's `fs.watch` away from
   // an un-openable child (see `dirHasUnwatchableChild`).
   const unwatchableDirCache = new Map<string, boolean>();
+
+  /** True for a nested registered project root and everything below it. */
+  const underExcludedRoot = (candidate: string): boolean => {
+    const roots = opts.excludeRoots?.();
+    if (!roots || roots.length === 0) return false;
+    const resolved = path.resolve(candidate);
+    return roots.some((root) => resolved === root || resolved.startsWith(root + path.sep));
+  };
 
   /**
    * True when the directory directly contains an entry Bun's `fs.watch` cannot
@@ -129,6 +144,7 @@ export function startWatcher(target: IndexTarget, opts: WatchOptions = {}): FSWa
     // already skips these (`entry.isFile()` in collectFiles), so nothing
     // indexable is lost.
     ignored: (p: string, stats?: { isFile(): boolean; isDirectory(): boolean }) =>
+      underExcludedRoot(p) ||
       isPathIgnored(ig, target.baseDir, p) ||
       (stats !== undefined && !stats.isFile() && !stats.isDirectory()) ||
       (stats?.isDirectory() === true && dirHasUnwatchableChild(p)) ||
@@ -157,6 +173,10 @@ export function startWatcher(target: IndexTarget, opts: WatchOptions = {}): FSWa
     rec ? { ...target, tableName: tableNameFor(rec) } : target;
 
   const fire = async (filePath: string, action: PendingAction): Promise<void> => {
+    // A nested root registered AFTER the watcher started still has live handles
+    // from the initial crawl; drop its events (the next sync prunes any stale
+    // rows). The startup predicate is the fd-level lever, this is correctness.
+    if (underExcludedRoot(filePath)) return;
     try {
       // Per-project config is read fresh per event so watcher writes follow the
       // same rules as the next full index (`.cidx.json` `languages` allowlist +

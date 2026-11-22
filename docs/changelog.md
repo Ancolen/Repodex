@@ -45,6 +45,26 @@ Version-by-version implementation history, **newest first**. For the current don
   duplicates, `indexing` suppression, indices without stats), `tests/stats.test.ts`
   (note wording, duplicate note, threshold override).
 
+### Added — umbrella indexes exclude nested registered projects
+
+- **Nested-root exclusion** (`src/utils/pathtools.ts`, `src/services/indexer.ts`,
+  `src/services/watcher.ts`, `src/core/index-manager.ts`). An umbrella project
+  (e.g. `~/code`) used to index the code of every registered child project
+  (`~/code/app`) too, duplicating rows and embed work. `nestedRegisteredRoots`
+  finds the strictly-inside registered roots; `collectFiles` skips the whole
+  subtree (`IndexOptions.excludeRoots`, counted as `filterStats.nestedExcluded`)
+  and the watcher's chokidar predicate rejects it (a child registered after the
+  watcher started still has handles — `fire` drops its events). The first sync
+  prunes stale duplicate rows/cache entries and reports them as
+  `IndexResult.nestedRemoved` — deliberately NOT `deleted`, so the shrink
+  warning does not misfire. Roots are cached per project (`nestedRootsFor`,
+  keyed on the other-project set) because the watcher predicate runs per path.
+  The overlap note now says nested scopes are automatically excluded.
+- Tests: `tests/pathtools.test.ts`, `tests/indexer.test.ts` (`collectFiles`),
+  `tests/watcher-ignore.test.ts` (no handles under a nested root),
+  `tests/nested-index.test.ts` (an umbrella sync prunes the child; the direct
+  `nestedRemoved` counter).
+
 ### Fixed — one path can no longer become two projects
 
 - **Duplicate-path reuse** (`src/core/registry.ts`, `src/core/index-manager.ts`,

@@ -117,6 +117,30 @@ describe("startWatcher — ignore rules are applied before chokidar opens handle
     20000,
   );
 
+  test("a nested registered root gets no watch handles; its sibling does", async () => {
+    write("umbrella/top.ts");
+    write("umbrella/child/inner.ts");
+    const target = {
+      indexName: "nested-watch",
+      tableName: "idx_nested_watch",
+      baseDir: join(root, "umbrella"),
+    };
+    const w = startWatcher(target, {
+      debounceMs: 10,
+      excludeRoots: () => [join(root, "umbrella/child")],
+    });
+    try {
+      await new Promise<void>((res) => w.once("ready", () => res()));
+      const watched = watchedPaths(w);
+      expect(watched.has(join(root, "umbrella/top.ts"))).toBe(true);
+      // The nested project has its own watcher; this one must not hold handles
+      // for it (duplicate rows + duplicate fds).
+      expect([...watched].some((p) => p.startsWith(join(root, "umbrella/child")))).toBe(false);
+    } finally {
+      await w.close();
+    }
+  }, 20000);
+
   test("buildIgnoreSync matches the async buildIgnore for the same project", async () => {
     const pcfg = readProjectConfig(root);
     const sync = buildIgnoreSync(root, pcfg?.ignore);

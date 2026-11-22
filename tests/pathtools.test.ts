@@ -4,7 +4,7 @@
  * warns before the duplicate disk work happens.
  */
 import { test, expect, describe } from "bun:test";
-import { pathOverlapNote, isWithinDir } from "../src/utils/pathtools";
+import { nestedRegisteredRoots, pathOverlapNote, isWithinDir } from "../src/utils/pathtools";
 
 describe("isWithinDir", () => {
   test("parent/child/identity/outside relations", () => {
@@ -13,6 +13,35 @@ describe("isWithinDir", () => {
     expect(isWithinDir("/a/b", "/a/bc")).toBe(false); // prefix-string trap
     expect(isWithinDir("/a/b", "/a")).toBe(false);
     expect(isWithinDir("/a/b", "/c/d")).toBe(false);
+  });
+});
+
+describe("nestedRegisteredRoots — an umbrella index never scans a child project", () => {
+  const records = [
+    { name: "parent", path: "/work/mono" },
+    { name: "child", path: "/work/mono/packages/app" },
+    { name: "grandchild", path: "/work/mono/packages/app/src/deep" },
+    { name: "sibling", path: "/work/other" },
+  ];
+
+  test("strictly-inside roots are returned, the parent itself and outside paths are not", () => {
+    expect(nestedRegisteredRoots("/work/mono", records).sort()).toEqual([
+      "/work/mono/packages/app",
+      "/work/mono/packages/app/src/deep",
+    ]);
+    expect(nestedRegisteredRoots("/work/mono/packages/app", records)).toEqual([
+      "/work/mono/packages/app/src/deep",
+    ]);
+    expect(nestedRegisteredRoots("/work/other", records)).toEqual([]);
+    expect(nestedRegisteredRoots("/work/mono", [records[0]!])).toEqual([]);
+  });
+
+  test("duplicate registrations of one path are deduped", () => {
+    const dup = [
+      { name: "a", path: "/work/mono/child" },
+      { name: "b", path: "/work/mono/child/" },
+    ];
+    expect(nestedRegisteredRoots("/work/mono", dup)).toEqual(["/work/mono/child"]);
   });
 });
 

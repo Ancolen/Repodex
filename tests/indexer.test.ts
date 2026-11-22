@@ -189,4 +189,20 @@ describe("collectFiles — skip telemetry (CollectStats)", () => {
     expect(text).not.toContain("oversized");
     expect(files.length).toBeGreaterThan(0);
   });
+
+  test("nested registered roots are skipped as a subtree, not per file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cidx-collect-nested-"));
+    try {
+      mkdirSync(join(dir, "nested"), { recursive: true });
+      writeFileSync(join(dir, "top.ts"), "export const top = 1;");
+      writeFileSync(join(dir, "nested", "child.ts"), "export const child = 1;");
+      const ig = await buildIgnore(dir);
+      const { files, stats } = await collectFiles(dir, ig, null, null, undefined, [join(dir, "nested")]);
+      expect(files.map((f) => f.slice(dir.length + 1))).toEqual(["top.ts"]);
+      expect(stats.nestedExcluded).toBe(1);
+      expect(describeFilterStats(stats)).toContain("nested registered project root");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

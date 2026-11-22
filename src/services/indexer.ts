@@ -52,6 +52,12 @@ export interface IndexOptions {
    * and never waits. Injected so unit tests against a dead backend stay fast.
    */
   embedReadyTimeoutMs?: number | undefined;
+  /**
+   * Resolved roots of OTHER registered projects nested inside this one — the
+   * walk skips them and the deleted-file cleanup prunes their stale rows
+   * (2.10.0). `nestedRemoved` reports how many rows were pruned that way.
+   */
+  excludeRoots?: readonly string[] | undefined;
 }
 
 /**
@@ -71,6 +77,8 @@ export interface CollectStats {
   langFiltered: number;
   /** Files rejected by the `maxFileSizeBytes` guard. */
   oversized: number;
+  /** Subtree roots skipped because they are other registered projects (2.10.0). */
+  nestedExcluded: number;
 }
 
 export interface IndexResult {
@@ -97,6 +105,10 @@ export interface IndexResult {
    * so a zero-processed run can explain itself (registry note + status).
    */
   filterStats: CollectStats;
+  /** Files pruned from the table/cache because they live under a nested registered root. */
+  nestedRemoved: number;
+  /** The resolved nested registered roots this run excluded. */
+  excludedRoots: string[];
 }
 
 /** Single-file indexing result (chunk count + observed embedding dimension). */
@@ -193,9 +205,23 @@ export async function collectFiles(
   allowSet?: Set<string> | null,
   langSet?: Set<string> | null,
   maxFileSizeBytes?: number | undefined,
+  /**
+   * Resolved directory roots this walk must NOT descend into (2.10.0) — other
+   * registered project roots nested inside this one. Structural exclusion, not
+   * an ignore pattern: their own index owns that code.
+   */
+  excludeRoots?: readonly string[] | undefined,
 ): Promise<{ files: string[]; stats: CollectStats }> {
   const out: string[] = [];
-  const stats: CollectStats = { ignored: 0, disallowedExt: 0, untracked: 0, langFiltered: 0, oversized: 0 };
+  const stats: CollectStats = {
+    ignored: 0,
+    disallowedExt: 0,
+    untracked: 0,
+    langFiltered: 0,
+    oversized: 0,
+    nestedExcluded: 0,
+  };
+  const excluded = new Set((excludeRoots ?? []).map((r) => path.resolve(r)));
   async function walk(dir: string): Promise<void> {
     let entries;
     try {
@@ -205,6 +231,10 @@ export async function collectFiles(
     }
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
+      if (excluded.has(path.resolve(full))) {
+        stats.nestedExcluded++;
+        continue;
+      }
       if (isPathIgnored(ig, baseDir, full)) {
         stats.ignored++;
         continue;
@@ -262,6 +292,7 @@ export function describeFilterStats(stats: CollectStats): string {
   if (stats.untracked > 0) parts.push(`${stats.untracked} not git-tracked`);
   if (stats.langFiltered > 0) parts.push(`${stats.langFiltered} filtered by the languages allowlist`);
   if (stats.oversized > 0) parts.push(`${stats.oversized} oversized`);
+  if (stats.nestedExcluded > 0) parts.push(`${stats.nestedExcluded} nested registered project root(s) excluded`);
   return parts.length > 0 ? parts.join(", ") : "no candidate files seen";
 }
 
@@ -640,7 +671,21 @@ export async function indexDirectory(
   if (CONFIG.GIT_TRACKED_ONLY && allowSet) {
     console.error(`[indexer] '${target.indexName}' git-tracked mode: ${allowSet.size} tracked files.`);
   }
-  const { files, stats } = await collectFiles(target.baseDir, ig, allowSet, langSet, maxFileBytes);
+  const excludedRoots = (opts.excludeRoots ?? []).map((r) => path.resolve(r));
+  const { files, stats } = await collectFiles(
+    target.baseDir,
+    ig,
+    allowSet,
+    langSet,
+    maxFileBytes,
+    excludedRoots,
+  );
+  if (excludedRoots.length > 0) {
+    console.error(
+      `[indexer] '${target.indexName}' excluding ${excludedRoots.length} nested registered project root(s): ` +
+        excludedRoots.join(", "),
+    );
+  }
   const total = files.length;
   if (total === 0) {
     // A zero-file collection is a legitimate outcome, but never a silent one:
@@ -693,16 +738,26 @@ export async function indexDirectory(
   }
 
   // --- Clean up deleted/ignored files (incremental sync) ---
+  // A cached path under a nested registered root is pruned too (its own project
+  // owns the code now), but counted as `nestedRemoved` — not as a deletion, so
+  // the shrink warning later does not misfire on the first umbrella sync.
+  const underExcludedRoot = (filePath: string): boolean => {
+    const resolved = path.resolve(filePath);
+    return excludedRoots.some((root) => resolved === root || resolved.startsWith(root + path.sep));
+  };
   let deleted = 0;
+  let nestedRemoved = 0;
   if (opts.registry) {
     const onDisk = new Set(files);
     const cached = opts.registry.listCachedFiles(target.indexName);
     for (const cachedPath of cached) {
       if (opts.signal?.aborted) break;
       if (!onDisk.has(cachedPath)) {
+        const nested = underExcludedRoot(cachedPath);
         try {
           await removeFileIndex(target, cachedPath, opts.registry);
-          deleted++;
+          if (nested) nestedRemoved++;
+          else deleted++;
         } catch (err) {
           console.error(`[indexer] failed to clean up '${cachedPath}':`, err);
         }
@@ -906,7 +961,17 @@ export async function indexDirectory(
     }
   }
 
-  return { files: processed, chunks, dim, deleted, skippedOversized, failed, filterStats: stats };
+  return {
+    files: processed,
+    chunks,
+    dim,
+    deleted,
+    skippedOversized,
+    failed,
+    filterStats: stats,
+    nestedRemoved,
+    excludedRoots,
+  };
 }
 
 // ------------------------------------------------- O2: zero-downtime migration

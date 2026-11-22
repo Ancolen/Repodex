@@ -17,6 +17,25 @@ export function isWithinDir(parent: string, child: string): boolean {
  * (observed live: `~server/src` indexed as its own project next to `~server`),
  * so an `index_project` start warns before the work happens.
  */
+/**
+ * The registered project roots strictly INSIDE `parent` (resolved, deduped).
+ * A parent/umbrella index must not scan them: each has its own project, table
+ * and watcher, so including it duplicates every row and doubles the embed work.
+ * `parent` itself and paths outside it are never returned.
+ */
+export function nestedRegisteredRoots(
+  parent: string,
+  records: ReadonlyArray<{ name: string; path: string }>,
+): string[] {
+  const base = path.resolve(parent);
+  const out = new Set<string>();
+  for (const rec of records) {
+    const other = path.resolve(rec.path);
+    if (other !== base && isWithinDir(base, other)) out.add(other);
+  }
+  return [...out];
+}
+
 export function pathOverlapNote(
   dir: string,
   existing: ReadonlyArray<{ name: string; path: string }>,
@@ -40,13 +59,14 @@ export function pathOverlapNote(
     if (isWithinDir(other, base)) {
       return (
         `project '${rec.name}' (${other}) already indexes a parent directory of this path — ` +
-        `its watcher covers it; consider indexing '${rec.name}' instead to avoid duplicate results`
+        `its watcher covers it; nested registered roots are automatically excluded from the ` +
+        `parent index, so registering this one avoids duplicate results`
       );
     }
     if (isWithinDir(base, other)) {
       return (
         `existing project '${rec.name}' (${other}) is inside this directory — ` +
-        `two scopes will cover the same code; consider removing the inner one once done`
+        `the new parent index automatically excludes nested registered roots (no duplicate rows)`
       );
     }
   }

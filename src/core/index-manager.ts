@@ -24,7 +24,7 @@ import {
   type MigrateJobPayload,
   type DocCheckJobPayload,
 } from "./types";
-import { pathOverlapNote } from "../utils/pathtools";
+import { nestedRegisteredRoots, pathOverlapNote } from "../utils/pathtools";
 // Per-model embedding task framing: the pure resolution + the prefix helpers.
 import { resolveFraming, frameQuery } from "./framing";
 import {
@@ -932,6 +932,8 @@ export class IndexManager {
   private hotspotFeedCache = new Map<string, HotspotFeedCacheEntry>();
   /** Monotonic per-project data revisions — the cache key for table-derived reports. */
   private dataState = new Map<string, DataState>();
+  /** Cached nested registered roots per project (watcher ignored predicate calls it per path). */
+  private nestedRootsCache = new Map<string, { key: string; roots: string[] }>();
 
   constructor(
     private registry: Registry,
@@ -1259,6 +1261,26 @@ export class IndexManager {
   }
 
   /**
+   * The registered project roots nested inside this project (2.10.0). Both the
+   * index walk and the watcher skip them, so an umbrella index never duplicates
+   * a child project's code. Cached on the registry's other-project set: the
+   * watcher's `ignored` predicate runs per path, so a fresh `listIndexes()` on
+   * every call would be a sqlite storm.
+   */
+  nestedRootsFor(indexName: string, baseDir: string): string[] {
+    const others = this.registry
+      .listIndexes()
+      .filter((r) => r.name !== indexName)
+      .map((r) => ({ name: r.name, path: r.path }));
+    const key = others.map((r) => `${r.name}\u0000${r.path}`).join("\u0001");
+    const hit = this.nestedRootsCache.get(indexName);
+    if (hit && hit.key === key) return hit.roots;
+    const roots = nestedRegisteredRoots(baseDir, others);
+    this.nestedRootsCache.set(indexName, { key, roots });
+    return roots;
+  }
+
+  /**
    * Removes a project entirely: cancel job, close watcher, drop table+record.
    * DEEP CLEANUP: Also removes embedding cache and job records (zero traces).
    */
@@ -1294,6 +1316,7 @@ export class IndexManager {
     this.docChunkCache.delete(name);
     this.hotspotFeedCache.delete(name);
     this.dataState.delete(name);
+    this.nestedRootsCache.delete(name);
     // A2: the project is fully gone — notify subscribers (the resource list changed).
     this.emitIndexEvent({ type: "index-removed", project: name });
     return true;
@@ -3822,6 +3845,7 @@ export class IndexManager {
     this.branchWatchers.clear();
     for (const timer of this.statsReconcileTimers.values()) clearTimeout(timer);
     this.statsReconcileTimers.clear();
+    this.nestedRootsCache.clear();
   }
 
   // ------------------------------------------------------------------ private
@@ -3839,6 +3863,9 @@ export class IndexManager {
       const result = await indexDirectory(t, {
         signal: ctx.signal,
         registry: this.registry,
+        // Nested registered projects own their code: the umbrella walk and its
+        // deleted-file cleanup skip them (stale duplicate rows are pruned).
+        excludeRoots: this.nestedRootsFor(t.indexName, t.baseDir),
         onProgress: (processed, total, file) => ctx.updateProgress(processed, total, file),
       });
       if (ctx.isCancelled()) {
@@ -4437,6 +4464,9 @@ export class IndexManager {
     if (this.watchers.has(target.indexName)) return;
     const w = startWatcher(target, {
       registry: this.registry,
+      // Nested registered projects are their own watchers' business (2.10.0):
+      // read per call so a project added/removed later is honored.
+      excludeRoots: () => this.nestedRootsFor(target.indexName, target.baseDir),
       // While a full index/sync is running, the watcher should not write individual files (race avoidance).
       isBusy: () => this.isIndexing(target.indexName),
       // Per-file writes bypass the job's setIndexStats. Bump the data revision
