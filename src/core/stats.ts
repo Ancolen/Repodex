@@ -173,7 +173,7 @@ function coverageNotes(native: TableStatsReport, project: string, threshold: num
         best.set(column, c);
         order.push(column);
       }
-      c.count += 1;
+      c.count += ix.count ?? 1; // tableStats groups duplicates by column set
       if (ix.indexedRows !== undefined) {
         const unindexed = ix.unindexedRows ?? Math.max(0, rows - ix.indexedRows);
         if (c.indexed === null || ix.indexedRows > c.indexed) {

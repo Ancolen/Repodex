@@ -49,6 +49,12 @@ describe("indexCoverage / auto-repair (real temp LanceDB)", () => {
     await db.insertChunks(table, rows("base", 20));
     await db.ensureFtsIndex(table);
 
+    // tableStats dedupes by column set and exposes the multiplicity.
+    const stats = await db.tableStats(table);
+    expect(stats).not.toBeNull();
+    expect(stats!.indices.length).toBeGreaterThan(0);
+    expect(stats!.indices.every((ix) => ix.count === 1)).toBe(true);
+
     const full = await db.indexCoverage(table);
     expect(full).not.toBeNull();
     expect(full!.gapRatio).toBe(0);

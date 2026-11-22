@@ -660,6 +660,31 @@ describe("formatStatsSections / formatCompactResult (pure formatters)", () => {
     expect(text).toContain("embedding cache 4 row(s) ≈ 1.0 KB");
   });
 
+  test("duplicate native indexes print as ONE line with ×count", () => {
+    const dupReport: StatsReport = {
+      ...report,
+      projects: [
+        {
+          ...report.projects[0]!,
+          indices: [
+            {
+              columns: ["vector"],
+              indexType: "IVF_PQ",
+              indexedRows: 40,
+              unindexedRows: 2,
+              count: 2,
+              indexNames: ["v1", "v2"],
+            },
+          ],
+        },
+      ],
+    };
+    const text = fmt.formatStatsSections(dupReport)[0]!;
+    // One logical row, multiplicity explicit — never the same line twice.
+    expect(text.match(/vector \[IVF_PQ\]/g)).toHaveLength(1);
+    expect(text).toContain("vector [IVF_PQ] ×2 40/42 rows +2 unindexed");
+  });
+
   test("the compact line: nothing-to-do, a merge, and a prune", () => {
     const noop = fmt.formatCompactResult({
       table: "idx_api",

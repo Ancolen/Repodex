@@ -66,6 +66,8 @@ export interface TableIndexInfo {
   indexedRows?: number | undefined;
   /** Rows the index does not cover yet (an `optimize` would add them). */
   unindexedRows?: number | undefined;
+  /** Native indexes behind this (deduped) entry — `tableStats` groups by column set. */
+  count?: number | undefined;
 }
 
 interface Finding {
@@ -323,7 +325,9 @@ export function columnCoverage(indices: TableIndexInfo[], rows: number): Map<str
         c = { count: 0, indexedRows: null, unindexedRows: null };
         map.set(column, c);
       }
-      c.count += 1;
+      // `tableStats` already grouped duplicate native indexes by column set;
+      // honor that multiplicity so the duplicate warn still fires.
+      c.count += ix.count ?? 1;
       if (typeof ix.indexedRows === "number") {
         const unindexed =
           typeof ix.unindexedRows === "number" ? ix.unindexedRows : Math.max(0, rows - ix.indexedRows);

@@ -45,6 +45,20 @@ Version-by-version implementation history, **newest first**. For the current don
   duplicates, `indexing` suppression, indices without stats), `tests/stats.test.ts`
   (note wording, duplicate note, threshold override).
 
+### Fixed — `stats` prints a duplicate index once
+
+- **Deduped index lines** (`src/services/db.ts`, `src/server/format.ts`,
+  `src/core/doctor.ts`, `src/core/stats.ts`). A table can carry several native
+  indexes over one column (a live table had two `vector` indexes; modern
+  LanceDB dedupes on create, so this is legacy data). `tableStats` now groups
+  `listIndices()` by sorted column set, keeps the BEST coverage, and exposes
+  `count`/`indexNames`; `cidx stats` renders one row — `vector [IVF_PQ] ×2 …` —
+  instead of two identical lines. Nothing is dropped: doctor's duplicate warn
+  and stats' duplicate note read `count`, so the hygiene signal survives.
+- Tests: `tests/stats.test.ts` (formatter: one line + `×2`),
+  `tests/db-coverage.test.ts` (`tableStats` exposes `count: 1` per logical
+  index), `tests/doctor.test.ts`, `tests/stats.test.ts` (duplicate warns).
+
 ### Added — local tool/token usage analytics
 
 - **`cidx stats --usage` + `GET /usage`** (`src/core/usage.ts`,

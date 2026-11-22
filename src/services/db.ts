@@ -722,6 +722,10 @@ export interface TableIndexStat {
   indexedRows?: number | undefined;
   /** Rows not yet covered (an `optimize`/reindex would add them) — absent when unknown. */
   unindexedRows?: number | undefined;
+  /** Native indexes covering this column set (>1 = duplicate); absent = 1. */
+  count?: number | undefined;
+  /** The native index names behind this row (duplicates included). */
+  indexNames?: string[] | undefined;
 }
 
 /** Native table statistics with honest unknowns: every field that could not be
@@ -774,19 +778,37 @@ export async function tableStats(table: string): Promise<TableStatsReport | null
 
   try {
     const indices = await t.listIndices();
+    // LanceDB may hold several native indexes over the SAME column (observed
+    // live: two `vector` indexes). They are one logical row: group by the
+    // column set, keep the BEST coverage, and expose the multiplicity as
+    // `count`/`indexNames` — never print the same line twice, never drop one.
+    const byColumns = new Map<string, TableIndexStat>();
     for (const ix of indices) {
-      const stat: TableIndexStat = { name: ix.name, columns: [...ix.columns], indexType: ix.indexType };
+      const columns = [...ix.columns];
+      const key = [...columns].sort().join("+");
+      let stat = byColumns.get(key);
+      if (!stat) {
+        stat = { name: ix.name, columns, indexType: ix.indexType, count: 1, indexNames: [ix.name] };
+        byColumns.set(key, stat);
+      } else {
+        stat.count = (stat.count ?? 1) + 1;
+        stat.indexNames = [...(stat.indexNames ?? []), ix.name];
+      }
       try {
         const is = await t.indexStats(ix.name);
-        if (is) {
-          if (typeof is.numIndexedRows === "number") stat.indexedRows = is.numIndexedRows;
-          if (typeof is.numUnindexedRows === "number") stat.unindexedRows = is.numUnindexedRows;
+        if (is && typeof is.numIndexedRows === "number") {
+          const indexed = is.numIndexedRows;
+          const unindexed = typeof is.numUnindexedRows === "number" ? is.numUnindexedRows : undefined;
+          if (stat.indexedRows === undefined || indexed > stat.indexedRows) {
+            stat.indexedRows = indexed;
+            if (unindexed !== undefined) stat.unindexedRows = unindexed;
+          }
         }
       } catch (err) {
         report.unknowns.push(readUnknown(`index stats for '${ix.name}'`, err));
       }
-      report.indices.push(stat);
     }
+    report.indices = [...byColumns.values()];
   } catch (err) {
     report.unknowns.push(readUnknown("index list", err));
   }

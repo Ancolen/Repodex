@@ -811,6 +811,7 @@ export function formatUsageStats(s: UsageStats): string {
 /** One index's display line: `vector [IVF_PQ]` + native coverage when known. */
 function formatIndexStat(s: TableIndexStat, rows: number): string {
   const bits = [`${s.columns.join("+")} [${s.indexType}]`];
+  if (s.count !== undefined && s.count > 1) bits.push(`×${s.count}`);
   if (s.indexedRows !== undefined) {
     bits.push(`${s.indexedRows}/${rows} rows`);
     if (s.unindexedRows !== undefined && s.unindexedRows > 0) bits.push(`+${s.unindexedRows} unindexed`);
